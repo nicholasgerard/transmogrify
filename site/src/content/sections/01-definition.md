@@ -25,9 +25,10 @@ ledger:
     tone: affirm
     detail: >-
       Claude lanes present through Remote Control with a recorded deep-link
-      receipt. Codex lanes are recorded protocol-only in 0.2.x; their dated
-      Desktop and mobile observations live in the protocol receipts, not in a
-      runtime check. The support matrix below is rendered from the repository.
+      receipt. Codex lanes carry a measured Desktop attachment receipt: the
+      app holds a live connection to the shared runtime, or the lane is
+      labelled protocol-only by explicit flag. The support matrix below is
+      rendered from the repository.
   - term: GUI automation
     tone: deny
     detail: >-

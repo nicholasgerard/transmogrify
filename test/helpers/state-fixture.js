@@ -12,7 +12,7 @@ function createStateFixture(t) {
   const stateDir = path.join(root, 'state');
   fs.mkdirSync(repoRoot);
   execFileSync('git', ['init', '--quiet', repoRoot]);
-  const env = { ...process.env, TRANSMOGRIFY_STATE_DIR: stateDir };
+  const env = { ...process.env, TRANSMOGRIFY_STATE_DIR: stateDir, TRANSMOGRIFY_DESKTOP_ATTACH: 'off' };
   ensureRegistry(repoRoot, env);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return { root, repoRoot, stateDir, env };

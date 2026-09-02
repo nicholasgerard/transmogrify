@@ -35,12 +35,13 @@ attachment is not implied by a successful app-server handshake. A Desktop
 update or restart can leave an independently managed `0.151.x` runtime alive
 while the app starts a distinct bundled runtime. Tasks on the surviving runtime
 can remain controllable there yet appear in Desktop as controlled from another
-app, without live activity. Every new Codex lane in 0.2.x is therefore
-recorded protocol-only and requires `--allow-protocol-only` at spawn. Until
-the official Desktop-owned SSH path and the CLI-exposed daemon/proxy surface
-prove a safe attachment path, pause new cross-host Codex dispatches after a
-Desktop lifecycle change and run a disposable exact-owned visibility check
-against the selected runtime before claiming native control.
+app, without live activity. Since 0.2.1 that attachment is measured per
+dispatch: `desktop-attach.js` reports whether Desktop holds a live connection
+to the selected runtime and can launch or, with owner authorization, relaunch
+the app attached; a lane spawned with that receipt is recorded
+`desktopAttached`, and a lane without it is recorded protocol-only only with
+`--allow-protocol-only`. After a Desktop lifecycle change, run
+`desktop-attach.js ensure` before new cross-host Codex dispatches.
 
 Managed dispatch now has two provider-neutral contracts. Execution profiles
 resolve a task intent or explicit override to an immutable model, effort, and
@@ -93,13 +94,19 @@ provider or measured local interfaces.
 - Close and rerun the Codex pre-restart-lane reattachment case after a Desktop
   restart; capture the exact failing provider boundary if the current app tuple
   still rejects it.
-- Verify the supported Desktop-owned SSH runtime path. Determine whether
-  Desktop's SSH launcher uses `app-server daemon` and `app-server proxy`,
-  identify its CLI-exposed control socket and lifecycle owner, then prove that a
-  second Transmogrify client can initialize, create one disposable task, stream
-  live in Desktop and mobile, steer, stop, and archive without restarting or
-  reconfiguring the Desktop-owned daemon. A healthy independent WebSocket
-  runtime is insufficient, and private app sockets are not control surfaces.
+- Evaluate the Desktop-owned SSH runtime path as the turnkey replacement for
+  the environment-variable attach. Determine whether Desktop's SSH launcher
+  uses `app-server daemon` and `app-server proxy`, identify its CLI-exposed
+  control socket and lifecycle owner, then prove that a second Transmogrify
+  client can initialize, create one disposable task, stream live in Desktop
+  and mobile, steer, stop, and archive without relaunching the app or
+  reconfiguring the Desktop-owned daemon. Until that passes, the measured
+  attach receipt stays the supported native path; the replacement must keep
+  bootstrap turnkey from both hosts. Private app sockets are not control
+  surfaces.
+- Re-test the `mcp_servers.codex_app` launcher override counterfactual on a
+  disposable runtime: confirm whether an attached Desktop still opens threads
+  when the override is absent, so the launcher rule rests on a current receipt.
 - Run and record the complete fresh bidirectional acceptance suite above,
   including mobile-originated input on both providers.
 - Add a reproducible compatibility refresh command that inventories the Codex

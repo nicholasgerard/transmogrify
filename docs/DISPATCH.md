@@ -87,32 +87,40 @@ The lane registry stores the same installation, parent, and dispatch lineage.
 Every later event verifies that exact link before observing or mutating the
 child.
 
-Codex spawn in 0.2.x also requires `--allow-protocol-only`. That explicit gate
-records the lane without a native Desktop/mobile promise because the current
-doctor cannot produce a machine-verifiable app-attachment receipt. Claude Code
-Remote Control spawn does not use this flag. A future verified Desktop-owned
-adapter may replace the protocol-only gate with an exact native receipt.
+Codex spawn measures native visibility at dispatch time. When Codex Desktop
+holds a live connection to the selected runtime, the lane records
+`visibility.state:"desktopAttached"` with the connection receipt and needs no
+flag. Otherwise spawn refuses with `NATIVE_VISIBILITY_REQUIRED`, naming the
+Desktop state it observed, unless `--allow-protocol-only` explicitly labels
+the lane protocol-only. Claude Code Remote Control spawn carries its own
+receipt and never uses the flag. See `scripts/desktop-attach.js`.
 
 ## Visible provenance block
 
-The first provider message starts with this versioned ASCII block:
+The first provider message starts with this versioned block:
 
 ```text
-+-- transmogrify dispatch --------------------------------
-| version: 1
-| parent-provider: "codex"
-| parent-app: "codex-desktop"
-| parent-task: "Release operator"
-| dispatch-id: "11111111-1111-4111-8111-111111111111"
-| target: "claude"
-| profile: "intent=deep, model=claude-opus-5, effort=high, speed=standard"
-+---------------------------------------------------------
+╭─ Transmogrify dispatch ───────────────────────────────────
+│ From      Codex Desktop
+│ Task      "Release operator"
+│ To        Claude Code · claude-opus-5 · high effort · standard speed
+│ Intent    deep
+│ Dispatch  11111111-1111-4111-8111-111111111111
+╰─ v2 · the parent is notified when you finish ─────────────
 ```
 
-The block is followed by one blank line and the user's child prompt. It uses
-JSON quoting inside printable ASCII so visible values cannot escape the frame.
-It intentionally excludes native provider IDs, private parent references,
+The block is followed by one blank line and the user's child prompt. Known
+host slugs render as readable names (`codex-desktop` becomes `Codex Desktop`,
+`claude` on `claude-desktop` becomes `Claude Code on Claude Desktop`); an
+unknown slug is shown verbatim. The frame uses box-drawing characters and
+every value is reduced to printable ASCII, with the task name JSON-quoted, so
+no value can forge a frame line or a label. There is deliberately no
+right-hand border because native app bubbles wrap in proportional fonts. The
+block intentionally excludes native provider IDs, private parent references,
 absolute paths, credentials, raw environment data, and account identity.
+Version 1 blocks (`+-- transmogrify dispatch`) remain in the first messages
+of lanes created before 0.2.1; nothing parses the block, and recovery matches
+a message by its client id.
 
 The `::: ` title and the block serve different purposes. The title is a quick
 visual ownership marker in desktop and mobile task lists. The block explains

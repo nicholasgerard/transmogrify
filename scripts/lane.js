@@ -213,7 +213,7 @@ const PUBLIC_ERROR_MESSAGES = new Map([
   ['NO_EVENT', 'no child event was observed before the bounded timeout'],
   ['LOCAL_LOCK_TIMEOUT', 'the private operator state is locked by another live Transmogrify process; retry shortly'],
   ['LOCAL_STATE_LIMIT', 'the private operator state exceeded a bounded record limit'],
-  ['NATIVE_VISIBILITY_REQUIRED', 'Codex spawn requires a native-visibility receipt or explicit protocol-only authorization'],
+  ['NATIVE_VISIBILITY_REQUIRED', 'Codex spawn requires a native-visibility receipt (Codex Desktop attached to the selected runtime; see desktop-attach.js) or explicit protocol-only authorization'],
   ['OBSERVATION_FAILED', 'one or more exact child lanes could not be observed safely'],
   ['OWNERSHIP_MISMATCH', 'live provider identity does not match the owned receipt'],
   ['PARENT_EVENT_UNRECORDED', 'lane launch is verified; the durable parent event could not be recorded'],

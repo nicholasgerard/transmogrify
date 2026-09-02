@@ -160,23 +160,39 @@ did not launch and identify exactly. A newly launched child runs with
 reused listener keeps its own configuration.
 
 An initialize handshake proves protocol compatibility, not native-app
-attachment. `doctor.js` therefore reports Codex `nativeVisibility.verified` as
-false and names the required disposable app-visibility check. If Desktop was
-restarted or updated while an independent app-server survived, the two may be
-different processes even though the old endpoint still responds. Pause new
-cross-host Codex dispatches, preserve and reconcile only exact-owned existing
-lanes on their recorded runtime, and do not claim live Desktop/mobile control
-until a newly created disposable owned lane visibly streams in the current app.
-Never repair this condition by restarting a shared runtime or by adopting rows
-from either process.
+attachment. Attachment is a separate measured receipt: on macOS,
+`scripts/desktop-attach.js check` reports whether the Codex Desktop process
+holds an ESTABLISHED loopback connection to the selected runtime, and
+`doctor.js` turns that into `nativeVisibility.verified`. Desktop joins a
+runtime only when it is launched with `CODEX_APP_SERVER_WS_URL` pointing at
+it; a normal launch starts a private bundled app-server instead. If Desktop was
+restarted or updated while an independent app-server survived, the two are
+different processes even though the old endpoint still responds, and the
+doctor shows `desktop-attachment:unattached`.
 
-The prospective supported remedy is a Desktop-owned SSH runtime joined through
-Codex's CLI-exposed `app-server daemon`/`app-server proxy` surface. Those
-commands are observed in local CLI help but are not documented in the official
-app-server reference. Do not use that route yet: Desktop's exact launcher
-behavior, control socket, and safe multi-client semantics still require the
-roadmap's disposable live acceptance test. A private Desktop IPC or app-tools
-socket is not an alternative.
+Run `node "$SKILL_ROOT/scripts/desktop-attach.js" ensure` to repair it. An
+existing attachment, including one set up by another operator, is reused as
+is. A Desktop that is not running is launched attached. A running unattached
+Desktop must be quit and relaunched, which ends whatever the app's private
+runtime was doing: the tool refuses with `DESKTOP_RELAUNCH_REQUIRED` until
+the owner agrees (`--relaunch-desktop` for one run, or the standing
+`TRANSMOGRIFY_DESKTOP_RELAUNCH=auto`), and it refuses with
+`DESKTOP_HOST_SESSION` when the command itself runs inside the app's private
+runtime, because the relaunch would end that session. `ATTACHED_ELSEWHERE`
+means Desktop is already attached to another loopback Codex runtime; point
+`TRANSMOGRIFY_URL` at the reported endpoint instead of competing with it.
+`RUNTIME_UNAVAILABLE` means nothing listens on the selected endpoint yet;
+reuse or start a runtime first. Never repair any of this by restarting a
+shared runtime or by adopting rows from either process. Until the attachment
+receipt is verified, exact-owned recovery and retirement on the recorded
+runtime remain available and a new Codex lane needs `--allow-protocol-only`.
+
+OpenAI's CLI-exposed `app-server daemon`/`app-server proxy` surface remains the
+candidate replacement for this mechanism. It is observed in local CLI help but
+not documented in the official app-server reference, so it stays on the
+roadmap until its launcher behavior, control socket, and safe multi-client
+semantics pass a disposable live acceptance test. A private Desktop IPC or
+app-tools socket is not an alternative.
 
 A native row whose title lacks the `::: ` marker, or that shows a “controlled
 from another app” banner with no live activity, was not created by this

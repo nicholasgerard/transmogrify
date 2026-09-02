@@ -22,6 +22,7 @@ const {
   withLaneLease,
 } = require('./state');
 const { AppServerClient, validateUrl } = require('./app-server');
+const { check: desktopAttachCheck } = require('./desktop-attach');
 const { VERSION } = require('./version');
 const {
   markDispatchJournaled, recordEvent, recordObservation, reserveDispatch, setObservedProfile,
@@ -320,6 +321,55 @@ async function executionCapabilities(options = {}, env = process.env) {
   }, env);
 }
 
+const ATTACHMENT_DESCRIPTIONS = new Map([
+  ['unattached', 'running without a connection to the selected runtime'],
+  ['notRunning', 'not running'],
+  ['notInstalled', 'not installed'],
+  ['attachedElsewhere', 'attached to a different runtime'],
+  ['unsupportedPlatform', 'unavailable on this platform'],
+  ['disabled', 'disabled by TRANSMOGRIFY_DESKTOP_ATTACH=off'],
+  ['toolUnavailable', 'not inspectable because a system tool is unavailable'],
+]);
+
+// Native visibility is a measured receipt: Codex Desktop holding a live
+// connection to the runtime this lane is created on. Without it a lane is
+// recorded protocol-only, and only with the owner's explicit flag.
+async function resolveSpawnVisibility(options, endpoint, env) {
+  const inspect = options.desktopAttachment || desktopAttachCheck;
+  let receipt;
+  try {
+    receipt = await inspect({ url: endpoint }, env);
+  } catch {
+    receipt = { attachment: { state: 'toolUnavailable' }, desktop: null };
+  }
+  const attachment = receipt?.attachment || { state: 'unknown' };
+  if (attachment.state === 'attached') {
+    return {
+      surface: 'codex',
+      state: 'desktopAttached',
+      receipt: {
+        runtimeUrl: endpoint,
+        evidence: attachment.evidence,
+        clientPid: attachment.clientPid,
+        connection: attachment.connection,
+        observedAt: attachment.observedAt,
+        bundleId: receipt.desktop?.bundleId ?? null,
+        desktopVersion: receipt.desktop?.version ?? null,
+        desktopBuild: receipt.desktop?.build ?? null,
+        buildTested: receipt.desktop?.buildTested === true,
+      },
+    };
+  }
+  if (options.allowProtocolOnly === true) {
+    return { surface: 'codex', state: 'protocolOnlyByOwnerOverride', attachment: attachment.state };
+  }
+  const described = ATTACHMENT_DESCRIPTIONS.get(attachment.state) || 'in an unknown state';
+  throw new TransmogrifyError(
+    'NATIVE_VISIBILITY_REQUIRED',
+    `Codex spawn requires a native-visibility receipt and Codex Desktop is ${described}; run desktop-attach.js ensure (ask the owner before a relaunch), or pass --allow-protocol-only for a deliberately non-native lane`,
+  );
+}
+
 async function spawn(options, env = process.env) {
   if (!options.repoRoot || !path.isAbsolute(options.repoRoot) ||
       typeof options.input !== 'string' || !options.input) {
@@ -333,18 +383,13 @@ async function spawn(options, env = process.env) {
     throw new TransmogrifyError('USAGE_ERROR', canonicalNameProblem);
   }
   const receiptVerification = turnReceiptVerificationBounds(options);
-  if (options.allowProtocolOnly !== true) {
-    throw new TransmogrifyError(
-      'NATIVE_VISIBILITY_REQUIRED',
-      'Codex spawn requires an app-visibility receipt; use --allow-protocol-only only for an explicitly non-native lane',
-    );
-  }
+  const endpoint = validateUrl(runtimeUrl(options, env));
+  const visibility = await resolveSpawnVisibility(options, endpoint, env);
   if (options.parentContext || options.executionProfile !== undefined) {
     options = { ...options, executionProfile: await resolveSpawnProfile(options, env) };
   }
   const laneId = options.laneId || crypto.randomUUID();
   const operationId = crypto.randomUUID();
-  const endpoint = validateUrl(runtimeUrl(options, env));
   const dispatchEnvelope = options.parentContext ? reserveDispatch({
     parentContext: options.parentContext,
     repoRoot: options.repoRoot,
@@ -418,10 +463,7 @@ async function spawn(options, env = process.env) {
           recovery: 'reconcile',
           approvalRelay: false,
         },
-        visibility: {
-          surface: 'codex',
-          state: 'protocolOnlyByOwnerOverride',
-        },
+        visibility,
       },
     }, env));
     if (options.dispatch) markDispatchJournaled(options.dispatch.dispatchId, env);

@@ -339,26 +339,48 @@ function ownedParentContext(parentContext, env) {
   return { parent: stored, file };
 }
 
-function profileSummary(profile) {
+const PROVIDER_LABELS = new Map([
+  ['codex', 'Codex'],
+  ['claude', 'Claude Code'],
+]);
+const APP_LABELS = new Map([
+  ['codex-desktop', 'Codex Desktop'],
+  ['codex-cli', 'Codex CLI'],
+  ['codex-ide', 'Codex IDE'],
+  ['codex-web', 'Codex web'],
+  ['claude-desktop', 'Claude Desktop'],
+  ['claude-code', 'Claude Code'],
+  ['claude-cli', 'Claude Code CLI'],
+  ['claude-ide', 'Claude Code IDE'],
+  ['claude-web', 'Claude web'],
+]);
+const PROVENANCE_BLOCK_VERSION = 2;
+const PROVENANCE_BLOCK_WIDTH = 60;
+
+function profileParts(profile) {
   const requested = profile?.requested || profile?.requestedProfile || {};
   const resolved = profile?.resolved || profile?.resolvedProfile || {};
-  const entries = [
-    requested.intent ? `intent=${requested.intent}` : null,
-    (resolved.model?.selector || resolved.model) ?
-      `model=${resolved.model?.selector || resolved.model}` : null,
-    (resolved.effort?.level || resolved.effort) ?
-      `effort=${resolved.effort?.level || resolved.effort}` : null,
-    (resolved.setting?.id || resolved.setting) ?
-      `setting=${resolved.setting?.id || resolved.setting}` : null,
-    (resolved.speed?.mode || resolved.speed) ?
-      `speed=${resolved.speed?.mode || resolved.speed}` : null,
-  ].filter(Boolean);
-  const value = entries.join(', ') || 'provider-default';
-  return assertSafeVisible(value, 'profile summary', 512);
+  const parts = {
+    intent: requested.intent || null,
+    model: resolved.model?.selector || resolved.model || null,
+    effort: resolved.effort?.level || resolved.effort || null,
+    setting: resolved.setting?.id || resolved.setting || null,
+    speed: resolved.speed?.mode || resolved.speed || null,
+  };
+  for (const [key, value] of Object.entries(parts)) {
+    if (value === null) continue;
+    if (typeof value !== 'string') {
+      throw new DispatchError('USAGE_ERROR', `profile ${key} must be a string`);
+    }
+    assertSafeVisible(value, `profile ${key}`, 128);
+  }
+  return parts;
 }
 
-function asciiJsonString(value) {
-  return JSON.stringify(value).replace(/[^\x20-\x7e]/gu, (character) =>
+// Every visible value is reduced to printable ASCII. The frame itself uses
+// box-drawing characters, so no value can forge a frame line or a label.
+function escapeNonAscii(text) {
+  return String(text).replace(/[^\x20-\x7e]/gu, (character) =>
     [...character].map((scalar) => {
       const codePoint = scalar.codePointAt(0);
       if (codePoint <= 0xffff) return `\\u${codePoint.toString(16).toUpperCase().padStart(4, '0')}`;
@@ -368,6 +390,14 @@ function asciiJsonString(value) {
       return `\\u${high.toString(16).toUpperCase()}\\u${low.toString(16).toUpperCase()}`;
     }).join('')
   );
+}
+
+function asciiJsonString(value) {
+  return escapeNonAscii(JSON.stringify(value));
+}
+
+function frameLine(prefix) {
+  return `${prefix}${'─'.repeat(Math.max(PROVENANCE_BLOCK_WIDTH - prefix.length, 4))}`;
 }
 
 function renderProvenanceBlock(metadata) {
@@ -381,17 +411,27 @@ function renderProvenanceBlock(metadata) {
     throw new DispatchError('USAGE_ERROR', 'dispatch id must be a UUID');
   }
   const target = assertSafeVisible(metadata.target, 'target');
-  const profile = assertSafeVisible(metadata.profile, 'profile', 512);
+  const profile = profileParts(metadata.profile);
+  const providerLabel = PROVIDER_LABELS.get(parentProvider) || parentProvider;
+  const appLabel = APP_LABELS.get(fromApp) || fromApp;
+  const from = APP_LABELS.has(fromApp) && appLabel.startsWith(providerLabel)
+    ? appLabel
+    : `${providerLabel} on ${appLabel}`;
+  const to = [
+    PROVIDER_LABELS.get(target) || target,
+    profile.model,
+    profile.effort ? `${profile.effort} effort` : null,
+    profile.setting,
+    profile.speed ? `${profile.speed} speed` : null,
+  ].filter(Boolean).map(escapeNonAscii).join(' · ');
   return [
-    '+-- transmogrify dispatch --------------------------------',
-    '| version: 1',
-    `| parent-provider: ${asciiJsonString(parentProvider)}`,
-    `| parent-app: ${asciiJsonString(fromApp)}`,
-    `| parent-task: ${asciiJsonString(parentTask)}`,
-    `| dispatch-id: ${asciiJsonString(metadata.dispatchId)}`,
-    `| target: ${asciiJsonString(target)}`,
-    `| profile: ${asciiJsonString(profile)}`,
-    '+---------------------------------------------------------',
+    frameLine('╭─ Transmogrify dispatch '),
+    `│ From      ${escapeNonAscii(from)}`,
+    `│ Task      ${asciiJsonString(parentTask)}`,
+    `│ To        ${to}`,
+    `│ Intent    ${escapeNonAscii(profile.intent || 'provider-default')}`,
+    `│ Dispatch  ${metadata.dispatchId}`,
+    frameLine(`╰─ v${PROVENANCE_BLOCK_VERSION} · the parent is notified when you finish `),
   ].join('\n');
 }
 
@@ -427,14 +467,13 @@ function reserveDispatch(options, env = process.env) {
     }
     const dispatchId = options.dispatchId || crypto.randomUUID();
     if (!UUID_PATTERN.test(dispatchId)) throw new DispatchError('USAGE_ERROR', 'dispatch id is invalid');
-    const profile = profileSummary(options.profile);
     const provenance = renderProvenanceBlock({
       parentProvider: storedParent.hostProvider,
       fromApp: storedParent.hostApp,
       parentTask: storedParent.displayName,
       dispatchId,
       target: options.targetProvider,
-      profile,
+      profile: options.profile,
     });
     const renderedPrompt = `${provenance}\n\n${prompt}`;
     const project = resolveProject(options.repoRoot);
@@ -975,7 +1014,7 @@ module.exports = {
   loadParentContext,
   markDispatchJournaled,
   pathsFor,
-  profileSummary,
+  profileParts,
   readDispatch,
   recordEvent,
   recordObservation,

@@ -23,7 +23,7 @@ function createRepoWithSeat(t) {
   execFileSync('git', ['-C', repoRoot, 'commit', '--quiet', '-m', 'initial']);
   fs.mkdirSync(worktreesRoot, { mode: 0o700 });
   execFileSync('git', ['-C', repoRoot, 'worktree', 'add', '-q', '-b', 'lane/test', seat]);
-  const env = { ...process.env, TRANSMOGRIFY_STATE_DIR: stateDir };
+  const env = { ...process.env, TRANSMOGRIFY_STATE_DIR: stateDir, TRANSMOGRIFY_DESKTOP_ATTACH: 'off' };
   ensureRegistry(repoRoot, env);
   return { root, repoRoot, stateDir, worktreesRoot, seat, env };
 }

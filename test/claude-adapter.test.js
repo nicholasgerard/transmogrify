@@ -339,10 +339,11 @@ test('Claude dispatched profiles render provenance and survive exact-session rec
     '--model', 'claude-opus-5', '--effort', 'high',
     '--settings', '{"fastMode":false}',
   ]);
-  assert.match(launch.args[11], /^\+-- transmogrify dispatch -+\n/);
-  assert.match(launch.args[11], /\| parent-app: "codex-desktop"\n/);
-  assert.match(launch.args[11], /\| parent-task: "Release operator"\n/);
-  assert.match(launch.args[11], /\| profile: "intent=deep, model=claude-opus-5, effort=high, speed=standard"\n/);
+  assert.match(launch.args[11], /^╭─ Transmogrify dispatch ─+\n/);
+  assert.match(launch.args[11], /^│ From {6}Codex Desktop$/m);
+  assert.match(launch.args[11], /^│ Task {6}"Release operator"$/m);
+  assert.match(launch.args[11], /^│ To {8}Claude Code · claude-opus-5 · high effort · standard speed$/m);
+  assert.match(launch.args[11], /^│ Intent {4}deep$/m);
   assert.equal(lane.executionProfile.requested.intent, 'deep');
   assert.equal(lane.lineage.parentRef, parentContext.parent.parentRef);
   const dispatch = readDispatch(lane.lineage.dispatchId, fixture.env);

@@ -67,8 +67,9 @@ steps:
       through stdin so it never appears in the operator command's arguments.
       The result carries installation-scoped `laneId` and `dispatchId` values;
       persist those exact handles and keep listening until the child returns.
-      The example explicitly creates a protocol-only Codex lane; it does not
-      claim current Desktop/mobile attachment.
+      On macOS, `desktop-attach.js ensure` first makes Codex Desktop a client
+      of the shared runtime so the lane streams live in the app, and asks
+      before it relaunches a running app; the spawn then records that receipt.
     code: |
       export HOST_PROVIDER=codex       # or: claude
       export HOST_APP=codex-desktop    # or: claude-desktop
@@ -78,6 +79,7 @@ steps:
         --name 'Repository operator')
       export PARENT_CONTEXT=$(printf '%s' "$PARENT_JSON" | node -e \
         'const fs=require("node:fs");process.stdout.write(JSON.parse(fs.readFileSync(0,"utf8")).contextFile)')
+      node "$SKILL_ROOT/scripts/desktop-attach.js" ensure
       printf '%s\n' 'Inspect the failing tests and report the smallest safe fix.' |
         node "$SKILL_ROOT/scripts/lane.js" spawn \
           --repo-root "$REPO_ROOT" \
@@ -86,7 +88,6 @@ steps:
           --name 'tests: diagnose failure' \
           --parent-context-file "$PARENT_CONTEXT" \
           --intent balanced \
-          --allow-protocol-only \
           --input-file -
 footnote: >-
   Every advertised tool accepts `--help`. Standalone Codex turns run with the

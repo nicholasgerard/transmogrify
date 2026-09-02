@@ -10,6 +10,7 @@ const {
   createClaudeSurface,
   parseAgents,
 } = require('./lib/claude-surface');
+const { check: desktopAttachCheck } = require('./lib/desktop-attach');
 const { ensureRegistry, readRegistry } = require('./lib/state');
 const { VERSION } = require('./lib/version');
 
@@ -127,7 +128,56 @@ function notRequested(provider, pinned, probe) {
   };
 }
 
-async function probeCodex(options, dependencies) {
+// Read-only Desktop attachment receipt: the app process's established
+// loopback connection to the selected runtime. Never launches or quits.
+async function inspectDesktopAttachment(options, env, dependencies) {
+  const inspect = dependencies.desktopAttachment || desktopAttachCheck;
+  try {
+    return await inspect({ url: options.url }, env);
+  } catch (error) {
+    return {
+      attachment: {
+        state: 'toolUnavailable',
+        evidence: error?.code === 'USAGE_ERROR' ? 'invalid-runtime-url' : 'desktop-attachment-check-failed',
+      },
+      desktop: null,
+      nextAction: 'restore-system-tools-or-use-allow-protocol-only',
+    };
+  }
+}
+
+function nativeVisibilityFor(receipt) {
+  const attachment = receipt?.attachment || { state: 'unknown' };
+  if (attachment.state === 'attached') {
+    const buildTested = receipt.desktop?.buildTested === true;
+    return {
+      verified: true,
+      nativeDispatchReady: true,
+      evidence: 'codex-desktop-attached-to-selected-runtime',
+      receipt: {
+        clientPid: attachment.clientPid,
+        connection: attachment.connection,
+        observedAt: attachment.observedAt,
+        bundleId: receipt.desktop?.bundleId ?? null,
+        desktopVersion: receipt.desktop?.version ?? null,
+        desktopBuild: receipt.desktop?.build ?? null,
+        buildTested,
+        hostedByDesktop: receipt.desktop?.hostedByDesktop === true,
+      },
+      nextAction: buildTested
+        ? 'none'
+        : 'run-disposable-exact-owned-app-visibility-check-on-this-untested-desktop-build',
+    };
+  }
+  return {
+    verified: false,
+    nativeDispatchReady: false,
+    evidence: `desktop-attachment:${attachment.state}`,
+    nextAction: receipt?.nextAction || 'run-desktop-attach-ensure',
+  };
+}
+
+async function probeCodex(options, env, dependencies) {
   let client;
   try {
     client = dependencies.createAppServerClient
@@ -155,19 +205,15 @@ async function probeCodex(options, dependencies) {
       throw error;
     }
     const reusable = client.verifiedRuntime === true;
+    const attachment = await inspectDesktopAttachment(options, env, dependencies);
     return {
       provider: 'codex',
       requested: true,
       available: true,
       reusable,
       reuse: reusable ? 'existing-compatible-protocol-runtime' : 'blocked-unverified-runtime',
-      probe: 'initialize-handshake-only',
-      nativeVisibility: {
-        verified: false,
-        nativeDispatchReady: false,
-        evidence: 'not-measurable-by-app-server-handshake',
-        nextAction: 'run-disposable-exact-owned-app-visibility-check',
-      },
+      probe: 'initialize-handshake-and-desktop-attachment-read',
+      nativeVisibility: nativeVisibilityFor(attachment),
       pinned: {
         userAgentVersionLine: '0.151.x',
         verifiedDate: VERIFIED_DATE,
@@ -304,7 +350,7 @@ async function doctor(options, env = process.env, dependencies = {}) {
   const providers = {
     codex: options.target === 'claude'
       ? notRequested('codex', codexPinned, 'initialize-handshake-only')
-      : await probeCodex(options, dependencies),
+      : await probeCodex(options, env, dependencies),
     claude: options.target === 'codex'
       ? notRequested('claude', claudePinned, 'public-preflight-and-agent-list-only')
       : await probeClaude(options, env, dependencies),

@@ -48,7 +48,6 @@ Examples:
 node "$SKILL_ROOT/scripts/lane.js" spawn \
   --repo-root "$REPO_ROOT" --target codex --name 'implement feature' \
   --parent-context-file "$PARENT_CONTEXT" --intent balanced \
-  --allow-protocol-only \
   --input-file /absolute/path/to/prompt.md
 
 # Exact quality-first Claude profile at Standard speed.

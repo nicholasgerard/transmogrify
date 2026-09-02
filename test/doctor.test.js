@@ -111,9 +111,10 @@ test('doctor reuses only read-only provider surfaces and emits aggregate ownersh
   assert.deepEqual(result.providers.codex.nativeVisibility, {
     verified: false,
     nativeDispatchReady: false,
-    evidence: 'not-measurable-by-app-server-handshake',
-    nextAction: 'run-disposable-exact-owned-app-visibility-check',
+    evidence: 'desktop-attachment:disabled',
+    nextAction: 'use-allow-protocol-only',
   });
+  assert.equal(result.providers.codex.probe, 'initialize-handshake-and-desktop-attachment-read');
   assert.deepEqual(result.providers.codex.observed, {
     userAgentFamily: 'codex_cli_rs',
     version: '0.151.0',
@@ -194,6 +195,82 @@ test('doctor creates the outside-repository registry and skips unrequested provi
     'initialize',
     'initialized',
   ]);
+});
+
+test('doctor turns a measured Desktop attachment into the native-visibility receipt', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer();
+  t.after(() => server.close());
+  const probes = [];
+  const attached = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'codex',
+    '--url', server.url,
+  ], fixture.env, {
+    desktopAttachment: async (probe) => {
+      probes.push(probe.url);
+      return {
+        attachment: {
+          state: 'attached',
+          evidence: 'lsof-established-loopback-connection',
+          clientPid: 96049,
+          connection: '127.0.0.1:53519->127.0.0.1:8843',
+          observedAt: '2026-09-02T22:00:00.000Z',
+        },
+        desktop: {
+          bundleId: 'com.openai.codex', version: '26.999.1', build: '9999', buildTested: false, hostedByDesktop: false,
+        },
+        nextAction: 'none',
+      };
+    },
+  });
+  assert.equal(attached.ok, true);
+  assert.deepEqual(probes, [new URL(server.url).href]);
+  assert.deepEqual(attached.providers.codex.nativeVisibility, {
+    verified: true,
+    nativeDispatchReady: true,
+    evidence: 'codex-desktop-attached-to-selected-runtime',
+    receipt: {
+      clientPid: 96049,
+      connection: '127.0.0.1:53519->127.0.0.1:8843',
+      observedAt: '2026-09-02T22:00:00.000Z',
+      bundleId: 'com.openai.codex',
+      desktopVersion: '26.999.1',
+      desktopBuild: '9999',
+      buildTested: false,
+      hostedByDesktop: false,
+    },
+    nextAction: 'run-disposable-exact-owned-app-visibility-check-on-this-untested-desktop-build',
+  });
+
+  const unattached = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'codex',
+    '--url', server.url,
+  ], fixture.env, {
+    desktopAttachment: async () => ({
+      attachment: { state: 'unattached', evidence: 'no-established-connection-to-runtime' },
+      desktop: { running: true },
+      nextAction: 'run-desktop-attach-ensure',
+    }),
+  });
+  assert.equal(unattached.ok, true);
+  assert.deepEqual(unattached.providers.codex.nativeVisibility, {
+    verified: false,
+    nativeDispatchReady: false,
+    evidence: 'desktop-attachment:unattached',
+    nextAction: 'run-desktop-attach-ensure',
+  });
+
+  const failing = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'codex',
+    '--url', server.url,
+  ], fixture.env, {
+    desktopAttachment: async () => { throw new Error('lsof exploded'); },
+  });
+  assert.equal(failing.providers.codex.nativeVisibility.evidence, 'desktop-attachment:toolUnavailable');
+  assert.equal(failing.providers.codex.reusable, true);
 });
 
 test('doctor maintenance command reuses PATH discovery without an undeclared Claude binding', async (t) => {

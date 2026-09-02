@@ -202,6 +202,33 @@ attachment path to Desktop's private child. These read-only receipts establish
 the current boundary; they do not authorize using either private socket as a
 control plane.
 
+**Live-verified attached topology, 2026-09-02:** the same standalone
+`0.151.0` runtime on `ws://127.0.0.1:8843` became Codex Desktop's control
+plane when the app was relaunched with `CODEX_APP_SERVER_WS_URL` set to that
+endpoint. Codex Desktop `26.901.20858` (`7658`, bundle `com.openai.codex`)
+held one ESTABLISHED loopback connection to the runtime, spawned no private
+bundled app-server child, and rendered a disposable exact-owned lane created
+from a Claude Code host with its `::: ` title and provenance block while
+streaming the reply live. The `2026-09-01` receipts on `26.825.51511` were
+taken in the same attached mode through the earlier operator's manual launch.
+The variable is read by the app's launcher and is not published in OpenAI's
+app-server reference, so Transmogrify treats it as an observed macOS
+mechanism with a measured receipt: `scripts/desktop-attach.js check` reports
+the connection, the doctor turns it into `nativeVisibility`, spawn records it
+on the lane, and a build that ignores the variable never produces the receipt.
+The repair path was exercised the same day: Desktop quit through its own
+application quit in 15 s, a plain relaunch started the bundled private child
+(`Contents/Resources/codex -c features.code_mode_host=true app-server`) and
+showed `unattached`, `desktop-attach.js ensure` refused with
+`DESKTOP_RELAUNCH_REQUIRED`, and `ensure --relaunch-desktop` quit, relaunched,
+and observed the new attachment in 4.6 s while the standalone runtime process
+kept its pid.
+The runtime this installation launches keeps
+`-c mcp_servers.codex_app={command="",enabled=false}`; the earlier operator
+observed Desktop thread-opens failing on an attached runtime launched without
+that override, and this release does not re-test that counterfactual against
+a shared runtime.
+
 **Official SSH-host boundary, checked 2026-09-02:** Codex Desktop's local
 bundled private stdio child has no documented external attachment path.
 Separately, OpenAI documents Desktop-managed SSH projects in which Desktop

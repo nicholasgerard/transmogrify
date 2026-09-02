@@ -4,8 +4,9 @@ Transmogrify is an agent skill and a set of zero-framework Node tools for
 operating worktree-seated Codex and Claude Code lanes. It gives either Codex or
 Claude a provider-neutral lifecycle—spawn, steer, status, stop, recover,
 durable output harvest, retire, and reconcile—and records each lane's
-native-visibility state honestly: Claude lanes carry a Remote Control receipt,
-and Codex lanes are protocol-only in 0.2.x.
+native-visibility state from a measured receipt: Claude lanes carry a Remote
+Control receipt, and Codex lanes carry the Desktop attachment receipt whenever
+Codex Desktop is a client of the shared runtime.
 
 The transport is deliberately provider-specific:
 
@@ -48,8 +49,8 @@ recovery, retirement, and cleanup semantics.
 
 | Orchestrator | Codex target | Claude Code target |
 | --- | --- | --- |
-| Codex | Shared app-server protocol; live app attachment requires a current-launch visibility receipt | Claude Code Remote Control adapter |
-| Claude Code | Shared app-server protocol; live app attachment requires a current-launch visibility receipt | Claude Code Remote Control adapter |
+| Codex | Shared app-server protocol; live app visibility by measured Codex Desktop attachment receipt | Claude Code Remote Control adapter |
+| Claude Code | Shared app-server protocol; live app visibility by measured Codex Desktop attachment receipt | Claude Code Remote Control adapter |
 
 Provider-native host tools can accelerate bounded internal delegation or exact
 waiting when they expose a suitable receipt. A Transmogrify-managed app-visible
@@ -59,10 +60,13 @@ lineage, events, retirement, and cleanup remain portable across hosts.
 On the recorded compatibility tuple, both orchestrators created Codex lanes
 that rendered in Codex Desktop and the ChatGPT mobile app. A later Desktop
 restart demonstrated that a surviving standalone runtime can remain
-protocol-compatible without remaining the app's live control plane. In 0.2.x
-every new Codex lane is therefore recorded protocol-only: `spawn` requires
-`--allow-protocol-only`, and no runtime check can prove live Desktop or mobile
-attachment. The dated visibility and post-restart boundary are recorded in the
+protocol-compatible without remaining the app's live control plane, so
+attachment is measured rather than assumed: `scripts/desktop-attach.js`
+reports whether Codex Desktop holds a live connection to the selected runtime,
+launches or (with owner authorization) relaunches the app attached, and
+`spawn` records `desktopAttached` lanes from that receipt. Without it a Codex
+lane is recorded protocol-only, and only with `--allow-protocol-only`. The
+dated visibility and topology receipts are recorded in the
 [protocol contract](docs/PROTOCOL.md#codex-lane-lifecycle). The Claude adapter
 creates named local Claude Code Remote Control sessions. Desktop and mobile
 visibility, mobile-originated input, and native archive behavior are
@@ -168,13 +172,14 @@ It prints aggregate owned and pending counts. It never starts, stops, restarts,
 steers, archives, removes, or adopts a provider session.
 
 For Codex, `ok:true` means the selected WebSocket runtime matches the pinned
-protocol contract. The separate `nativeVisibility` result remains unverified
-because an app-server handshake cannot prove that the current Desktop launch or
-paired mobile client is attached to that same process. Before a cross-host
-batch, use one disposable exact-owned lane to verify current app visibility.
-After a Desktop restart, pause new dispatches to a surviving independent
-runtime until that check passes; exact-owned recovery and retirement on that
-runtime remain available.
+protocol contract. `nativeVisibility` is a separate measured receipt:
+`verified:true` when Codex Desktop holds an established loopback connection to
+that runtime, with the client pid, the connection, the app version, and
+whether that build is on the tested list; otherwise the Desktop state that was
+observed and the next action, normally `desktop-attach.js ensure`. After a
+Desktop restart or update, rerun the doctor: a surviving independent runtime
+shows as unattached until Desktop is relaunched against it, while exact-owned
+recovery and retirement on that runtime remain available.
 
 The registry is private local control state. Transmogrify creates its
 directories with mode `0700` and JSON records with mode `0600`; existing state
@@ -209,19 +214,25 @@ login stored under the selected home. On 2026-09-01, Codex CLI `0.151.0`
 reported `Logged in using ChatGPT` with only `HOME` and `PATH` present. An
 environment-only API-key login is outside the 0.2.x launcher contract.
 
-The launcher establishes only the standalone app-server contract. Whether a
-runtime renders and executes in a particular Codex desktop/mobile build is a
-separate host-integration receipt. When native visibility is required, keep the
-paired Desktop host running and exercise a disposable exact-owned acceptance
-lane against the selected runtime; the doctor handshake alone cannot prove
-Remote attachment. See the [protocol boundary](docs/PROTOCOL.md#codex-lane-lifecycle).
+The launcher establishes only the standalone app-server contract. Codex
+Desktop adopts that runtime when it is launched with `CODEX_APP_SERVER_WS_URL`
+set to the endpoint, and `scripts/desktop-attach.js ensure` does that for you:
+it reuses an existing attachment, including one another operator set up,
+launches Desktop attached when it is not running, and quits and relaunches a
+running unattached Desktop only after the owner agrees (`--relaunch-desktop`
+for one run, or the standing `TRANSMOGRIFY_DESKTOP_RELAUNCH=auto`). It never
+relaunches from a session hosted inside the app, and it never touches the
+runtime. The variable is an observed launcher behavior on the tested Desktop
+builds (`26.825.51511` and `26.901.20858`), not a documented OpenAI contract;
+the receipt is measured on every check and every spawn, so a build that
+ignores it fails closed. See the
+[protocol receipts](docs/PROTOCOL.md#codex-lane-lifecycle).
 
-`runtime-up.sh` creates or reuses a standalone protocol runtime; Desktop is not
-documented to adopt it. OpenAI separately documents Desktop-owned SSH projects
-that launch and manage an app-server on the remote host. Transmogrify will
-prefer that ownership direction for native Desktop/mobile operation only after
-the CLI-exposed, local-help-observed daemon/proxy path and safe second-client
-behavior pass the roadmap's live acceptance gate.
+OpenAI separately documents Desktop-owned SSH projects that launch and manage
+an app-server on the remote host. Transmogrify will move native Desktop/mobile
+operation to that ownership direction only after the CLI-exposed,
+local-help-observed daemon/proxy path and safe second-client behavior pass the
+roadmap's live acceptance gate, and only if bootstrap stays turnkey.
 
 ## Quick start
 
@@ -256,14 +267,15 @@ printf '%s\n' 'Inspect the failing tests and report the smallest safe fix.' |
     --name 'tests: diagnose failure' \
     --parent-context-file "$PARENT_CONTEXT" \
     --intent balanced \
-    --allow-protocol-only \
     --input-file -
 ```
 
-`--allow-protocol-only` is an explicit admission that this new Codex lane has
-no current native-app receipt. It is required for Codex spawn in 0.2.x and the
-lane is recorded as protocol-only. Do not use it when the requested outcome
-requires Desktop/mobile visibility. Claude Code spawn does not use this flag;
+Spawn measures the Desktop attachment first and records the lane
+`desktopAttached` with that receipt. Without it, spawn refuses and names the
+Desktop state it saw; `--allow-protocol-only` is the explicit admission that
+this particular lane may run without a native-app receipt. Do not use it when
+the requested outcome requires Desktop/mobile visibility; run
+`desktop-attach.js ensure` instead. Claude Code spawn does not use this flag;
 its pinned Remote Control adapter carries the native visibility receipt.
 
 Use `--target claude` to create a named Claude Code Remote Control lane. Omit
@@ -383,6 +395,7 @@ A complete packet, handback, digest, and retirement walkthrough is in
 | `scripts/doctor.js` | Read-only startup discovery and aggregate ownership check |
 | `scripts/lane.js` | Provider-neutral spawn, steer, status, interrupt/stop, recover, retire, and reconcile |
 | `scripts/runtime-up.sh` | Reuse or explicitly launch a detached Codex app-server |
+| `scripts/desktop-attach.js` | Measure, launch, or (with owner authorization) relaunch Codex Desktop as a client of the shared runtime |
 | `scripts/lane-status-listen.js` | Listen for state transitions on exact owned Codex lanes |
 | `scripts/steer.js` | Compatibility CLI for exact owned Codex steering, resume, and interrupt |
 | `scripts/rpc.js` | Default-deny, read-only Codex diagnostics |
@@ -393,7 +406,7 @@ A complete packet, handback, digest, and retirement walkthrough is in
 | --- | --- | --- |
 | `parent-init` / `parent-list` | Host | Create or recover durable parent identity without exposing private native references |
 | `capabilities` | Codex, Claude | Show the verified model, effort, speed, execution-setting, and recommendation catalog |
-| `spawn` | Codex, Claude | Requires a parent context, target, name, and input; adds `::: ` and first-message provenance. Codex also requires `--allow-protocol-only` until a current native-visibility receipt is machine-verifiable. |
+| `spawn` | Codex, Claude | Requires a parent context, target, name, and input; adds `::: ` and first-message provenance. Codex records the Desktop attachment receipt, or needs `--allow-protocol-only` for a deliberately unattached lane. |
 | `children` | Host | Enumerate one parent's durable dispatches and unacknowledged event count |
 | `wait` / `ack` | Host | Observe durable at-least-once child events and acknowledge them after handling |
 | `steer` | Codex, Claude | Codex steers the newest active turn; Claude queues to the exact session safe point |

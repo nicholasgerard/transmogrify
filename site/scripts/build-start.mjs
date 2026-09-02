@@ -127,7 +127,15 @@ replace it with a branch, tag, or different revision.
    reconfigure, steer, interrupt, archive, or adopt a runtime or lane that this
    Transmogrify installation does not exactly own. If no compatible Codex
    runtime is available, ask before starting one.
-7. Reconcile only exact-owned pending operations. Before the first managed
+7. When Codex is a target on macOS, run
+   \`node "$SKILL_ROOT/scripts/desktop-attach.js" check\`. Codex lanes stream
+   live only while Codex Desktop is a client of the shared runtime. If the
+   check is not attached and this session is not itself running inside Codex
+   Desktop, ask the user whether you may relaunch Codex Desktop attached; on
+   yes run \`desktop-attach.js ensure --relaunch-desktop\`, on no say that
+   real-time visibility will not work and use \`--allow-protocol-only\` for
+   Codex lanes. Never relaunch the app from a Codex host session.
+8. Reconcile only exact-owned pending operations. Before the first managed
    spawn, create or recover the current task's durable parent context, passing
    \`TRANSMOGRIFY_HOST_PROVIDER\` and \`TRANSMOGRIFY_HOST_APP\` as the
    \`--host-provider\` and \`--host-app\` values that \`SKILL.md\` specifies;

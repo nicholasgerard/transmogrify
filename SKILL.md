@@ -4,7 +4,7 @@ description: Operate exact-owned, worktree-seated Codex and Claude Code lanes wi
 license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server 0.151.x"
@@ -92,13 +92,15 @@ steer, archive, remove, or adopt any provider session.
 Interpret the result as follows:
 
 1. Reuse a provider only when its result says `available:true` and the pinned
-   surface matches. For Codex, `ok:true` proves the selected protocol runtime,
-   not Desktop/mobile attachment. Read `nativeVisibility`; before claiming
-   native visibility or starting a cross-host batch, require a disposable
-   exact-owned app-visibility check for the current Desktop launch. If Desktop
-   has restarted while an independently managed app-server survived, pause new
-   Codex dispatches until that check passes. Continue to reconcile only the
-   exact lanes already owned by the surviving runtime.
+   surface matches. For Codex, `ok:true` proves the selected protocol runtime;
+   `nativeVisibility.verified:true` is the separate measured receipt that
+   Codex Desktop holds a live connection to that runtime, so new lanes render
+   and stream in the app. When it is false, follow "Attach Codex Desktop"
+   below before any Codex dispatch whose result includes native visibility.
+   If Desktop has restarted while an independently managed app-server
+   survived, the receipt goes false by itself; continue to reconcile only the
+   exact lanes already owned by the surviving runtime and re-attach before
+   new dispatches.
 2. If a Codex runtime is unavailable, do not start one unless the owner has
    authorized this installation to own it. When authorized, run
    `"$SKILL_ROOT/scripts/runtime-up.sh"`; it reuses a verified existing listener
@@ -113,12 +115,12 @@ Interpret the result as follows:
    file-backed Codex login selected by `HOME`/`CODEX_HOME`; do not expect
    ambient API-key or proxy credential inheritance.
 3. Never kill, restart, or reconfigure a runtime that may host another
-   orchestrator's lanes.
-   `runtime-up.sh` creates or reuses a standalone protocol runtime; Desktop is
-   not documented to adopt it. OpenAI's separate Desktop-owned SSH runtime is
-   the preferred native-app research path, but it remains unavailable to this
-   skill until the CLI-exposed, local-help-observed daemon/proxy channel and
-   safe second-client behavior have been live-verified.
+   orchestrator's lanes. `runtime-up.sh` creates or reuses a standalone
+   protocol runtime, and Codex Desktop adopts it only when the app is launched
+   with `CODEX_APP_SERVER_WS_URL` set to that endpoint; `desktop-attach.js`
+   below does that. OpenAI's Desktop-owned SSH daemon/proxy surface is the
+   roadmap candidate to replace this mechanism once it passes the live
+   acceptance gate.
 4. Execute only the doctor's printed maintenance commands, or an equally
    narrow exact-lane command, after checking that the host policy authorizes
    provider reads at startup. Every printed command includes the verified Codex
@@ -126,6 +128,49 @@ Interpret the result as follows:
    given an explicit CLI, in which case bind `CLAUDE_BIN` to that same absolute
    executable before executing it.
 5. Reconcile installation-owned pending operations before creating new work.
+
+### Attach Codex Desktop (macOS)
+
+Codex lanes stream live in Codex Desktop only while the app is a client of the
+runtime the lanes run on. Make that true before the first Codex dispatch of a
+session:
+
+```bash
+node "$SKILL_ROOT/scripts/desktop-attach.js" check
+node "$SKILL_ROOT/scripts/desktop-attach.js" ensure
+```
+
+`check` is read-only and exits 0 only with a live attachment receipt. `ensure`
+reuses an existing attachment as is, including one that another operator set
+up on a shared runtime, and launches Desktop attached when it is not running.
+A running unattached Desktop has to be quit and relaunched, which ends
+whatever its private runtime was doing, so `ensure` stops with
+`DESKTOP_RELAUNCH_REQUIRED` until the owner agrees. Handle each host like
+this:
+
+- Claude Code host: when `check` is not attached, ask the owner once, in plain
+  words, whether you may relaunch Codex Desktop so lanes stream live. On yes,
+  run `ensure --relaunch-desktop` and confirm the receipt; on no, say that
+  real-time visibility will not work and spawn only with
+  `--allow-protocol-only`. A standing `TRANSMOGRIFY_DESKTOP_RELAUNCH=auto` in
+  the host environment is the owner's pre-approval; then run `ensure` without
+  asking. Say when you launched the app because it was not running.
+- Codex host: your own session runs inside the app. Never relaunch it;
+  `ensure` refuses with `DESKTOP_HOST_SESSION` when the command runs inside
+  the app's private runtime. If `check` shows `attached`, the shared runtime
+  is already the app's control plane and Codex lanes render live. Otherwise
+  use Codex's native collaboration for Codex children (section 2), spawn
+  Claude lanes, which need no attachment, or ask the owner to attach Desktop
+  from a session outside the app.
+- `ATTACHED_ELSEWHERE` means Desktop already streams another loopback Codex
+  runtime; point `TRANSMOGRIFY_URL` at the reported endpoint and rerun the
+  doctor instead of competing with it. `RUNTIME_UNAVAILABLE` means nothing
+  listens yet; go back to step 2.
+
+The mechanism is an observed launcher behavior on the tested Desktop builds
+recorded in the receipt, not a documented OpenAI contract. The receipt is
+measured on every check and every Codex spawn, so a build that ignores the
+variable fails closed to protocol-only lanes instead of a false claim.
 
 Create or recover one durable parent context for this orchestrating task before
 spawning a managed lane:
@@ -165,13 +210,15 @@ retirement, or cleanup.
 
 | Target | Standalone channel | Semantics |
 | --- | --- | --- |
-| Codex | Shared loopback app-server WebSocket; experimental, protocol-only in 0.2.x | Mid-turn steering and turn-only interrupt |
+| Codex | Shared loopback app-server WebSocket; experimental transport, native visibility by measured Desktop attachment receipt | Mid-turn steering and turn-only interrupt |
 | Claude Code | Background Remote Control session + public `--cloud` follow-up | Safe-point queued steering and whole-session stop |
 
 Native Codex collaboration descendants and native Claude sub-agents remain
-useful for bounded internal delegation. Do not represent them as independently
-managed app-visible lanes unless the active host exposes the full lifecycle
-contract above.
+useful for bounded internal delegation, and they are the Codex host's path for
+Codex children while Desktop is not attached to the shared runtime. Do not
+represent them as independently managed app-visible lanes unless the active
+host exposes the full lifecycle contract above; record their native handles in
+the packet and never mix them with lane ids.
 
 ## 3. Ownership and seating
 
@@ -212,15 +259,16 @@ printf '%s\n' "$KICKOFF" | node "$SKILL_ROOT/scripts/lane.js" spawn \
   --name "$THREAD_NAME" \
   --parent-context-file "$PARENT_CONTEXT" \
   --intent balanced \
-  --allow-protocol-only \
   --input-file -
 ```
 
-Codex spawn requires `--allow-protocol-only` in 0.2.x because the doctor cannot
-produce a machine-verifiable current Desktop/mobile attachment receipt. The
-flag records the lane as protocol-only; do not use it when native-app visibility
-is part of the requested result. Replace `codex` with `claude` and omit the flag
-for a receipt-gated Claude Code Remote Control lane. Omit `--cwd` for a
+Codex spawn measures the Desktop attachment at dispatch time and records the
+lane `desktopAttached` with the connection receipt. Without that receipt it
+refuses with `NATIVE_VISIBILITY_REQUIRED` and names the Desktop state it saw;
+add `--allow-protocol-only` only for a deliberately unattached lane, never
+when native-app visibility is part of the requested result. Replace `codex`
+with `claude` for a receipt-gated Claude Code Remote Control lane, which needs
+no attachment. Omit `--cwd` for a
 managed seat or pass an authorized absolute seat. Choose execution through
 `--intent`, with optional explicit `--model`, `--effort`, and
 `--speed standard|fast`. Run `capabilities --target <provider>` first when an
@@ -461,6 +509,11 @@ or prune a provider row merely because it looks stale.
 - `lane-status-listen.js` subscribes to exact watched active lanes and treats
   `notLoaded` as normal persistence unless a watched working lane transitions
   there.
+- A runtime this installation launches carries
+  `-c mcp_servers.codex_app={command="",enabled=false}`. Keep it: the
+  Desktop-only `codex_app` bridge must stay off on a shared runtime, and the
+  earlier operator observed attached Desktop thread-opens failing without the
+  override. A reused listener is never reconfigured.
 
 The complete schema citations and receipts live in
 [docs/PROTOCOL.md](docs/PROTOCOL.md). Do not duplicate or weaken them here.

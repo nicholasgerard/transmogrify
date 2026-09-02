@@ -106,7 +106,6 @@ SPAWN_JSON=$(
       --name 'example: packet execution' \
       --parent-context-file "$PARENT_CONTEXT" \
       --intent balanced \
-      --allow-protocol-only \
       --input-file -
 )
 printf '%s\n' "$SPAWN_JSON"
@@ -115,10 +114,10 @@ LANE_ID=$(printf '%s' "$SPAWN_JSON" | node -e \
 test -n "$LANE_ID"
 ```
 
-The Codex example is deliberately protocol-only; it makes no Desktop/mobile
-visibility claim. For Claude, change the target and name, omit the Codex-only
-`--url` and `--allow-protocol-only` options, and use the pinned Remote Control
-adapter:
+The Codex example records the measured Desktop attachment receipt; run
+`desktop-attach.js ensure` first on macOS, or add `--allow-protocol-only` for
+a deliberately unattached lane. For Claude, change the target and name, omit
+the Codex-only `--url` option, and use the pinned Remote Control adapter:
 
 ```bash
 SPAWN_JSON=$(

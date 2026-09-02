@@ -15,12 +15,12 @@ gated:
     builds outside the exact live-verified tuple recorded in the skill and
     Claude integration contract.
   - >-
-    A compatible Codex app-server handshake does not prove that the current
-    Codex Desktop launch or paired mobile app is attached to that runtime. Every
-    new Codex lane in 0.2.x is recorded protocol-only and requires
-    `--allow-protocol-only` at spawn. After a Desktop restart or update, pause
-    new cross-host dispatches until a disposable exact-owned lane visibly
-    streams in the current app.
+    A compatible Codex app-server handshake does not prove that Codex Desktop
+    is attached to that runtime. Attachment is measured separately on macOS by
+    `desktop-attach.js`; a lane created without that receipt is recorded
+    protocol-only and requires `--allow-protocol-only` at spawn. After a
+    Desktop restart or update, run `desktop-attach.js ensure` before new
+    cross-host dispatches.
   - >-
     Claude lifecycle mutations run only on Apple Silicon macOS with the pinned
     Claude Code CLI, a first-party `claude.ai` account, and the default config

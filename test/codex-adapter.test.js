@@ -92,6 +92,85 @@ test('Codex spawn fails closed without explicit protocol-only authorization', as
   assert.deepEqual(listOperations(fixture.repoRoot, fixture.env), []);
 });
 
+test('Codex spawn records a measured Desktop attachment receipt without the protocol-only flag', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer((request, socket) => {
+    if (request.method === 'thread/start') return threadStartResult(fixture, 'thread-attached');
+    if (request.method === 'turn/start') {
+      socket.send(JSON.stringify({
+        method: 'turn/started',
+        params: { threadId: 'thread-attached', turn: { id: 'turn-1', status: 'inProgress' } },
+      }));
+      return turnStartResult(request, 'turn-1');
+    }
+    if (request.method === 'thread/name/set') return { result: {} };
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, {
+        id: 'thread-attached',
+        name: '::: lane: materialize before name',
+        status: { type: 'active', activeFlags: [] },
+      });
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  t.after(() => server.close());
+  const probes = [];
+  const attachment = {
+    state: 'attached',
+    evidence: 'lsof-established-loopback-connection',
+    clientPid: 96049,
+    connection: '127.0.0.1:53519->127.0.0.1:8843',
+    observedAt: '2026-09-02T22:00:00.000Z',
+  };
+  const result = await spawn({
+    ...baseOptions(fixture, server.url),
+    allowProtocolOnly: false,
+    desktopAttachment: async (probe) => {
+      probes.push(probe.url);
+      return {
+        attachment,
+        desktop: { bundleId: 'com.openai.codex', version: '26.901.20858', build: '7658', buildTested: true },
+      };
+    },
+  }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.deepEqual(probes, [new URL(server.url).href]);
+  assert.deepEqual(result.visibility, {
+    surface: 'codex',
+    state: 'desktopAttached',
+    receipt: {
+      runtimeUrl: new URL(server.url).href,
+      evidence: 'lsof-established-loopback-connection',
+      clientPid: 96049,
+      connection: '127.0.0.1:53519->127.0.0.1:8843',
+      observedAt: '2026-09-02T22:00:00.000Z',
+      bundleId: 'com.openai.codex',
+      desktopVersion: '26.901.20858',
+      desktopBuild: '7658',
+      buildTested: true,
+    },
+  });
+  const [lane] = listLanes(fixture.repoRoot, fixture.env);
+  assert.equal(lane.visibility.state, 'desktopAttached');
+  assert.equal(lane.visibility.receipt.clientPid, 96049);
+  assert.equal(lane.state, 'active');
+});
+
+test('Codex spawn names the missing attachment when it fails closed', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  await assert.rejects(
+    () => spawn({
+      ...baseOptions(fixture, 'ws://127.0.0.1:65534'),
+      allowProtocolOnly: false,
+      desktopAttachment: async () => ({ attachment: { state: 'unattached' }, desktop: { running: true } }),
+    }, fixture.env),
+    (error) => error.code === 'NATIVE_VISIBILITY_REQUIRED' &&
+      /running without a connection to the selected runtime/.test(error.message) &&
+      /desktop-attach\.js ensure/.test(error.message),
+  );
+  assert.deepEqual(listLanes(fixture.repoRoot, fixture.env), []);
+});
+
 test('Codex capabilities expose the live provider catalog and neutral intent vocabulary', async (t) => {
   const server = await startMockAppServer((request) => {
     if (request.method !== 'model/list') throw new Error(`unexpected ${request.method}`);
@@ -182,13 +261,16 @@ test('Codex spawn persists identity, materializes, then names and verifies', asy
   assert.deepEqual(result.visibility, {
     surface: 'codex',
     state: 'protocolOnlyByOwnerOverride',
+    attachment: 'disabled',
   });
   assert.deepEqual(order, ['thread/start', 'turn/start', 'thread/name/set', 'thread/read']);
   const [lane] = listLanes(fixture.repoRoot, fixture.env);
   assert.equal(lane.providerId, 'thread-1');
   assert.equal(lane.turnId, 'turn-1');
   assert.equal(lane.state, 'active');
-  assert.deepEqual(lane.visibility, { surface: 'codex', state: 'protocolOnlyByOwnerOverride' });
+  assert.deepEqual(lane.visibility, {
+    surface: 'codex', state: 'protocolOnlyByOwnerOverride', attachment: 'disabled',
+  });
   assert.deepEqual(lane.ownership.creationReceipt, {
     providerId: 'thread-1',
     requestedCwd: providerCwd(fixture),
@@ -247,12 +329,14 @@ test('Codex dispatched profiles use live capabilities, render provenance, and re
       assert.equal(request.params.serviceTier, 'default');
       assert.equal(request.params.serviceTierForTurn, 'default');
       if (turnStarts === 1) {
-        assert.match(request.params.input[0].text, /^\+-- transmogrify dispatch -+\n/);
-        assert.match(request.params.input[0].text, /\| parent-provider: "claude"\n/);
-        assert.match(request.params.input[0].text, /\| parent-app: "claude-desktop"\n/);
-        assert.match(request.params.input[0].text, /\| parent-task: "Cross-provider operator"\n/);
+        assert.match(request.params.input[0].text, /^╭─ Transmogrify dispatch ─+\n/);
+        assert.match(request.params.input[0].text, /^│ From {6}Claude Code on Claude Desktop$/m);
+        assert.match(request.params.input[0].text, /^│ Task {6}"Cross-provider operator"$/m);
+        assert.match(request.params.input[0].text, /^│ Intent {4}deep$/m);
+        assert.match(request.params.input[0].text, /^│ Dispatch {2}[0-9a-f-]{36}$/m);
+        assert.match(request.params.input[0].text, /^╰─ v2 · the parent is notified when you finish ─+\n\n/m);
         assert.match(request.params.input[0].text,
-          /\| profile: "intent=deep, model=gpt-5.6-sol, effort=high, speed=standard"\n/);
+          /^│ To {8}Codex · gpt-5.6-sol · high effort · standard speed$/m);
         return turnStartResult(request, 'turn-profile');
       }
       assert.equal(request.params.input[0].text, 'Continue with the same execution profile.');

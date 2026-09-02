@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.1
+
+- Restore the Codex Desktop attachment path as a measured receipt. The new
+  `desktop-attach.js` reads whether the app holds a live loopback connection
+  to the selected runtime, launches it attached when it is not running, and
+  relaunches a running unattached app only with explicit or standing owner
+  authorization, never from a session hosted by the app itself, and never by
+  touching the runtime.
+- Let the doctor report `nativeVisibility.verified:true` from that receipt and
+  let Codex spawn record `desktopAttached` lanes without
+  `--allow-protocol-only`; the flag now only labels a deliberately unattached
+  lane, and every refusal names the Desktop state that was observed.
+- Redesign the first-message provenance block (version 2): a box-drawing
+  frame, readable host and target labels, and printable-ASCII values that
+  cannot forge a frame line.
+- Document the attach mechanism, its tested Desktop builds, the shared-runtime
+  reuse rule, and the Codex-host guidance that were dropped while preparing
+  0.1.0.
+
 ## 0.2.0
 
 - Require `--allow-protocol-only` for every Codex spawn and record those lanes
