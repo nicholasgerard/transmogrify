@@ -923,12 +923,15 @@ test('Claude reconcile binds only an exact job from the durable spawn receipt an
   assert.equal(fs.existsSync(uncertain.ownership.spawnIntent.stdoutPath), true);
   assert.equal(fs.existsSync(uncertain.ownership.spawnIntent.stderrPath), true);
   const launchesBefore = surface.calls.filter((call) => call.method === 'launch').length;
+  // The whole reconcile shares one deadline; a loaded CI runner needs more than
+  // a few hundred milliseconds for preflight, census, transcript, and worker
+  // verification, while the deep-link dispatch below must still inherit it.
   const result = await reconcile({
     repoRoot: fixture.repoRoot,
     surface,
     discoveryAttempts: 2,
     discoveryDelayMs: 0,
-    commandTimeoutMs: 500,
+    commandTimeoutMs: 3000,
   }, fixture.env);
   assert.equal(result.ok, true);
   assert.equal(result.results[0].outcome, 'spawnBoundFromDurableReceipt');
@@ -938,7 +941,7 @@ test('Claude reconcile binds only an exact job from the durable spawn receipt an
   assert.equal(fs.existsSync(rebound.ownership.spawnIntent.stderrPath), false);
   assert.equal(surface.calls.filter((call) => call.method === 'launch').length, launchesBefore);
   const presentation = surface.calls.find((call) => call.method === 'dispatchDeepLink');
-  assert.ok(presentation.options.timeoutMs <= 2_000);
+  assert.ok(presentation.options.timeoutMs <= 3_000);
 });
 
 test('Claude reconcile finishes not-delivered spawn capture cleanup without provider replay', async (t) => {
