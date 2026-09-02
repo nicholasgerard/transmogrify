@@ -3,6 +3,7 @@
 const { EventEmitter } = require('node:events');
 const path = require('node:path');
 const WebSocket = require('ws');
+const { VERSION } = require('./version');
 
 const RESERVED_DIRECT_EVENTS = new Set([
   'connection/closed',
@@ -71,7 +72,7 @@ class AppServerClient extends EventEmitter {
     this.clientInfo = options.clientInfo || {
       name: 'transmogrify',
       title: 'transmogrify',
-      version: '0.2.0',
+      version: VERSION,
     };
     this.serverRequestHandler = options.serverRequestHandler || null;
     this.socket = null;

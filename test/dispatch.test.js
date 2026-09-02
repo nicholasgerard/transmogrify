@@ -402,6 +402,8 @@ test('dispatch collections ignore only internal atomic-write remnants', (t) => {
   const temporary = `.${crypto.randomUUID()}.json.${process.pid}.${crypto.randomUUID()}.tmp`;
   fs.writeFileSync(path.join(paths.dispatches, temporary), '{}\n', { mode: 0o600 });
   assert.deepEqual(listDispatches(fixture.context, fixture.env), [reserved.dispatch]);
+  fs.writeFileSync(path.join(paths.dispatches, '.DS_Store'), 'host metadata\n', { mode: 0o600 });
+  assert.deepEqual(listDispatches(fixture.context, fixture.env), [reserved.dispatch]);
   fs.writeFileSync(path.join(paths.dispatches, 'unexpected.tmp'), '{}\n', { mode: 0o600 });
   assert.throws(() => listDispatches(fixture.context, fixture.env), /invalid record name/);
 });

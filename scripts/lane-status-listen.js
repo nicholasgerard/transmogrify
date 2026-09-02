@@ -10,6 +10,7 @@ const { AppServerClient, validateUrl } = require('./lib/app-server');
 const { activeLanes } = require('./lib/state');
 const { boundedCursor, laneNameError } = require('./lib/validation');
 const { verifyLaneSeat } = require('./lib/worktree');
+const { VERSION } = require('./lib/version');
 
 const SOURCE_KINDS = [
   'cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
@@ -319,7 +320,7 @@ async function pollStatuses() {
       clientInfo: {
         name: 'transmogrify-lane-status-listen',
         title: 'Transmogrify lane status listener',
-        version: '0.2.0',
+        version: VERSION,
       },
     });
     client.on('thread/status/changed', (params) => observeStatus(params?.threadId, params?.status, 'notification'));

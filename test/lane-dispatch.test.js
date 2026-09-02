@@ -1,0 +1,252 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const test = require('node:test');
+const { main } = require('../scripts/lane');
+const { retire: retireCodex, spawn: spawnCodex } = require('../scripts/lib/codex-adapter');
+const {
+  countEvents, createParentContext, pathsFor, reserveDispatch,
+} = require('../scripts/lib/dispatch');
+const {
+  completeLaneOperation, ensureRegistry, listLanes, listOperations, pendingOperationForLane,
+  registerLane, reserveSpawn, updateLane,
+} = require('../scripts/lib/state');
+const { verifySeat } = require('../scripts/lib/worktree');
+const { NO_RESPONSE, startMockAppServer } = require('./helpers/mock-app-server');
+const { createRepoWithSeat } = require('./helpers/repo-fixture');
+
+const CATALOG = { data: [{
+  id: 'sol-id',
+  model: 'gpt-5.6-sol',
+  displayName: 'GPT-5.6 Sol',
+  description: 'Flagship',
+  hidden: false,
+  isDefault: true,
+  supportedReasoningEfforts: [
+    { reasoningEffort: 'low', description: 'Low' },
+    { reasoningEffort: 'high', description: 'High' },
+  ],
+  defaultReasoningEffort: 'low',
+  serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Premium fast speed' }],
+  defaultServiceTier: null,
+}], nextCursor: null };
+
+function runtimeFor(url) {
+  return {
+    endpoint: new URL(url).toString(),
+    codexHome: '/tmp/codex-home',
+    platformFamily: 'unix',
+    platformOs: 'test',
+  };
+}
+
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function rewriteDispatch(env, dispatchId, patch) {
+  const file = path.join(pathsFor(env).dispatches, `${dispatchId}.json`);
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, `${JSON.stringify({ ...record, ...patch })}\n`, { mode: 0o600 });
+}
+
+test('parent wait observes every child each round so a busy child cannot starve a terminal one', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'codex', hostApp: 'codex-desktop', displayName: 'Starvation parent',
+  }, fixture.env);
+  const cwd = fs.realpathSync(fixture.seat);
+  let turnCounter = 0;
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return { result: { thread: { id: 'thread-a', cwd, name: '::: chatty child', status: { type: 'idle' } } } };
+    }
+    if (request.method === 'thread/turns/list') {
+      turnCounter += 1;
+      return { result: { data: [{ id: `turn-${turnCounter}`, status: 'completed', items: [] }] } };
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  t.after(() => server.close());
+
+  const laneA = crypto.randomUUID();
+  const a = reserveDispatch({
+    parentContext, repoRoot: fixture.repoRoot, laneId: laneA, targetProvider: 'codex',
+    backend: 'codex-app-server', displayName: '::: chatty child', prompt: 'Chat.',
+  }, fixture.env);
+  registerLane(fixture.repoRoot, {
+    laneId: laneA, backend: 'codex-app-server', target: 'codex', providerId: 'thread-a',
+    displayName: '::: chatty child', state: 'idle', runtime: runtimeFor(server.url),
+    seat: verifySeat(fixture.repoRoot, fixture.seat, fixture.worktreesRoot), lineage: a.lineage,
+  }, fixture.env);
+
+  await sleep(10);
+  const laneB = crypto.randomUUID();
+  const operationId = crypto.randomUUID();
+  const b = reserveDispatch({
+    parentContext, repoRoot: fixture.repoRoot, laneId: laneB, targetProvider: 'codex',
+    backend: 'codex-app-server', displayName: '::: quiet child', prompt: 'Work.',
+  }, fixture.env);
+  reserveSpawn(fixture.repoRoot, {
+    operation: { operationId, type: 'spawn', laneId: laneB, details: { dispatchId: b.dispatch.dispatchId } },
+    lane: {
+      laneId: laneB, backend: 'codex-app-server', target: 'codex', displayName: '::: quiet child',
+      state: 'planned', operationId, runtime: runtimeFor(server.url), seat: null, lineage: b.lineage,
+    },
+  }, fixture.env);
+  updateLane(fixture.repoRoot, laneB, { state: 'failed' }, fixture.env);
+  completeLaneOperation(fixture.repoRoot, laneB, operationId, { state: 'notDelivered' }, fixture.env);
+
+  const result = await main([
+    'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '1500',
+  ], fixture.env);
+  const byDispatch = new Map(result.events.map((event) => [event.dispatchId, event.type]));
+  assert.equal(byDispatch.get(a.dispatch.dispatchId), 'child.turn-completed');
+  assert.equal(byDispatch.get(b.dispatch.dispatchId), 'child.failed');
+});
+
+test('a child whose repository disappeared is reported and raises one attention event', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'codex', hostApp: 'codex-desktop', displayName: 'Two repo parent',
+  }, fixture.env);
+  const repoB = path.join(fixture.root, 'repo-b');
+  fs.mkdirSync(repoB);
+  execFileSync('git', ['init', '--quiet', repoB]);
+  ensureRegistry(repoB, fixture.env);
+  const reserve = (repoRoot, displayName) => reserveDispatch({
+    parentContext, repoRoot, laneId: crypto.randomUUID(), targetProvider: 'codex',
+    backend: 'codex-app-server', displayName, prompt: 'Do the work.',
+  }, fixture.env);
+  reserve(fixture.repoRoot, '::: child in repo a');
+  const childB = reserve(repoB, '::: child in repo b');
+  rewriteDispatch(fixture.env, childB.dispatch.dispatchId, {
+    createdAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+  });
+  fs.rmSync(repoB, { recursive: true, force: true });
+
+  const children = await main(['children', '--parent-context-file', parentContext.file], fixture.env);
+  assert.equal(children.children.length, 2);
+  const orphan = children.children.find((child) => child.dispatchId === childB.dispatch.dispatchId);
+  assert.equal(orphan.laneObservation, 'repository-unavailable');
+
+  const waited = await main([
+    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '500',
+  ], fixture.env);
+  assert.equal(waited.events.length, 1);
+  assert.equal(waited.events[0].dispatchId, childB.dispatch.dispatchId);
+  assert.equal(waited.events[0].type, 'child.needs-attention');
+  await main(['ack', '--parent-context-file', parentContext.file, '--event', waited.events[0].eventId], fixture.env);
+  await assert.rejects(() => main([
+    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '300',
+  ], fixture.env), (error) => error.code === 'NO_EVENT');
+  assert.equal(countEvents(parentContext, {}, fixture.env), 0);
+});
+
+test('an unresolved first-turn spawn wakes the parent once and can be retired without replay', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'claude', hostApp: 'claude-desktop', displayName: 'Unresolved spawn parent',
+  }, fixture.env);
+  const cwd = fs.realpathSync(fixture.seat);
+  let turnStarts = 0;
+  let archives = 0;
+  const server = await startMockAppServer((request) => {
+    switch (request.method) {
+      case 'model/list': return { result: CATALOG };
+      case 'thread/start': return { result: { cwd, thread: { id: 'thread-unresolved', cwd } } };
+      case 'turn/start': turnStarts += 1; return NO_RESPONSE;
+      case 'thread/read':
+        return { result: { thread: { id: 'thread-unresolved', cwd, name: cwd, status: { type: 'idle' } } } };
+      case 'thread/turns/list': return { result: { data: [] } };
+      case 'thread/items/list': return { result: { data: [], nextCursor: null } };
+      case 'thread/archive': archives += 1; return { result: {} };
+      case 'thread/list':
+        return { result: { data: [{ id: 'thread-unresolved', cwd }], nextCursor: null } };
+      default: throw new Error(`unexpected ${request.method}`);
+    }
+  });
+  t.after(() => server.close());
+
+  await assert.rejects(() => spawnCodex({
+    repoRoot: fixture.repoRoot, worktrees: fixture.worktreesRoot, cwd: fixture.seat, url: server.url,
+    allowProtocolOnly: true, name: 'unresolved', input: 'never lands', parentContext,
+    turnStartTimeoutMs: 25,
+  }, fixture.env), /timeout awaiting turn\/start/);
+  assert.equal(turnStarts, 1);
+  const lane = listLanes(fixture.repoRoot, fixture.env)[0];
+  assert.equal(lane.state, 'deliveryUnknown');
+
+  const waitArgs = [
+    'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '1500',
+  ];
+  const first = await main(waitArgs, fixture.env);
+  assert.deepEqual(first.events.map((event) => event.type), ['child.needs-attention']);
+  await main(['ack', '--parent-context-file', parentContext.file, '--event', first.events[0].eventId], fixture.env);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).state, 'unknown');
+  await assert.rejects(() => main(waitArgs, fixture.env), (error) => error.code === 'NO_EVENT');
+  await assert.rejects(() => main(waitArgs, fixture.env), (error) => error.code === 'NO_EVENT');
+
+  const retired = await retireCodex({
+    repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url,
+    harvestedOutputSha256: 'c'.repeat(64),
+  }, fixture.env);
+  assert.equal(retired.state, 'archivedVerified');
+  assert.equal(turnStarts, 1);
+  assert.equal(archives, 1);
+  const operations = listOperations(fixture.repoRoot, fixture.env);
+  const spawnOperation = operations.find((operation) => operation.type === 'spawn');
+  assert.equal(spawnOperation.state, 'failed');
+  assert.equal(spawnOperation.details.supersededBy, 'retire');
+  assert.equal(spawnOperation.details.turnOutcome, 'notObserved');
+  assert.equal(operations.find((operation) => operation.type === 'retire').state, 'complete');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+
+  const third = await main(waitArgs, fixture.env);
+  assert.deepEqual(third.events.map((event) => event.type), ['child.retired']);
+});
+
+test('a verified spawn whose parent event cannot be recorded reports the provider effect as verified', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'codex', hostApp: 'codex-desktop', displayName: 'Broken event store parent',
+  }, fixture.env);
+  const eventDirectory = path.join(pathsFor(fixture.env).events, parentContext.parent.parentRef);
+  fs.mkdirSync(eventDirectory, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(eventDirectory, `${crypto.randomUUID()}.json`), '{}\n', { mode: 0o600 });
+  const cwd = fs.realpathSync(fixture.seat);
+  const server = await startMockAppServer((request) => {
+    switch (request.method) {
+      case 'model/list': return { result: CATALOG };
+      case 'thread/start': return { result: { cwd, thread: { id: 'thread-verified', cwd } } };
+      case 'turn/start':
+        return { result: { turn: { id: 'turn-verified', status: 'inProgress', items: [{
+          id: 'user-1', type: 'userMessage', clientId: request.params.clientUserMessageId,
+          content: request.params.input,
+        }] } } };
+      case 'thread/name/set': return { result: {} };
+      case 'thread/read':
+        return { result: { thread: {
+          id: 'thread-verified', cwd, name: '::: verified child', status: { type: 'active', activeFlags: [] },
+        } } };
+      default: throw new Error(`unexpected ${request.method}`);
+    }
+  });
+  t.after(() => server.close());
+
+  await assert.rejects(() => spawnCodex({
+    repoRoot: fixture.repoRoot, worktrees: fixture.worktreesRoot, cwd: fixture.seat, url: server.url,
+    allowProtocolOnly: true, name: 'verified child', input: 'Do the work.', parentContext,
+  }, fixture.env), (error) =>
+    error.code === 'PARENT_EVENT_UNRECORDED' && error.details.providerMutation === 'verified' &&
+    error.details.phase === 'parentEvent'
+  );
+  assert.equal(server.requests.filter((request) => request.method === 'turn/start').length, 1);
+  const lane = listLanes(fixture.repoRoot, fixture.env)[0];
+  assert.equal(lane.state, 'active');
+  assert.equal(lane.providerId, 'thread-verified');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].state, 'complete');
+});

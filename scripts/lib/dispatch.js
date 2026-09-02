@@ -71,7 +71,10 @@ function boundedDirectoryEntries(directory, maximum, label) {
   // atomicWriteJson uses this exact private temporary-name shape. A reader may
   // overlap the write, or a process may crash before rename. Such files are
   // never records and must not poison or consume the bounded collection.
-  const entries = fs.readdirSync(directory).filter((entry) => !ATOMIC_TEMP_PATTERN.test(entry));
+  // Dot-prefixed non-JSON entries (for example Finder's .DS_Store) are host
+  // metadata, never records; every other unexpected name still fails closed.
+  const entries = fs.readdirSync(directory).filter((entry) =>
+    !ATOMIC_TEMP_PATTERN.test(entry) && !(entry.startsWith('.') && !entry.endsWith('.json')));
   if (entries.length > maximum) {
     throw new DispatchError('LOCAL_STATE_LIMIT', `${label} exceeds its bounded record limit`);
   }

@@ -71,18 +71,47 @@ test('lane CLI rejects unknown operations, targets, and flags without provider m
   ], {}), /not valid for reconcile/);
 });
 
-test('public capability output retains provider-neutral intent, effort, and speed names', () => {
+test('public capability output retains catalog ids, names, and provider-neutral descriptors', () => {
   const projected = publicSuccess({
+    operation: 'capabilities',
     intents: [{ id: 'balanced', intent: 'balanced', label: 'Balanced' }],
     selectionGuide: {
       efforts: [{ id: 'high', effort: 'high', useWhen: 'Difficult work.' }],
       speeds: [{ id: 'standard', speed: 'standard', useWhen: 'Default.' }],
     },
+    catalog: {
+      source: { kind: 'app-server:model/list', userAgent: 'codex_cli_rs/0.151.0', verifiedAt: '2026-09-02' },
+      models: [{
+        id: 'gpt-5.6-sol', selector: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol',
+        nativeSpeedTiers: [{ id: 'priority', name: 'Fast', description: 'Premium fast speed' }],
+        executionSettings: [],
+      }],
+      executionSettings: [{
+        id: 'ultracode', description: 'Dynamic workflows.', requiredEffort: 'xhigh',
+        nativeControl: { kind: 'claude-effort-flag', value: 'ultracode' },
+      }],
+    },
+    receipt: { name: '::: still redacted', providerId: 'thread-private', path: '/Users/private' },
   });
-  assert.equal(projected.intents[0].id, undefined);
+  assert.equal(projected.intents[0].id, 'balanced');
   assert.equal(projected.intents[0].intent, 'balanced');
   assert.equal(projected.selectionGuide.efforts[0].effort, 'high');
   assert.equal(projected.selectionGuide.speeds[0].speed, 'standard');
+  assert.equal(projected.catalog.models[0].id, 'gpt-5.6-sol');
+  assert.deepEqual(projected.catalog.models[0].nativeSpeedTiers[0], {
+    id: 'priority', name: 'Fast', description: 'Premium fast speed',
+  });
+  assert.equal(projected.catalog.executionSettings[0].id, 'ultracode');
+  assert.equal(projected.catalog.source.userAgent, 'codex_cli_rs/0.151.0');
+  assert.deepEqual(projected.receipt, {});
+  const children = publicSuccess({
+    children: [{
+      resolvedProfile: { resolved: { setting: { id: 'ultracode', selection: 'explicit' } } },
+      providerId: 'thread-private',
+    }],
+  });
+  assert.equal(children.children[0].resolvedProfile.resolved.setting.id, 'ultracode');
+  assert.equal(children.children[0].providerId, undefined);
 });
 
 test('lane CLI can recover exact parent contexts without exposing private native references', async (t) => {
@@ -216,8 +245,11 @@ test('parent wait observes later children after an earlier terminal child was ac
     '--repo-root', fixture.repoRoot,
     '--timeout-ms', '1000',
   ], fixture.env);
-  assert.equal(first.events.length, 1);
-  assert.equal(first.events[0].dispatchId, dispatches[0].dispatch.dispatchId);
+  assert.deepEqual(
+    first.events.map((event) => event.dispatchId).sort(),
+    dispatches.map((dispatch) => dispatch.dispatch.dispatchId).sort(),
+  );
+  assert.deepEqual(first.events.map((event) => event.type), ['child.failed', 'child.failed']);
   await main([
     'ack', '--parent-context-file', context.file,
     '--event', first.events[0].eventId,
@@ -228,7 +260,16 @@ test('parent wait observes later children after an earlier terminal child was ac
     '--timeout-ms', '1000',
   ], fixture.env);
   assert.equal(second.events.length, 1);
-  assert.equal(second.events[0].dispatchId, dispatches[1].dispatch.dispatchId);
+  assert.equal(second.events[0].eventId, first.events[1].eventId);
+  await main([
+    'ack', '--parent-context-file', context.file,
+    '--event', second.events[0].eventId,
+  ], fixture.env);
+  await assert.rejects(() => main([
+    'wait', '--parent-context-file', context.file,
+    '--repo-root', fixture.repoRoot,
+    '--timeout-ms', '300',
+  ], fixture.env), (error) => error.code === 'NO_EVENT');
 });
 
 test('lane CLI routes Codex recover input to exact boundary resume', async (t) => {

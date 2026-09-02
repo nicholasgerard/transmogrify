@@ -2,8 +2,9 @@
 # Launch the shared Codex app-server runtime DETACHED from this shell/session,
 # or report the one already listening. Safe to run repeatedly.
 #
-# The runtime hosts every lane's executing turns and may also serve native app
-# clients. Its lifetime must be independent of any one operator shell.
+# The runtime hosts every lane's executing turns for this protocol surface. It
+# is a standalone app-server: Codex Desktop is not documented to adopt it. Its
+# lifetime must be independent of any one operator shell.
 #
 # Env overrides:
 #   TRANSMOGRIFY_BIN   codex binary   (default PATH, then standalone fallback)

@@ -256,6 +256,15 @@ function planManagedSeat(repoRoot, worktreesRoot, laneId, options = {}) {
   const branchName = options.branchName || `transmogrify/${laneId}`;
   if (branchName.startsWith('-')) throw new Error(`invalid managed branch name: ${branchName}`);
   git(project.root, ['check-ref-format', '--branch', branchName]);
+  let existingBranch = null;
+  try {
+    existingBranch = git(project.root, ['show-ref', '--verify', '--hash', `refs/heads/${branchName}`]).trim();
+  } catch {}
+  if (existingBranch !== null) {
+    // A fresh managed seat never adopts a branch that already exists; only a
+    // durable seat intent may re-materialize the branch it reserved.
+    throw new Error(`managed branch already exists: ${branchName}`);
+  }
   const baseRef = options.baseRef || 'HEAD';
   if (baseRef.startsWith('-')) throw new Error(`invalid managed base ref: ${baseRef}`);
   const baseCommit = git(project.root, ['rev-parse', '--verify', `${baseRef}^{commit}`]).trim();

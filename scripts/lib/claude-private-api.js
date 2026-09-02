@@ -18,7 +18,7 @@ const DESKTOP_INFO_PLIST = '/Applications/Claude.app/Contents/Info.plist';
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const MAX_PRIVATE_RESPONSE_BYTES = 64 * 1024;
 const READABLE_SESSION_STATUSES = new Set(['active', 'connected', 'disconnected', 'archived']);
-const VERIFIED_PRIVATE_CLI_VERSIONS = new Set(['2.1.257', '2.1.258']);
+const VERIFIED_PRIVATE_CLI_VERSIONS = new Set(['2.1.258']);
 const CCR_HEADERS = {
   'anthropic-version': '2023-06-01',
   'anthropic-beta': 'ccr-byoc-2025-07-29',

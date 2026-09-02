@@ -65,7 +65,7 @@ function stateRoot(env = process.env) {
   const configured = env.TRANSMOGRIFY_STATE_DIR ||
     path.join(env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), '.local', 'state'), 'transmogrify');
   if (!path.isAbsolute(configured)) {
-    throw new Error(`TRANSMOGRIFY_STATE_DIR must be absolute: ${configured}`);
+    throw new Error(`state root must be absolute (TRANSMOGRIFY_STATE_DIR or XDG_STATE_HOME): ${configured}`);
   }
   let ancestor = path.resolve(configured);
   const missing = [];
@@ -671,6 +671,19 @@ function fallbackProcessBirth(startMs = SELF_START_MS) {
   return `${FALLBACK_BIRTH_PREFIX}${Math.round(startMs)}`;
 }
 
+// A lock owner whose PID no longer exists cannot be holding the lock: no live
+// process can release it, so it is reclaimable without the ownerless grace.
+function processGone(owner, dependencies = {}) {
+  if (!owner || !Number.isInteger(owner.pid) || owner.pid < 1) return false;
+  const signal = dependencies.kill || process.kill.bind(process);
+  try {
+    signal(owner.pid, 0);
+    return false;
+  } catch (error) {
+    return error?.code === 'ESRCH';
+  }
+}
+
 function processMatches(owner, dependencies = {}) {
   if (!owner || !Number.isInteger(owner.pid) || owner.pid < 1 || !owner.processBirth) return false;
   const signal = dependencies.kill || process.kill.bind(process);
@@ -738,7 +751,8 @@ function staleLockObservation(lockDirectory, ownerlessGraceMs) {
     return {
       stat,
       owner,
-      stale: Date.now() - ownerStat.mtimeMs >= ownerlessGraceMs && !processMatches(owner),
+      stale: processGone(owner) ||
+        (Date.now() - ownerStat.mtimeMs >= ownerlessGraceMs && !processMatches(owner)),
     };
   }
   return {
@@ -791,16 +805,71 @@ function reclaimStaleCoordinator(reaperDirectory, ownerlessGraceMs) {
   return quarantineObservedLock(reaperDirectory, observed);
 }
 
+// Publish the owner receipt inside a lock directory this process just created.
+// The receipt is written to an exclusive temporary file and then hard-linked
+// to owner.json, so it appears atomically and complete, is never created by
+// re-making a directory another process quarantined meanwhile (ENOENT), and
+// never overwrites a receipt that landed first (EEXIST). The caller must still
+// confirm the directory identity and token before treating the lock as held.
+function publishLockOwner(lockDirectory, owner) {
+  const temporary = path.join(lockDirectory, `.owner.${process.pid}.${crypto.randomUUID()}.tmp`);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  try {
+    fs.writeFileSync(descriptor, `${JSON.stringify(owner, null, 2)}\n`, 'utf8');
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  try {
+    fs.linkSync(temporary, path.join(lockDirectory, 'owner.json'));
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST' || error.code === 'ENOENT') return false;
+    throw error;
+  } finally {
+    try { fs.unlinkSync(temporary); } catch {}
+  }
+}
+
+// Create the lock directory and publish the owner receipt. Returns the owner
+// only when the directory this process created still exists unchanged and
+// carries this exact token; any other outcome means the claim was lost.
+function claimLock(lockDirectory, owner) {
+  let created;
+  try {
+    fs.mkdirSync(lockDirectory, { mode: 0o700 });
+    created = fs.lstatSync(lockDirectory);
+  } catch (error) {
+    if (error.code === 'EEXIST') return null;
+    throw error;
+  }
+  const published = publishLockOwner(lockDirectory, owner);
+  let current = null;
+  try { current = fs.lstatSync(lockDirectory); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const sameDirectory = current !== null && current.dev === created.dev && current.ino === created.ino;
+  if (published && sameDirectory && readJson(path.join(lockDirectory, 'owner.json'))?.token === owner.token) {
+    return owner;
+  }
+  if (published && !sameDirectory) {
+    // The receipt landed in a directory another contender re-created after
+    // quarantining ours; withdraw it so that contender can complete its claim.
+    try { releaseLock(lockDirectory, owner); } catch {}
+  }
+  return null;
+}
+
 function acquireReaper(reaperDirectory, ownerlessGraceMs) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      fs.mkdirSync(reaperDirectory, { mode: 0o700 });
-      const owner = lockOwner();
-      atomicWriteJson(path.join(reaperDirectory, 'owner.json'), owner);
-      return owner;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-    }
+    const claimed = claimLock(reaperDirectory, lockOwner());
+    if (claimed) return claimed;
     if (!reclaimStaleCoordinator(reaperDirectory, ownerlessGraceMs)) return null;
   }
   return null;
@@ -832,7 +901,8 @@ function reapStaleLock(lockDirectory, observed, ownerlessGraceMs) {
         if (error.code === 'ENOENT') return false;
         throw error;
       }
-      stale = Date.now() - ownerStat.mtimeMs >= ownerlessGraceMs && !processMatches(currentOwner);
+      stale = processGone(currentOwner) ||
+        (Date.now() - ownerStat.mtimeMs >= ownerlessGraceMs && !processMatches(currentOwner));
     } else {
       if (currentOwner) return false;
       stale = Date.now() - currentStat.mtimeMs >= ownerlessGraceMs;
@@ -855,13 +925,7 @@ function acquireLock(lockDirectory, options = {}) {
   while (true) {
     const reaperDirectory = `${lockDirectory}.reaper`;
     reclaimStaleCoordinator(reaperDirectory, ownerlessGraceMs);
-    try {
-      fs.mkdirSync(lockDirectory, { mode: 0o700 });
-      atomicWriteJson(path.join(lockDirectory, 'owner.json'), pendingOwner);
-      return pendingOwner;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-    }
+    if (claimLock(lockDirectory, pendingOwner)) return pendingOwner;
 
     const observed = staleLockObservation(lockDirectory, ownerlessGraceMs);
     if (!observed) continue;
@@ -870,7 +934,9 @@ function acquireLock(lockDirectory, options = {}) {
     }
 
     if (Date.now() - started >= waitMs) {
-      throw new Error(`timed out waiting for ownership lock: ${lockDirectory}`);
+      const error = new Error(`timed out waiting for ownership lock: ${lockDirectory}`);
+      error.code = 'LOCAL_LOCK_TIMEOUT';
+      throw error;
     }
     sleepSync(pollMs);
   }
@@ -883,6 +949,11 @@ function releaseLock(lockDirectory, owner) {
     throw new Error(`refusing to release a lock owned by another process: ${lockDirectory}`);
   }
   fs.unlinkSync(ownerFile);
+  for (const entry of fs.readdirSync(lockDirectory)) {
+    if (/^\.owner\.[1-9][0-9]*\.[0-9a-f-]{36}\.tmp$/.test(entry)) {
+      try { fs.unlinkSync(path.join(lockDirectory, entry)); } catch {}
+    }
+  }
   fs.rmdirSync(lockDirectory);
 }
 

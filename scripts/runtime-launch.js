@@ -109,11 +109,15 @@ function execFileResult(executable, args, options = {}) {
   });
 }
 
+// lsof is resolved only from the system directories so a same-user PATH entry
+// cannot substitute a listener report.
+const SYSTEM_TOOL_PATH = '/usr/sbin:/usr/bin:/bin:/sbin';
+
 async function inspectListeners(port, dependencies = {}) {
   const run = dependencies.execFileResult || execFileResult;
   const result = await run('lsof', [
     '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpcn',
-  ], { timeoutMs: 3000, env: dependencies.env || process.env });
+  ], { timeoutMs: 3000, env: { ...(dependencies.env || process.env), PATH: SYSTEM_TOOL_PATH } });
   if (result.code === 1 && !result.stdout.trim()) return [];
   return parseLsofListeners(result.stdout, port);
 }

@@ -3,6 +3,7 @@
 
 /** Read-only identity and compatibility probe for a loopback Codex app-server. */
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
+const { VERSION } = require('./lib/version');
 
 function usage(message) {
   if (message) console.error(`error: ${message}`);
@@ -48,7 +49,7 @@ try {
     clientInfo: {
       name: 'transmogrify-runtime-probe',
       title: 'transmogrify runtime probe',
-      version: '0.2.0',
+      version: VERSION,
     },
   });
   try {

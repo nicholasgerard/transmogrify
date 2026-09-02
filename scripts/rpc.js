@@ -7,6 +7,7 @@ const { TextDecoder } = require('node:util');
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
 const { requireOwnedProviderLane } = require('./lib/state');
 const { boundedCursor } = require('./lib/validation');
+const { VERSION } = require('./lib/version');
 
 const MAX_PARAMS_BYTES = 64 * 1024;
 const THREAD_STATUS_TYPES = new Set(['active', 'idle', 'systemError', 'notLoaded']);
@@ -173,7 +174,7 @@ if (OWNED_CONTENT_METHODS.has(method)) {
   const client = new AppServerClient({
     url,
     timeoutMs,
-    clientInfo: { name: 'transmogrify-rpc', title: 'transmogrify rpc', version: '0.2.0' },
+    clientInfo: { name: 'transmogrify-rpc', title: 'transmogrify rpc', version: VERSION },
   });
   client.on('notification', ({ method: notificationMethod }) => {
     void notificationMethod;

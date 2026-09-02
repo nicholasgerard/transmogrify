@@ -11,6 +11,7 @@ const {
   parseAgents,
 } = require('./lib/claude-surface');
 const { ensureRegistry, readRegistry } = require('./lib/state');
+const { VERSION } = require('./lib/version');
 
 const CODEX_BACKEND = 'codex-app-server';
 const CLAUDE_BACKEND = 'claude-code';
@@ -137,7 +138,7 @@ async function probeCodex(options, dependencies) {
         clientInfo: {
           name: 'transmogrify-doctor',
           title: 'transmogrify doctor',
-          version: '0.2.0',
+          version: VERSION,
         },
       });
     const initialized = await client.connect();

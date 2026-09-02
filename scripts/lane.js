@@ -24,6 +24,36 @@ const {
 } = require('./lib/state');
 
 const MAX_INPUT_BYTES = 64 * 1024;
+// Provider registry: a new provider is one adapter module plus one entry here.
+// Every adapter exposes spawn, status, steer, recover/reconcile, retire, and
+// executionCapabilities; the fleet reconciliation entry point name differs
+// per provider, so it is bound once in this table.
+const PROVIDERS = new Map([
+  ['codex', {
+    target: 'codex',
+    backend: 'codex-app-server',
+    adapter: codex,
+    reconcile: (options, env) => codex.recover(options, env),
+  }],
+  ['claude', {
+    target: 'claude',
+    backend: claude.BACKEND,
+    adapter: claude,
+    reconcile: (options, env) => claude.reconcile(options, env),
+  }],
+]);
+const TARGETS = [...PROVIDERS.keys()];
+
+function providerForTarget(target) {
+  return PROVIDERS.get(target) || null;
+}
+
+function providerForBackend(backend) {
+  for (const provider of PROVIDERS.values()) {
+    if (provider.backend === backend) return provider;
+  }
+  return null;
+}
 const HELP = `usage: lane.js <operation> [options]
 
 operations:
@@ -38,6 +68,7 @@ operations:
              [--speed standard|fast] [--allow-protocol-only]
   children   --parent-context-file <absolute>
   wait       --parent-context-file <absolute> [--after <sequence>] [--timeout-ms <0..60000>]
+             [--url <loopback-ws-url>] [--claude-bin <absolute-path>]
   ack        --parent-context-file <absolute> --event <event-id>
   steer      --lane <lane-id> (--input <text> | --input-file <absolute|->)
   status     --lane <lane-id>
@@ -47,7 +78,7 @@ operations:
              Codex input starts one boundary turn; Claude recovery accepts no input
   retire     --lane <lane-id> --harvested-output-sha256 <sha256>
              [--private-archive] [--no-cleanup-worktree]
-             [--accept-manual-seat-removal]
+             [--accept-manual-seat-removal]   after an owner-removed blocked seat
   reconcile  --target codex|claude [--lane <lane-id>]
              [--finish-retirements] [--private-archive] [--no-cleanup-worktree]
 
@@ -139,6 +170,7 @@ const SAFE_REFUSALS = new Set([
   'HARVEST_REQUIRED',
   'INVALID_STATE',
   'LANE_RETIRED',
+  'LOCAL_LOCK_TIMEOUT',
   'NOT_DELIVERED',
   'NO_ACTIVE_TURN',
   'NO_EVENT',
@@ -179,10 +211,12 @@ const PUBLIC_ERROR_MESSAGES = new Map([
   ['NOT_OWNED', 'the requested lane is not owned by this operator installation'],
   ['NO_ACTIVE_TURN', 'the owned Codex lane has no active turn'],
   ['NO_EVENT', 'no child event was observed before the bounded timeout'],
+  ['LOCAL_LOCK_TIMEOUT', 'the private operator state is locked by another live Transmogrify process; retry shortly'],
   ['LOCAL_STATE_LIMIT', 'the private operator state exceeded a bounded record limit'],
   ['NATIVE_VISIBILITY_REQUIRED', 'Codex spawn requires a native-visibility receipt or explicit protocol-only authorization'],
   ['OBSERVATION_FAILED', 'one or more exact child lanes could not be observed safely'],
   ['OWNERSHIP_MISMATCH', 'live provider identity does not match the owned receipt'],
+  ['PARENT_EVENT_UNRECORDED', 'lane launch is verified; the durable parent event could not be recorded'],
   ['OPERATION_PENDING', 'the owned lane has an unresolved operation'],
   ['PENDING_OPERATION', 'the owned lane has an unresolved operation'],
   ['PRIVATE_API_DISABLED', 'Claude retirement requires explicit private archive authorization'],
@@ -277,8 +311,8 @@ function adapterForLane(repoRoot, laneId, env) {
     if (/^NOT_OWNED:/.test(error.message)) error.code = 'NOT_OWNED';
     throw error;
   }
-  if (lane.backend === 'codex-app-server') return codex;
-  if (lane.backend === claude.BACKEND) return claude;
+  const provider = providerForBackend(lane.backend);
+  if (provider) return provider.adapter;
   const error = new Error(`unsupported lane backend ${lane.backend}`);
   error.code = 'ADAPTER_MISMATCH';
   throw error;
@@ -312,6 +346,20 @@ function safeDetails(details) {
     .map(([key, value]) => [key, safeDetails(value)]));
 }
 
+// Provider-advertised catalogs, selection guides, and immutable execution
+// profiles are public metadata: their `id`, `name`, and source fields are not
+// provider control handles, so key stripping stops at these subtrees while
+// string redaction still applies.
+const PROJECTION_EXEMPT_KEYS = new Set([
+  'catalog',
+  'executionProfile',
+  'guidance',
+  'intents',
+  'observedProfile',
+  'requestedProfile',
+  'resolvedProfile',
+  'selectionGuide',
+]);
 const PRIVATE_RESULT_KEYS = new Set([
   'agent',
   'bridgeId',
@@ -357,13 +405,15 @@ function boundedInteger(value, label, minimum, maximum, fallback) {
   return parsed;
 }
 
-function dispatchSummary(dispatch, lane = null) {
+function dispatchSummary(dispatch, resolved = { lane: null, reason: 'missing' }) {
+  const lane = resolved.lane;
   return {
     dispatchId: dispatch.dispatchId,
     laneId: dispatch.child.laneId,
     target: dispatch.child.targetProvider,
     displayName: dispatch.child.displayName,
     state: lane?.state || dispatch.state,
+    ...(lane ? {} : { laneObservation: resolved.reason }),
     createdAt: dispatch.createdAt,
     requestedProfile: dispatch.requestedProfile,
     resolvedProfile: dispatch.resolvedProfile,
@@ -371,15 +421,23 @@ function dispatchSummary(dispatch, lane = null) {
   };
 }
 
-function laneForDispatch(dispatch, env) {
+function repositoryUnavailable(error) {
+  return error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ||
+    /not a git repository|ownership registry does not exist|REPO_ROOT must be/.test(error?.message || '');
+}
+
+// Resolve the exact owned lane behind a dispatch. `lane` is null when the lane
+// record is missing (`reason: 'missing'`) or when its repository can no longer
+// be resolved (`reason: 'repository-unavailable'`); both are observed as
+// attention conditions instead of failing the whole parent.
+function resolveDispatchLane(dispatch, env) {
   let lane;
   try { lane = requireOwnedLane(dispatch.child.repoRoot, dispatch.child.laneId, env); } catch (error) {
-    if (/^NOT_OWNED:/.test(error.message)) return null;
+    if (/^NOT_OWNED:/.test(error.message)) return { lane: null, reason: 'missing' };
+    if (repositoryUnavailable(error)) return { lane: null, reason: 'repository-unavailable' };
     throw error;
   }
-  const expectedBackend = dispatch.child.targetProvider === 'codex'
-    ? 'codex-app-server'
-    : dispatch.child.targetProvider === 'claude' ? 'claude-code' : null;
+  const expectedBackend = providerForTarget(dispatch.child.targetProvider)?.backend ?? null;
   if (!lane.lineage || lane.lineage.dispatchId !== dispatch.dispatchId ||
       lane.lineage.parentRef !== dispatch.parentRef ||
       lane.lineage.installationId !== dispatch.installationId ||
@@ -390,7 +448,11 @@ function laneForDispatch(dispatch, env) {
     error.code = 'NOT_OWNED';
     throw error;
   }
-  return lane;
+  return { lane, reason: null };
+}
+
+function laneForDispatch(dispatch, env) {
+  return resolveDispatchLane(dispatch, env).lane;
 }
 
 function completedSpawnOperation(dispatch, lane, env) {
@@ -491,11 +553,15 @@ function localEventForLane(dispatch, lane, env) {
     }, env).event;
   }
   if (!terminal) return null;
+  // An open spawn journal is reported once by the unresolved-spawn path after
+  // non-replaying reconciliation; reporting it here as well would alternate
+  // observation phases and re-notify the parent on every wait.
+  if (pending?.type === 'spawn') return null;
   const [phase, eventType] = terminal;
   return recordObservation({
     dispatchId: dispatch.dispatchId,
     phase,
-    providerFingerprint: `${lane.state}:${lane.turnId || 'none'}:${lane.updatedAt}`,
+    providerFingerprint: `${lane.state}:${lane.turnId || 'none'}:${pending?.operationId || 'none'}`,
     eventType,
     data: { state: phase },
   }, env).event;
@@ -512,24 +578,26 @@ async function reconcilePendingSpawnDispatch(dispatch, lane, values, env, timeou
     timeoutMs,
     commandTimeoutMs: timeoutMs,
   };
-  if (lane.backend === 'codex-app-server') await codex.recover(options, env);
-  else await claude.reconcile(options, env);
+  await providerForBackend(lane.backend).reconcile(options, env);
   return requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
 }
 
 async function observeDispatch(dispatch, values, env, deadline, remainingChildren) {
-  let lane = laneForDispatch(dispatch, env);
+  const resolved = resolveDispatchLane(dispatch, env);
+  let lane = resolved.lane;
   if (!lane) {
     const ageMs = Date.now() - Date.parse(dispatch.createdAt);
     if (Number.isFinite(ageMs) && ageMs >= 30_000) {
-      const eventType = dispatch.state === 'reserved'
-        ? 'child.needs-attention' : 'child.delivery-unknown';
+      const unavailable = resolved.reason === 'repository-unavailable';
+      const attention = unavailable || dispatch.state === 'reserved';
       const observation = recordObservation({
         dispatchId: dispatch.dispatchId,
-        phase: dispatch.state === 'reserved' ? 'needs-attention' : 'delivery-unknown',
-        providerFingerprint: `missing-lane:${dispatch.state}:${dispatch.createdAt}`,
-        eventType,
-        data: { state: dispatch.state === 'reserved' ? 'needs-attention' : 'delivery-unknown' },
+        phase: attention ? 'needs-attention' : 'delivery-unknown',
+        providerFingerprint: unavailable
+          ? `repository-unavailable:${dispatch.child.repoRoot}`
+          : `missing-lane:${dispatch.state}:${dispatch.createdAt}`,
+        eventType: attention ? 'child.needs-attention' : 'child.delivery-unknown',
+        data: { state: attention ? 'needs-attention' : 'delivery-unknown' },
       }, env);
       return { lane: null, event: observation.event };
     }
@@ -564,7 +632,18 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
     localEvent = localEventForLane(dispatch, lane, env);
     if (localEvent) return { lane, event: localEvent };
     pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
-    if (pending?.type === 'spawn') return { lane, event: null };
+    if (pending?.type === 'spawn') {
+      // The spawn journal is still open after non-replaying reconciliation:
+      // wake the parent exactly once per journal state instead of going silent.
+      const observation = recordObservation({
+        dispatchId: dispatch.dispatchId,
+        phase: 'needs-attention',
+        providerFingerprint: `spawn-unresolved:${pending.operationId}:${pending.state}`,
+        eventType: 'child.needs-attention',
+        data: { state: 'needs-attention' },
+      }, env);
+      return { lane, event: observation.event };
+    }
   }
   if (['deliveryUnknown', 'archiveUnknown'].includes(lane.state) ||
       (!pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env) &&
@@ -583,15 +662,14 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
     timeoutMs: requestBudget,
     commandTimeoutMs: requestBudget,
   };
-  const result = lane.backend === 'codex-app-server'
-    ? await codex.status(options, env)
-    : await claude.status(options, env);
+  const provider = providerForBackend(lane.backend);
+  const result = await provider.adapter.status(options, env);
   lane = requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
   let phase = result.phase;
   let eventType = null;
   let providerFingerprint;
   const data = { state: lane.state };
-  if (lane.backend === 'codex-app-server') {
+  if (provider.target === 'codex') {
     const turn = result.turn;
     providerFingerprint = `turn:${turn?.id || 'none'}:${turn?.status || phase}`;
     phase = phase === 'executing' ? 'working' : phase;
@@ -627,14 +705,13 @@ async function observeParentChildren(context, values, env, deadline) {
   const dispatches = listDispatches(context, env)
     .filter((dispatch) => !values['repo-root'] || dispatch.child.repoRoot === values['repo-root']);
   const errors = [];
+  // Observe every outstanding child each round; the durable event store is
+  // read afterwards, so one busy child cannot starve a later child's event.
   for (let index = 0; index < dispatches.length; index += 1) {
     if (Date.now() >= deadline) break;
     const dispatch = dispatches[index];
     try {
-      const observed = await observeDispatch(
-        dispatch, values, env, deadline, dispatches.length - index,
-      );
-      if (observed.event) break;
+      await observeDispatch(dispatch, values, env, deadline, dispatches.length - index);
     } catch (error) {
       errors.push({ dispatchId: dispatch.dispatchId, code: error.code || 'OBSERVATION_FAILED' });
     }
@@ -680,14 +757,17 @@ async function waitForParentEvent(context, values, env) {
   }
 }
 
-function publicSuccess(value) {
+function publicSuccess(value, exempt = false) {
   if (value === null || value === undefined) return value;
-  if (Array.isArray(value)) return value.map(publicSuccess);
+  if (Array.isArray(value)) return value.map((entry) => publicSuccess(entry, exempt));
   if (typeof value === 'string') return safeString(value);
   if (typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => !PRIVATE_RESULT_KEYS.has(key))
-    .map(([key, nested]) => [key, publicSuccess(nested)]));
+    .filter(([key]) => exempt || !PRIVATE_RESULT_KEYS.has(key))
+    .map(([key, nested]) => [
+      key,
+      publicSuccess(nested, exempt || PROJECTION_EXEMPT_KEYS.has(key)),
+    ]));
 }
 
 function validateOptionGrammar(operation, usedOptions) {
@@ -837,7 +917,7 @@ async function main(argv, env = process.env) {
     return { version: 1, ok: true, operation: 'parent-list', parents };
   }
   if (operation === 'capabilities') {
-    if (!['codex', 'claude'].includes(values.target)) {
+    if (!TARGETS.includes(values.target)) {
       usage('capabilities requires --target codex|claude');
     }
     if (values.target === 'codex' && values['claude-bin'] !== undefined) {
@@ -846,13 +926,13 @@ async function main(argv, env = process.env) {
     if (values.target === 'claude' && values.url !== undefined) {
       usage('--url is valid only for Codex capabilities');
     }
-    const adapter = values.target === 'codex' ? codex : claude;
+    const { adapter } = providerForTarget(values.target);
     if (typeof adapter.executionCapabilities !== 'function') {
       usage(`${values.target} execution capabilities are unavailable`);
     }
     return adapter.executionCapabilities({ url: values.url, claudeBin: values['claude-bin'] }, env);
   }
-  if (operation === 'spawn' && !['codex', 'claude'].includes(values.target)) {
+  if (operation === 'spawn' && !TARGETS.includes(values.target)) {
     usage('spawn requires --target codex|claude');
   }
   if (operation === 'spawn' && values.target === 'codex' && values['claude-bin'] !== undefined) {
@@ -874,7 +954,7 @@ async function main(argv, env = process.env) {
     const project = repoFilter ? resolveProject(repoFilter) : null;
     const children = listDispatches(parentContext, env)
       .filter((dispatch) => !project || dispatch.child.repoRoot === project.root)
-      .map((dispatch) => dispatchSummary(dispatch, laneForDispatch(dispatch, env)));
+      .map((dispatch) => dispatchSummary(dispatch, resolveDispatchLane(dispatch, env)));
     const projectKey = project ? digest(project.commonDir) : undefined;
     const unacknowledgedEvents = countEvents(parentContext, { projectKey }, env);
     return {
@@ -925,10 +1005,10 @@ async function main(argv, env = process.env) {
   };
 
   if (operation === 'spawn') {
-    return values.target === 'codex' ? codex.spawn(options, env) : claude.spawn(options, env);
+    return providerForTarget(values.target).adapter.spawn(options, env);
   }
   if (operation === 'reconcile') {
-    if (!['codex', 'claude'].includes(values.target)) usage('reconcile requires --target codex|claude');
+    if (!TARGETS.includes(values.target)) usage('reconcile requires --target codex|claude');
     if (values.target === 'codex' && (values['claude-bin'] !== undefined || values['private-archive'] !== undefined)) {
       usage('Claude options are valid only for Claude reconciliation');
     }
@@ -938,11 +1018,8 @@ async function main(argv, env = process.env) {
     if (values.target === 'claude' && values.url !== undefined) {
       usage('--url is valid only for Codex reconciliation');
     }
-    if (values.target === 'codex') {
-      const result = await codex.recover(options, env);
-      return { ...result, operation: 'reconcile' };
-    }
-    return claude.reconcile(options, env);
+    const result = await providerForTarget(values.target).reconcile(options, env);
+    return { ...result, operation: 'reconcile' };
   }
   if (!values.lane) usage(`${operation} requires --lane`);
   const adapter = adapterForLane(repoRoot, values.lane, env);
@@ -950,9 +1027,6 @@ async function main(argv, env = process.env) {
   if (values['claude-bin'] !== undefined && adapter !== claude) usage('--claude-bin is valid only for Claude lanes');
   if (values['private-archive'] !== undefined && adapter !== claude) {
     usage('--private-archive is valid only for Claude retirement');
-  }
-  if (values['accept-manual-seat-removal'] !== undefined && adapter !== claude) {
-    usage('--accept-manual-seat-removal is valid only for Claude retirement');
   }
   if (operation === 'interrupt') {
     if (adapter !== codex) usage('interrupt is supported only for Codex turn cancellation');

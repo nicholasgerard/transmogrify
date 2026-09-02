@@ -682,29 +682,10 @@ async function spawnLane(options, env = process.env) {
     updateLane(options.repoRoot, lane.laneId, { state: 'deliveryUnknown' }, env);
     throw new ClaudeTransmogrifyError('SPAWN_UNCERTAIN', error.message, { laneId: lane.laneId });
   }
+  let finalized;
   try {
-    const finalized = await finalizeSpawn(options, env, surface, runtime, lane, operation, jobId, launch.stdout);
-    if (options.dispatch) {
-      recordEvent({
-        dispatchId: options.dispatch.dispatchId,
-        type: 'child.spawned',
-        fingerprint: `spawn-complete:${operation.operationId}:${finalized.lane.providerId}`,
-        data: { state: 'spawned' },
-      }, env);
-    }
+    finalized = await finalizeSpawn(options, env, surface, runtime, lane, operation, jobId, launch.stdout);
     if (options.onLaunch) options.onLaunch(finalized.lane);
-    return laneResult('spawn', finalized.lane, {
-      operationId: operation.operationId,
-      receipt: {
-        jobId, sessionId: finalized.lane.providerId,
-        bridgeIdSha256: sha256(finalized.lane.providerIdentity.bridgeId),
-        presentation: finalized.presentation.state,
-        requestedModelSelector: finalized.lane.ownership.spawnIntent.modelSelector || null,
-        ...(finalized.lane.executionProfile ? {
-          executionProfile: finalized.lane.executionProfile,
-        } : {}),
-      },
-    });
   } catch (error) {
     const current = requireOwnedLane(options.repoRoot, lane.laneId, env);
     if (current.pendingOperationId === operation.operationId) {
@@ -718,6 +699,42 @@ async function spawnLane(options, env = process.env) {
       ...(error.code ? { causeCode: error.code } : {}),
     });
   }
+  if (options.dispatch) {
+    try {
+      recordEvent({
+        dispatchId: options.dispatch.dispatchId,
+        type: 'child.spawned',
+        fingerprint: `spawn-complete:${operation.operationId}:${finalized.lane.providerId}`,
+        data: { state: 'spawned' },
+      }, env);
+    } catch (error) {
+      // The provider effect is verified and journaled; only the durable parent
+      // notification failed. Never project this as uncertain or not attempted.
+      throw new ClaudeTransmogrifyError(
+        'PARENT_EVENT_UNRECORDED',
+        'lane launch is verified but the durable parent event could not be recorded',
+        {
+          laneId: lane.laneId,
+          providerId: finalized.lane.providerId,
+          providerMutation: 'verified',
+          phase: 'parentEvent',
+          code: error.code || 'INVALID_LOCAL_STATE',
+        },
+      );
+    }
+  }
+  return laneResult('spawn', finalized.lane, {
+    operationId: operation.operationId,
+    receipt: {
+      jobId, sessionId: finalized.lane.providerId,
+      bridgeIdSha256: sha256(finalized.lane.providerIdentity.bridgeId),
+      presentation: finalized.presentation.state,
+      requestedModelSelector: finalized.lane.ownership.spawnIntent.modelSelector || null,
+      ...(finalized.lane.executionProfile ? {
+        executionProfile: finalized.lane.executionProfile,
+      } : {}),
+    },
+  });
 }
 
 async function status(options, env = process.env) {

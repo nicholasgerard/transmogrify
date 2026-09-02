@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 const {
+  TERMINAL_OPERATION_STATES,
   beginLaneOperation,
   bindLaneSeat,
   bindLaneProvider,
@@ -21,6 +22,7 @@ const {
   withLaneLease,
 } = require('./state');
 const { AppServerClient, validateUrl } = require('./app-server');
+const { VERSION } = require('./version');
 const {
   markDispatchJournaled, recordEvent, recordObservation, reserveDispatch, setObservedProfile,
 } = require('./dispatch');
@@ -40,6 +42,7 @@ const {
   captureHarvestReceipt,
   isPermanentCleanupError,
   materializeManagedSeat,
+  pathEntryExists,
   planManagedSeat,
   removeManagedSeat,
   verifyLaneSeat,
@@ -63,6 +66,13 @@ const SOURCE_KINDS = [
 ];
 const RETIRED_STATES = new Set([
   'archivedVerified', 'logicallyRetired', 'cleanupEligible', 'worktreeRemoved',
+]);
+// Spawn journal states in which the provider thread is bound but the first
+// turn's outcome was never receipted. Only exact retirement may close them,
+// and only after observing that no turn is active and the input receipt is
+// absent; the input is never replayed.
+const UNRESOLVED_SPAWN_STATES = new Set([
+  'turnRequestDispatched', 'materialized', 'partial', 'unknown',
 ]);
 const MAX_PAGINATION_PAGES = 100;
 const MAX_PAGINATION_ROWS = 10_000;
@@ -182,7 +192,7 @@ async function withClient(options, callback, env = process.env) {
     clientInfo: {
       name: 'transmogrify',
       title: 'transmogrify',
-      version: '0.2.0',
+      version: VERSION,
     },
     serverRequestHandler: options.serverRequestHandler,
   });
@@ -629,12 +639,28 @@ async function spawn(options, env = process.env) {
       completeLaneOperation(options.repoRoot, laneId, operationId, { state: 'complete' }, env);
       spawnVerified = true;
       if (options.dispatch) {
-        recordEvent({
-          dispatchId: options.dispatch.dispatchId,
-          type: 'child.spawned',
-          fingerprint: `spawn-complete:${operationId}:${threadId}`,
-          data: { state: 'spawned' },
-        }, env);
+        try {
+          recordEvent({
+            dispatchId: options.dispatch.dispatchId,
+            type: 'child.spawned',
+            fingerprint: `spawn-complete:${operationId}:${threadId}`,
+            data: { state: 'spawned' },
+          }, env);
+        } catch (error) {
+          // The provider effect is verified and journaled; only the durable
+          // parent notification failed. Never project this as not attempted.
+          throw new TransmogrifyError(
+            'PARENT_EVENT_UNRECORDED',
+            'lane launch is verified but the durable parent event could not be recorded',
+            {
+              laneId,
+              providerId: threadId,
+              providerMutation: 'verified',
+              phase: 'parentEvent',
+              code: error.code || 'INVALID_LOCAL_STATE',
+            },
+          );
+        }
       }
       const launched = laneResult('spawn', lane, {
         receipt: {
@@ -1508,8 +1534,11 @@ function finishRetiredCleanup(options, lane, operation, harvestReceipt, env) {
     }, env);
     return lane;
   }
-  if (operation.details.cleanupBlocked === true ||
-      operation.state === 'providerRetiredCleanupBlocked') {
+  const blocked = operation.details.cleanupBlocked === true ||
+    operation.state === 'providerRetiredCleanupBlocked';
+  const manuallyRemoved = operation.details.manualSeatRemoval?.acknowledged === true &&
+    !pathEntryExists(lane.seat.path);
+  if (blocked && !manuallyRemoved) {
     throw new TransmogrifyError(
       'CLEANUP_BLOCKED',
       'Codex managed worktree has a permanent cleanup block and requires manual review',
@@ -1545,6 +1574,53 @@ function finishRetiredCleanup(options, lane, operation, harvestReceipt, env) {
   }
 }
 
+async function settleUnresolvedSpawnForRetirement(options, lane, pending, env) {
+  if (!lane.providerId || pending.providerId !== lane.providerId ||
+      !UNRESOLVED_SPAWN_STATES.has(pending.state) ||
+      !/^[0-9a-f]{64}$/.test(pending.details?.inputSha256 || '')) {
+    throw new TransmogrifyError(
+      'OPERATION_PENDING',
+      `lane ${lane.laneId} already has pending spawn operation ${pending.operationId}`,
+    );
+  }
+  return withClient(options, async (client) => {
+    assertRuntimeIdentity(lane, client);
+    const inspected = await inspectThread(client, lane);
+    if (inspected.turn?.status === 'inProgress') {
+      throw new TransmogrifyError('TARGET_ACTIVE', 'refusing to retire a lane with an active newest turn');
+    }
+    const recoveredTurnId = await findTurnByClientMessage(
+      client,
+      lane.providerId,
+      pending.operationId,
+      pending.details.inputSha256,
+    );
+    const observedAt = new Date().toISOString();
+    if (recoveredTurnId) {
+      completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+        state: 'complete',
+        details: { ...pending.details, recoveredTurnId, postconditionObservedAt: observedAt },
+      }, env);
+    } else {
+      completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+        state: 'failed',
+        details: {
+          ...pending.details,
+          supersededBy: 'retire',
+          supersededAt: observedAt,
+          turnOutcome: 'notObserved',
+        },
+      }, env);
+    }
+    return updateLane(options.repoRoot, lane.laneId, {
+      state: observedLaneState(lane, inspected.phase),
+      providerState: inspected.thread.status,
+      turnId: inspected.turn?.id || lane.turnId,
+      lastVerifiedAt: observedAt,
+    }, env);
+  }, env);
+}
+
 async function retire(options, env = process.env) {
   let lane = ownedLane(options, env, 'read');
   const existingRetirement = pendingOperationForLane(options.repoRoot, lane.laneId, env);
@@ -1557,17 +1633,55 @@ async function retire(options, env = process.env) {
       },
     });
   }
+  if (options.acceptManualSeatRemoval === true &&
+      existingRetirement?.details?.cleanupBlocked !== true) {
+    throw new TransmogrifyError(
+      'USAGE_ERROR',
+      '--accept-manual-seat-removal requires an exact pending CLEANUP_BLOCKED retirement',
+    );
+  }
   return withLaneLease(options.repoRoot, lane.laneId, async () => {
     lane = ownedLane({ ...options, laneId: lane.laneId }, env, 'read');
-    const pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+    let pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+    if (pending?.type === 'spawn') {
+      assertSeatIdentity(options, lane, env);
+      lane = await settleUnresolvedSpawnForRetirement(options, lane, pending, env);
+      pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+    }
     if (lane.state === 'worktreeRemoved' && !pending) {
       return laneResult('retire', lane, {
         receipt: { archived: true, alreadyRetired: true, worktreeRemoved: true },
       });
     }
+    const seatEntryPresent = lane.seat?.managed === true && pathEntryExists(lane.seat.path);
+    const manualRemovalAcknowledged = options.acceptManualSeatRemoval === true ||
+      pending?.details?.manualSeatRemoval?.acknowledged === true;
+    if (pending?.type === 'retire' && pending.details.cleanupBlocked === true &&
+        (seatEntryPresent || !manualRemovalAcknowledged)) {
+      throw new TransmogrifyError(
+        'CLEANUP_BLOCKED',
+        'Codex managed worktree has a permanent cleanup block and requires exact manual-removal acknowledgement',
+        { laneId: lane.laneId, providerRetired: true },
+      );
+    }
     const recoveringRemovedSeat = lane.state === 'worktreeRemoved' &&
       pending?.type === 'retire' && lane.seat?.managed === true;
-    if (!recoveringRemovedSeat) assertSeatIdentity(options, lane, env);
+    const manuallyRemovedBlockedSeat = pending?.type === 'retire' &&
+      pending.details.cleanupBlocked === true && lane.seat?.managed === true &&
+      !seatEntryPresent && manualRemovalAcknowledged;
+    if (!recoveringRemovedSeat && !manuallyRemovedBlockedSeat) assertSeatIdentity(options, lane, env);
+    if (manuallyRemovedBlockedSeat && pending.details.manualSeatRemoval?.acknowledged !== true) {
+      pending = updatePendingLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+        state: pending.state,
+        details: {
+          ...pending.details,
+          manualSeatRemoval: {
+            acknowledged: true,
+            observedAbsentAt: new Date().toISOString(),
+          },
+        },
+      }, env);
+    }
     const prepared = prepareRetirementOperation(options, lane, env);
     let operation = prepared.operation;
     const { harvestReceipt } = prepared;
@@ -2085,7 +2199,8 @@ async function recover(options, env = process.env) {
 
           let inspected = await inspectThread(client, lane);
           const repaired = [];
-          const spawnPending = operation?.type === 'spawn' && operation.state !== 'complete';
+          const spawnPending = operation?.type === 'spawn' &&
+            !TERMINAL_OPERATION_STATES.has(operation.state);
           const recoveredSpawnTurnId = spawnPending
             ? await findTurnByClientMessage(
               client,
