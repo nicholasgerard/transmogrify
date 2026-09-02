@@ -1,0 +1,97 @@
+---
+/**
+ * A copyable shell snippet. The copy control is progressive enhancement: with
+ * no JavaScript it is removed and the <pre> stays selectable.
+ */
+interface Props {
+  code: string;
+  /** Used to build a unique id and an accessible name for the copy button. */
+  label: string;
+}
+const { code, label } = Astro.props;
+const id = `code-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+const trimmed = code.replace(/\n+$/, '');
+---
+
+<div class="code-block" data-copy-root>
+  <pre
+    id={id}
+    tabindex="0"
+    role="group"
+    aria-label={`Shell commands: ${label}`}>{trimmed}</pre>
+  <button
+    type="button"
+    class="copy-inline"
+    data-copy-button
+    data-copy-target={id}
+    data-copy-quiet="true"
+  >
+    <span data-copy-label>Copy</span>
+    <span class="sr-only"> the commands for: {label}</span>
+  </button>
+</div>
+
+<style>
+  .code-block {
+    position: relative;
+    background: var(--bg-sunken);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+
+  pre {
+    margin: 0;
+    padding: var(--s-4);
+    padding-inline-end: 5.5rem;
+    overflow-x: auto;
+    font-size: clamp(0.75rem, 0.7rem + 0.2vw, 0.8125rem);
+    line-height: 1.7;
+    color: var(--text);
+    /* Shell snippets keep their line structure; the container scrolls. */
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  /* The block scrolls horizontally, so it must be reachable and scrollable
+     from the keyboard rather than by pointer gesture alone. */
+  pre:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .copy-inline {
+    position: absolute;
+    inset-block-start: 0.4rem;
+    inset-inline-end: 0.4rem;
+    min-block-size: 1.9rem;
+    padding: 0.25rem 0.6rem;
+    background: var(--bg-inset);
+    color: var(--muted);
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease;
+  }
+
+  .copy-inline:hover {
+    color: var(--text);
+    border-color: var(--text);
+  }
+
+  .copy-inline[data-state='copied'] {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  :global(html.no-js) .copy-inline {
+    display: none;
+  }
+
+  :global(html.no-js) pre {
+    padding-inline-end: var(--s-4);
+  }
+</style>

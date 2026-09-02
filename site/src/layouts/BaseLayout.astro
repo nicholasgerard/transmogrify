@@ -1,0 +1,109 @@
+---
+import '../styles/global.css';
+import SiteHeader from '../components/SiteHeader.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import ConsentDialog from '../components/ConsentDialog.astro';
+import { getRepoFacts } from '../lib/repo-facts.node.ts';
+import { OG_IMAGE, SITE_DESCRIPTION, SITE_NAME, canonical } from '../lib/site.ts';
+
+interface Props {
+  title: string;
+  description?: string;
+  /** Appended to the site name in <title>; omit for the landing page. */
+  bare?: boolean;
+  noindex?: boolean;
+}
+
+const { title, description = SITE_DESCRIPTION, bare = false, noindex = false } = Astro.props;
+
+const facts = getRepoFacts();
+const origin = Astro.site?.origin ?? 'https://transmogrify.sh';
+const canonicalUrl = canonical(origin, Astro.url.pathname);
+const ogImageUrl = new URL(OG_IMAGE.path, origin).href;
+const documentTitle = bare ? title : `${title} — ${SITE_NAME}`;
+
+/**
+ * Analytics is opt-in at build time as well as at runtime. With no measurement
+ * ID configured, no consent UI is rendered, no analytics script is emitted, and
+ * nothing on the page can reach Google.
+ */
+const measurementId = (import.meta.env.PUBLIC_GA_MEASUREMENT_ID ?? '').trim();
+const analyticsConfigured = /^G-[A-Z0-9]+$/i.test(measurementId);
+
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareSourceCode',
+  name: SITE_NAME,
+  description: SITE_DESCRIPTION,
+  url: origin,
+  codeRepository: facts.repositoryUrl,
+  programmingLanguage: 'JavaScript',
+  runtimePlatform: `Node.js ${facts.nodeEngine}+`,
+  license: 'https://spdx.org/licenses/MIT.html',
+  version: facts.packageVersion,
+};
+
+/**
+ * Runs before first paint so the correct theme is committed with the first
+ * frame. Kept to one statement and inlined: a deferred module would flash.
+ */
+const themeBootstrap = `document.documentElement.classList.remove("no-js");try{var t=localStorage.getItem("transmogrify:theme");document.documentElement.dataset.theme=(t==="light"||t==="dark")?t:(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark")}catch(e){document.documentElement.dataset.theme="dark"}`;
+---
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script is:inline set:html={themeBootstrap} />
+
+    <title>{documentTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonicalUrl} />
+    {noindex && <meta name="robots" content="noindex, follow" />}
+
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#07100c" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f6faf7" media="(prefers-color-scheme: light)" />
+    <meta name="color-scheme" content="dark light" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={SITE_NAME} />
+    <meta property="og:title" content={documentTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content={ogImageUrl} />
+    <meta property="og:image:width" content={String(OG_IMAGE.width)} />
+    <meta property="og:image:height" content={String(OG_IMAGE.height)} />
+    <meta property="og:image:alt" content="Transmogrify — one lifecycle for exact-owned Codex and Claude Code lanes." />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={documentTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImageUrl} />
+
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(structuredData)} />
+  </head>
+
+  <body data-analytics-id={analyticsConfigured ? measurementId : undefined}>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <SiteHeader />
+    <main id="main" tabindex="-1">
+      <slot />
+    </main>
+    <SiteFooter analyticsConfigured={analyticsConfigured} />
+    {analyticsConfigured && <ConsentDialog />}
+
+    <script>
+      import '../scripts/theme.ts';
+      import '../scripts/copy.ts';
+
+      if (import.meta.env.PUBLIC_GA_MEASUREMENT_ID) {
+        void import('../scripts/consent.ts');
+      }
+    </script>
+  </body>
+</html>

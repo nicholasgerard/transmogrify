@@ -1,0 +1,226 @@
+---
+import Wordmark from './Wordmark.astro';
+import { getRepoFacts } from '../lib/repo-facts.node.ts';
+import { docUrl } from '../lib/site.ts';
+
+interface Props {
+  analyticsConfigured: boolean;
+}
+const { analyticsConfigured } = Astro.props;
+
+const facts = getRepoFacts();
+const year = new Date().getUTCFullYear();
+
+const columns = [
+  {
+    title: 'Project',
+    links: [
+      { label: 'Source on GitHub', href: facts.repositoryUrl, external: true },
+      { label: 'Operator skill', href: docUrl(facts.repositoryUrl, 'SKILL.md'), external: true },
+      { label: 'Protocol contract', href: docUrl(facts.repositoryUrl, 'docs/PROTOCOL.md'), external: true },
+      { label: 'Roadmap', href: docUrl(facts.repositoryUrl, 'ROADMAP.md'), external: true },
+    ],
+  },
+  {
+    title: 'Participate',
+    links: [
+      { label: 'Contributing guide', href: docUrl(facts.repositoryUrl, 'CONTRIBUTING.md'), external: true },
+      { label: 'Code of Conduct', href: docUrl(facts.repositoryUrl, 'CODE_OF_CONDUCT.md'), external: true },
+      { label: 'Report an issue', href: facts.issuesUrl, external: true },
+      { label: 'Email support', href: 'mailto:support@thebkapp.co' },
+      { label: 'Security policy', href: docUrl(facts.repositoryUrl, 'SECURITY.md'), external: true },
+      {
+        label: 'Report a vulnerability',
+        href: `${facts.repositoryUrl}/security/advisories/new`,
+        external: true,
+      },
+    ],
+  },
+  {
+    title: 'Legal',
+    links: [
+      { label: 'Terms of Service', href: '/terms' },
+      { label: 'Privacy Policy', href: '/privacy' },
+      { label: 'MIT License', href: docUrl(facts.repositoryUrl, 'LICENSE'), external: true },
+    ],
+  },
+];
+---
+
+<footer class="site-footer">
+  <div class="shell">
+    <div class="grid">
+      <div class="identity">
+        <Wordmark />
+        <p>
+          An open-source operator skill and standalone Node tools. No account, no
+          server, no telemetry in the tools themselves.
+        </p>
+        <p class="pins">
+          v{facts.packageVersion} · Node {facts.nodeEngine}+ · verified {facts.pins.verifiedDate}
+        </p>
+      </div>
+
+      {
+        columns.map((column) => (
+          <nav aria-label={column.title}>
+            <h2>{column.title}</h2>
+            <ul>
+              {column.links.map((link) => (
+                <li>
+                  <a
+                    href={link.href}
+                    {...(link.external ? { rel: 'noopener noreferrer external' } : {})}
+                  >
+                    {link.label}
+                    {link.external && <span class="sr-only"> (opens on github.com)</span>}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        ))
+      }
+    </div>
+
+    <div class="baseline">
+      <p>
+        © {year} Transmogrify contributors. Released under the
+        <a href={docUrl(facts.repositoryUrl, 'LICENSE')} rel="noopener noreferrer external">MIT License</a>.
+      </p>
+      <p class="privacy-control">
+        <a
+          href="/privacy#analytics"
+          data-privacy-choices={analyticsConfigured ? '' : undefined}
+          aria-describedby={analyticsConfigured ? 'privacy-state' : undefined}
+        >
+          Privacy choices
+        </a>
+        <span id="privacy-state" data-privacy-state role="status" aria-live="off" />
+      </p>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    margin-block-start: var(--s-7);
+    border-block-start: 1px solid var(--line);
+    background: var(--bg-sunken);
+    padding-block: var(--s-7) var(--s-6);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr));
+    gap: var(--s-6) var(--s-5);
+  }
+
+  .identity p {
+    margin-block-start: var(--s-3);
+    color: var(--muted);
+    font-size: var(--step--1);
+    max-inline-size: 38ch;
+  }
+
+  .pins {
+    font-family: var(--mono);
+    font-size: var(--step--2) !important;
+    color: var(--faint);
+    letter-spacing: 0.04em;
+  }
+
+  h2 {
+    font-size: var(--step--2);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin-block-end: var(--s-3);
+  }
+
+  ul {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    gap: 0.1rem;
+  }
+
+  .grid a {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 2.25rem;
+    color: var(--muted);
+    font-size: var(--step--1);
+    text-decoration: none;
+  }
+
+  .grid a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 0.22em;
+  }
+
+  .baseline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-3);
+    margin-block-start: var(--s-6);
+    padding-block-start: var(--s-4);
+    border-block-start: 1px solid var(--line);
+    color: var(--faint);
+    font-size: var(--step--2);
+    font-family: var(--mono);
+    letter-spacing: 0.03em;
+  }
+
+  .baseline p {
+    margin: 0;
+  }
+
+  .privacy-control {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+  }
+
+  .privacy-control button,
+  .privacy-control a {
+    background: none;
+    border: 0;
+    padding: 0.35rem 0;
+    min-block-size: 2rem;
+    font: inherit;
+    color: var(--muted);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 0.22em;
+  }
+
+  .privacy-control button:hover,
+  .privacy-control a:hover {
+    color: var(--accent);
+  }
+
+  [data-privacy-state]:not(:empty)::before {
+    content: '· ';
+  }
+
+  @media (max-width: 60rem) {
+    .grid {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+
+    .identity {
+      grid-column: 1 / -1;
+    }
+  }
+
+  @media (max-width: 34rem) {
+    .grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

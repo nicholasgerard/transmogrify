@@ -1,0 +1,48 @@
+---
+interface Props {
+  size?: 'sm' | 'lg';
+}
+const { size = 'sm' } = Astro.props;
+---
+
+<span class:list={['wordmark', size]}>
+  <svg class="glyph" viewBox="0 0 32 32" width="20" height="20" aria-hidden="true" focusable="false">
+    <rect width="32" height="32" rx="7" fill="var(--accent)" />
+      <circle cx="16" cy="16" r="8.1" fill="none" stroke="var(--accent-ink)" stroke-width="2.6" />
+      <path d="M16 6.6a9.4 9.4 0 0 0 0 18.8Z" fill="var(--accent-ink)" />
+  </svg>
+  <span class="text">transmogrify</span>
+</span>
+
+<style>
+  .wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--mono);
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    color: var(--text);
+  }
+
+  .glyph {
+    flex: none;
+  }
+
+  .sm .text {
+    font-size: var(--step-0);
+  }
+
+  .lg {
+    gap: 0.65rem;
+  }
+
+  .lg .glyph {
+    width: 28px;
+    height: 28px;
+  }
+
+  .lg .text {
+    font-size: var(--step-1);
+  }
+</style>

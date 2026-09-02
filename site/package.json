@@ -1,0 +1,36 @@
+{
+  "name": "transmogrify-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Static marketing and documentation site for transmogrify.sh.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && node scripts/build-start.mjs && node scripts/build-headers.mjs",
+    "preview": "astro preview",
+    "check": "astro check",
+    "test": "node --test test/*.test.ts",
+    "verify:links": "node scripts/check-links.mjs",
+    "verify:html": "node scripts/check-html.mjs",
+    "verify:budgets": "node scripts/check-budgets.mjs",
+    "verify:headers": "node scripts/check-headers.mjs",
+    "verify:no-analytics": "node scripts/check-no-analytics.mjs",
+    "verify:analytics": "node scripts/check-analytics-enabled.mjs",
+    "verify:start": "node scripts/check-start.mjs",
+    "verify:base": "npm run verify:headers && npm run verify:links && npm run verify:html && npm run verify:start && npm run verify:budgets",
+    "verify": "npm run verify:base && npm run verify:no-analytics"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "3.7.4",
+    "astro": "7.2.10"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.10",
+    "linkedom": "0.18.13",
+    "typescript": "5.9.3"
+  }
+}

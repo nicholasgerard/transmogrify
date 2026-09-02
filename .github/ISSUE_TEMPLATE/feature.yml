@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a lifecycle, provider, portability, or documentation improvement.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the operator outcome that is difficult or impossible today.
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Desired lifecycle contract
+      description: Explain identity, visibility, spawn, steer, status, stop, recovery, retirement, and cleanup effects that apply.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Provider evidence
+      description: Link official documentation or describe a sanitized dated live receipt. Do not include credentials or private session data.
+  - type: textarea
+    id: safety
+    attributes:
+      label: Ownership and failure boundaries
+      description: Explain how the proposal avoids adoption, duplicate delivery, or mutation of unowned sessions and worktrees.

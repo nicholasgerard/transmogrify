@@ -1,0 +1,95 @@
+---
+import Inline from './Inline.astro';
+import CodeBlock from './CodeBlock.astro';
+
+interface Step {
+  title: string;
+  body: string;
+  code?: string | undefined;
+}
+interface Props {
+  steps: Step[];
+}
+const { steps } = Astro.props;
+---
+
+<ol class="steps">
+  {
+    steps.map((step, index) => (
+      <li>
+        <div class="marker" aria-hidden="true">{String(index + 1).padStart(2, '0')}</div>
+        <div class="body">
+          <h3>{step.title}</h3>
+          <p><Inline text={step.body} /></p>
+          {step.code && <CodeBlock code={step.code} label={step.title} />}
+        </div>
+      </li>
+    ))
+  }
+</ol>
+
+<style>
+  .steps {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    gap: 0;
+    counter-reset: step;
+  }
+
+  li {
+    display: grid;
+    grid-template-columns: 3.25rem minmax(0, 1fr);
+    gap: var(--s-4);
+    padding-block: var(--s-5);
+    border-block-start: 1px solid var(--line);
+  }
+
+  li:last-child {
+    border-block-end: 1px solid var(--line);
+  }
+
+  .marker {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    font-weight: 600;
+    color: var(--accent);
+    padding-block-start: 0.15rem;
+  }
+
+  .body {
+    min-inline-size: 0;
+  }
+
+  h3 {
+    font-size: var(--step-1);
+    margin-block-end: var(--s-2);
+  }
+
+  p {
+    color: var(--muted);
+    font-size: var(--step--1);
+    line-height: 1.65;
+    max-inline-size: 66ch;
+  }
+
+  p :global(code) {
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 0.05em 0.32em;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  .body :global(.code-block) {
+    margin-block-start: var(--s-4);
+  }
+
+  @media (max-width: 34rem) {
+    li {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--s-2);
+    }
+  }
+</style>

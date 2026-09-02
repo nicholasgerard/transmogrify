@@ -1,0 +1,103 @@
+---
+import { getRepoFacts } from '../lib/repo-facts.node.ts';
+import { docUrl } from '../lib/site.ts';
+
+interface DocEntry {
+  title: string;
+  detail: string;
+  path: string;
+}
+interface Props {
+  docs: DocEntry[];
+}
+const { docs } = Astro.props;
+const facts = getRepoFacts();
+---
+
+<ul class="docs">
+  {
+    docs.map((doc) => (
+      <li>
+        <a href={docUrl(facts.repositoryUrl, doc.path)} rel="noopener noreferrer external">
+          <span class="head">
+            <span class="title">{doc.title}</span>
+            <svg class="arrow" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <path d="M4 12 12 4M6 4h6v6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <span class="detail">{doc.detail}</span>
+          <span class="path">{doc.path}</span>
+          <span class="sr-only">(opens on github.com)</span>
+        </a>
+      </li>
+    ))
+  }
+</ul>
+
+<style>
+  .docs {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
+    gap: var(--s-4);
+  }
+
+  a {
+    display: grid;
+    gap: var(--s-2);
+    block-size: 100%;
+    align-content: start;
+    padding: var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    text-decoration: none;
+    transition: border-color 130ms ease, background-color 130ms ease, transform 130ms ease;
+  }
+
+  a:hover {
+    border-color: var(--accent);
+    background: var(--bg-inset);
+    color: inherit;
+    transform: translateY(-1px);
+  }
+
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-3);
+  }
+
+  .title {
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .arrow {
+    flex: none;
+    color: var(--faint);
+    transition: color 130ms ease;
+  }
+
+  a:hover .arrow {
+    color: var(--accent);
+  }
+
+  .detail {
+    color: var(--muted);
+    font-size: var(--step--1);
+    line-height: 1.6;
+  }
+
+  .path {
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    letter-spacing: 0.04em;
+    color: var(--faint);
+    overflow-wrap: anywhere;
+  }
+</style>

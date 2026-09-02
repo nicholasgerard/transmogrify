@@ -1,0 +1,186 @@
+# Roadmap
+
+## Direction
+
+The destination is one operator skill that can be loaded by either Codex or
+Claude Code and can launch and manage native-visible lanes in either provider's
+desktop and mobile apps. The operator discovers what is already running, reuses
+compatible shared infrastructure, provisions only what it owns, selects the
+best provider-native control channel available, reconciles interrupted work,
+harvests results, archives finished lanes, and removes only its own clean
+worktrees.
+
+Transport symmetry is not the goal. Lifecycle parity is. Codex and Claude may
+use different spawn, steer, status, stop, recovery, and archive channels as long
+as the observable contract and safety invariants match.
+
+Codex and Claude Code are the first complete pair, not the final boundary. Once
+their launch gate is green, the same adapter contract can extend to Cursor and
+other native coding-agent desktop surfaces. New providers enter through
+measured native mechanisms; roadmap intent is never presented as current
+support.
+
+## Current state
+
+The canonical support matrix is in [README.md](README.md#support-matrix). The
+standalone adapters implement both target providers on the pinned compatibility
+tuple. Claude Desktop/mobile visibility, mobile-originated input, and native
+archive behavior are live-verified on the recorded build tuple. Codex mobile
+visibility is also live-verified on its recorded build tuple, but mobile
+execution on a pre-restart lane after a Desktop restart remains an open
+compatibility limitation; a newly created post-restart lane succeeds. Until
+native reattachment is verified, create a fresh exact-owned lane after a
+Desktop host restart instead of assuming an older visible row can execute.
+
+## Acceptance program: turnkey bidirectional operation
+
+Run the following suite on compatibility refreshes and before widening any
+provider claim:
+
+- Load the same installed skill in current Codex and Claude Code hosts.
+- Run the read-only doctor; reuse a compatible existing runtime and leave every
+  foreign provider session untouched.
+- From each host, create one Codex lane and one Claude Code lane with an exact
+  name and isolated managed seat.
+- Observe each lane in the target desktop app and target mobile Code surface.
+- Deliver one directed steer, observe its receipt, stop it, recover the same
+  lane identity, and confirm visibility remains continuous.
+- Harvest durable output, archive the exact native row, remove the clean managed
+  worktree through the operator guard, and then clear the exact local Claude
+  record only after its seat path is absent.
+- Restart the orchestrator between lifecycle stages and reconcile without
+  duplicate spawn, duplicate steer, wrong-lane mutation, or leaked worktree.
+- Restart each desktop host while its separately managed runtime survives;
+  record whether mobile reattaches to the exact lane without changing project
+  identity or routing to another app-server process. Codex pre-restart lane
+  reattachment remains a known limitation in 0.1.0.
+- Leave a dirty managed worktree and confirm cleanup blocks without data loss.
+- Seed foreign sessions with colliding names and short IDs and confirm no
+  mutation reaches them.
+- Publish the GitHub repository with its description, homepage, topics,
+  Discussions, private vulnerability reporting, secret scanning, and push
+  protection configured. Keep Cloudflare deployment disabled until a verified
+  preview is accepted.
+
+No GUI automation is part of the control plane. Native deep links may present an
+already-owned session, but session identity and lifecycle control come from
+provider or measured local interfaces.
+
+## Priority 1: compatibility and acceptance hardening
+
+- Close and rerun the Codex pre-restart-lane reattachment case after a Desktop
+  restart; capture the exact failing provider boundary if the current app tuple
+  still rejects it.
+- Run and record the complete fresh bidirectional acceptance suite above,
+  including mobile-originated input on both providers.
+- Add a reproducible compatibility refresh command that inventories the Codex
+  schema and Claude CLI/Desktop hashes without enabling mutations.
+- Define a signed compatibility-manifest format so newly verified provider
+  tuples can be added without weakening fail-closed defaults.
+- Add explicit fixtures for account switches, config-directory migration,
+  device/inode reuse, renamed binaries, and provider response expansion.
+- Exercise long-disconnect Remote Control recovery and documented session
+  expiry behavior.
+- Publish a provider capability catalog for model, effort, context, and
+  speed/service-tier selection. Give operators task-oriented descriptions,
+  compatibility pins, cost/latency tradeoffs, safe fallbacks, and exact
+  dispatch receipts instead of requiring them to memorize vendor flags.
+- Define provider-neutral dispatch intents such as routine implementation,
+  latency-sensitive triage, long-context synthesis, adversarial review, and
+  high-autonomy work. Resolve each intent to a measured provider-native model,
+  effort, and speed configuration, while still permitting an explicit pinned
+  override.
+- Verify the effective selection where each provider exposes a receipt. Keep
+  requested aliases distinct from resolved model versions, and never silently
+  retry on a cheaper, faster, or different-capability model.
+
+## Priority 2: autonomous maintenance without overreach
+
+- Add a bounded maintenance runner around doctor and exact-owned reconcile.
+  It may close interrupted journals and eligible cleanup, but it may not infer
+  completion or harvest output on its own.
+- Add configurable maintenance cadence and stale-journal alerts for hosts that
+  expose scheduling.
+- Report aggregate owned-active, owned-stopped, pending-retirement, and
+  cleanup-blocked counts without provider IDs or private paths.
+- Add an explicit review queue for dirty or post-harvest-changed managed
+  worktrees. Never auto-delete these seats.
+- Replace direct eligible-seat deletion with a recoverable quarantine where the
+  platform permits it. Preserve the current final census, and close the
+  same-user write window between that census and irreversible removal.
+- Add retention policy for completed operation receipts and superseded installer
+  backups, with dry-run output and recoverable deletion.
+
+## Priority 3: reduce private and version-specific surface
+
+- Replace Claude private archival when Anthropic exposes a documented exact
+  Remote Control archive/status API.
+- Request a Codex `thread/start` idempotency key so a response-loss window can be
+  reconciled without an unknown orphan. Until then, this is a launch-relevant
+  recovery boundary: the adapter refuses blind replay but cannot discover a
+  thread whose created ID was lost before durable persistence.
+- Request a documented Desktop-host registration or exact thread-adoption
+  contract for independently managed app-server runtimes. It must preserve the
+  same provider identity and project seat across Desktop restarts so paired
+  mobile clients can reattach without duplication or routing drift.
+- Evaluate Claude's public multi-session Remote Control server mode for shared
+  runtime reuse if Anthropic documents an exact external spawn/ownership API;
+  do not adopt its transient private daemon socket as a control contract.
+- Move Claude's initial background-session prompt off the positional argument
+  when Anthropic documents a noninteractive stdin or file-based Remote Control
+  spawn with the same native visibility and identity receipts.
+- Track a public Codex authenticated local transport or per-client capability
+  boundary if one becomes available.
+- Expand Claude support beyond Darwin arm64 only after every platform-specific
+  process, socket, credential, and Desktop visibility claim is measured.
+
+## Priority 4: provider-neutral host integration
+
+- Publish a small host adapter contract for native same-provider task tools:
+  exact identity, visibility, directed input, status, stop, recovery, archive,
+  and durable ownership receipts.
+- Add conformance tests that run the same lifecycle scenarios against built-in
+  Codex tasks, Codex app-server lanes, native Claude sub-agents where applicable,
+  and Claude Remote Control lanes.
+- Standardize structured handback and mailbox schemas while keeping repository
+  authority in the host skill.
+- Support multiple machines and multiple explicitly owned runtimes without
+  broad discovery or name-based adoption.
+- Research Cursor's documented and measured native task/session surfaces, then
+  define an adapter only if exact identity, live app visibility, directed
+  control, recovery, and safe retirement can meet the same conformance suite.
+
+## Website launch: transmogrify.sh
+
+The repository contains a self-contained static Astro package in `site/`. It
+builds repository facts from their canonical Markdown sources, exposes the
+versioned agent bootstrap at `/start`, and keeps all website build dependencies
+outside the `ws`-only lifecycle runtime and installed skill.
+
+Open launch work:
+
+- Complete a rendered desktop/mobile, keyboard, screen-reader, reduced-motion,
+  theme, copy, and no-JavaScript acceptance pass against the final tree.
+- Run a clean-agent test from the one-line homepage prompt through `/start`,
+  installation, doctor, and exact-owned operation in a disposable repository.
+- Publish the GitHub repository before enabling deployment.
+- Add narrowly scoped Cloudflare credentials and protected GitHub environments,
+  enable the inert deployment gate, and accept a Workers Static Assets preview.
+- Verify `/start`, redirects, headers, cache behavior, default no-analytics
+  output, social/search metadata, bundle budgets, and the custom domain live.
+- Keep analytics disabled until the Privacy Policy names the controller and
+  private contact channel and documents retention, processor, and transfer
+  terms for the configured service.
+- Keep lifecycle installation, local operation, and recovery independent of
+  DNS and the hosted website.
+
+## Deliberate boundaries
+
+- Consumer Claude Chat is out of scope.
+- Generic GUI automation is out of scope.
+- Foreign or unregistered provider sessions are out of scope even when their
+  names or paths resemble owned lanes.
+- Automatic merge, deployment, spend, and repository policy remain host-skill
+  concerns.
+- A lane is not automatically disposable because it is idle, stopped, old, or
+  disconnected. Durable harvest plus exact retirement receipts are required.

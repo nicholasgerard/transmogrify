@@ -1,0 +1,129 @@
+---
+/**
+ * A three-state radio group rather than a binary switch, because
+ * `prefers-color-scheme` is a real, honoured state and a two-way toggle gives
+ * the visitor no way back to it. Native radios give keyboard behaviour and
+ * grouping semantics for free.
+ *
+ * With JavaScript unavailable the control cannot do anything, so it is removed
+ * rather than left as a dead input.
+ */
+const options = [
+  { value: 'auto', label: 'Match system' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+] as const;
+---
+
+<fieldset class="theme-toggle" data-theme-toggle>
+  <legend class="sr-only">Colour theme</legend>
+  {
+    options.map(({ value, label }) => (
+      <>
+        <input type="radio" name="theme" id={`theme-${value}`} value={value} />
+        <label for={`theme-${value}`}>
+          <span class="sr-only">{label}</span>
+          <span class="icon" aria-hidden="true">
+            {value === 'auto' && (
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false">
+                <rect x="1.5" y="2.5" width="13" height="9" rx="1.5" />
+                <path d="M5 13.5h6" stroke-linecap="round" />
+              </svg>
+            )}
+            {value === 'light' && (
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false">
+                <circle cx="8" cy="8" r="3.1" />
+                <path d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3.1 3.1l1.1 1.1M11.8 11.8l1.1 1.1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1" stroke-linecap="round" />
+              </svg>
+            )}
+            {value === 'dark' && (
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false">
+                <path d="M13.2 9.9A5.6 5.6 0 0 1 6.1 2.8a5.6 5.6 0 1 0 7.1 7.1Z" stroke-linejoin="round" />
+              </svg>
+            )}
+          </span>
+        </label>
+      </>
+    ))
+  }
+</fieldset>
+
+<style>
+  /* Without JavaScript the control cannot apply anything, so it is removed
+     rather than left as an inert input. `no-js` is cleared by the pre-paint
+     bootstrap in BaseLayout. */
+  :global(html.no-js) .theme-toggle {
+    display: none;
+  }
+
+  .theme-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin: 0;
+    padding: 2px;
+    border: 1px solid var(--border-control);
+    border-radius: 999px;
+    background: var(--bg-inset);
+    flex: none;
+  }
+
+  /* Visually hidden but still a real, focusable radio: the visible affordance
+     is the <label>, and the focus ring is drawn on it via input:focus-visible. */
+  input {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  label {
+    display: grid;
+    place-items: center;
+    inline-size: 2.25rem;
+    block-size: 1.9rem;
+    border-radius: 999px;
+    color: var(--faint);
+    cursor: pointer;
+    transition: color 120ms ease, background-color 120ms ease;
+  }
+
+  label:hover {
+    color: var(--text);
+  }
+
+  input:checked + label {
+    background: var(--bg-raised);
+    color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--border-control);
+  }
+
+  input:focus-visible + label {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .icon {
+    display: grid;
+    place-items: center;
+  }
+
+  @media (pointer: coarse) and (min-width: 30.0625rem) {
+    label {
+      inline-size: 2.6rem;
+      block-size: 2.4rem;
+    }
+  }
+
+  @media (max-width: 30rem) {
+    label {
+      inline-size: 2.1rem;
+      block-size: 2.1rem;
+    }
+  }
+</style>

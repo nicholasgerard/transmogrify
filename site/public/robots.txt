@@ -1,0 +1,5 @@
+# transmogrify.sh — a static open-source documentation site.
+User-agent: *
+Allow: /
+
+Sitemap: https://transmogrify.sh/sitemap-index.xml

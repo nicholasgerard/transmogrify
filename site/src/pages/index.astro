@@ -1,0 +1,486 @@
+---
+import { getCollection, render } from 'astro:content';
+
+import BaseLayout from '../layouts/BaseLayout.astro';
+import StartPrompt from '../components/StartPrompt.astro';
+import LedgerModule from '../components/LedgerModule.astro';
+import MatrixModule from '../components/MatrixModule.astro';
+import StepsModule from '../components/StepsModule.astro';
+import DocsModule from '../components/DocsModule.astro';
+import Inline from '../components/Inline.astro';
+import { getRepoFacts } from '../lib/repo-facts.node.ts';
+import { SITE_DESCRIPTION, SITE_NAME, docUrl } from '../lib/site.ts';
+
+const facts = getRepoFacts();
+
+const sections = (await getCollection('sections')).sort((a, b) => a.data.order - b.data.order);
+const rendered = await Promise.all(
+  sections.map(async (entry) => ({ entry, Content: (await render(entry)).Content })),
+);
+
+const lifecycle = [
+  ['spawn', 'Reserve, then create a named lane in its own seat'],
+  ['steer', 'Direct the exact running lane'],
+  ['status', 'Re-resolve and revalidate exact owned identity'],
+  ['stop', 'Interrupt a Codex turn, or stop a whole Claude session'],
+  ['recover', 'Resume the same identity after an interruption'],
+  ['harvest', 'Persist output durably and hash it'],
+  ['retire', 'Archive the exact native row against a receipt'],
+  ['reconcile', 'Close pending journals by observation, never replay'],
+];
+
+const pins = [
+  { label: 'Codex app-server', value: facts.pins.supportedCodexRuntime.replace(/^app-server\s*/, '') },
+  { label: 'Codex Desktop', value: facts.pins.verifiedCodexDesktop },
+  { label: 'Codex mobile', value: facts.pins.verifiedCodexMobile.replace(/^ChatGPT for iOS\s*/, '') },
+  { label: 'Claude Code CLI', value: facts.pins.verifiedClaudeCli },
+  { label: 'Claude Desktop', value: facts.pins.verifiedClaudeDesktop },
+  { label: 'Claude mobile', value: facts.pins.verifiedClaudeMobile.replace(/^Claude for iOS\s*/, '') },
+  { label: 'Node.js', value: `${facts.nodeEngine}+` },
+  { label: 'Runtime deps', value: facts.runtimeDependencies.join(', ') },
+  { label: 'Live-verified', value: facts.pins.verifiedDate },
+];
+---
+
+<BaseLayout title={`${SITE_NAME} — ${'one lifecycle for exact-owned agent lanes'}`} bare description={SITE_DESCRIPTION}>
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="shell hero-inner">
+      <p class="eyebrow">Open-source operator skill · zero-framework Node tools</p>
+      <h1 id="hero-title">Turn two different coding agents into one lifecycle you own.</h1>
+      <p class="lede hero-lede">
+        Transmogrify lets Codex or Claude Code create and manage exact-owned,
+        worktree-seated lanes in <em>either</em> provider — visible through the
+        verified native surfaces, steered through provider-native channels,
+        and never adopted by name.
+      </p>
+
+      <StartPrompt />
+
+      <p class="secondary">
+        <a class="ghost-link" href="#install">How it installs</a>
+        <span aria-hidden="true">·</span>
+        <a class="ghost-link" href={docUrl(facts.repositoryUrl, 'SKILL.md')} rel="noopener noreferrer external">
+          Read the skill<span class="sr-only"> (opens on github.com)</span>
+        </a>
+        <span aria-hidden="true">·</span>
+        <a class="ghost-link" href={facts.repositoryUrl} rel="noopener noreferrer external">
+          Source<span class="sr-only"> (opens on github.com)</span>
+        </a>
+      </p>
+    </div>
+
+    <div class="shell">
+      <dl class="pins" aria-label="Verified compatibility pins">
+        {
+          pins.map((pin) => (
+            <div>
+              <dt>{pin.label}</dt>
+              <dd>{pin.value}</dd>
+            </div>
+          ))
+        }
+      </dl>
+    </div>
+  </section>
+
+  <section class="lifecycle-band" aria-labelledby="lifecycle-title">
+    <div class="shell">
+      <h2 id="lifecycle-title" class="eyebrow">The eight verbs, whichever provider is behind them</h2>
+      <ol class="lifecycle">
+        {
+          lifecycle.map(([verb, gloss], index) => (
+            <li>
+              <span class="n">{String(index + 1).padStart(2, '0')}</span>
+              <span class="verb">{verb}</span>
+              <span class="gloss">{gloss}</span>
+            </li>
+          ))
+        }
+      </ol>
+    </div>
+  </section>
+
+  <div class="shell board">
+    <nav class="index" aria-label="On this page">
+      <p class="index-title">On this page</p>
+      <ol>
+        {
+          sections.map((entry) => (
+            <li>
+              <a href={`#${entry.data.anchor}`}>
+                <span class="index-n">{entry.data.number}</span>
+                {entry.data.label}
+              </a>
+            </li>
+          ))
+        }
+      </ol>
+    </nav>
+
+    <div class="sections">
+      {
+        rendered.map(({ entry, Content }) => (
+          <section id={entry.data.anchor} class="section" aria-labelledby={`${entry.data.anchor}-title`}>
+            <header class="section-head">
+              <p class="section-number">{entry.data.number}</p>
+              <div>
+                <h2 id={`${entry.data.anchor}-title`}>{entry.data.title}</h2>
+                {entry.data.lede && (
+                  <p class="lede section-lede"><Inline text={entry.data.lede} /></p>
+                )}
+              </div>
+            </header>
+
+            <div class="section-body">
+              <div class="prose">
+                <Content />
+              </div>
+
+              {entry.data.module === 'ledger' && entry.data.ledger && (
+                <LedgerModule rows={entry.data.ledger} />
+              )}
+              {entry.data.module === 'matrix' && <MatrixModule gated={entry.data.gated} />}
+              {entry.data.module === 'steps' && entry.data.steps && (
+                <StepsModule steps={entry.data.steps} />
+              )}
+              {entry.data.module === 'docs' && entry.data.docs && (
+                <DocsModule docs={entry.data.docs} />
+              )}
+
+              {entry.data.footnote && (
+                <p class="footnote"><Inline text={entry.data.footnote} /></p>
+              )}
+            </div>
+          </section>
+        ))
+      }
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  /* ------------------------------------------------------------------ hero */
+
+  .hero {
+    position: relative;
+    padding-block: clamp(2.25rem, 5.5vw, 4rem) clamp(1.75rem, 4vw, 3rem);
+    overflow: hidden;
+  }
+
+  /* A single, still, low-contrast field. No animation, nothing to chase. */
+  .hero::before {
+    content: '';
+    position: absolute;
+    inset: -40% 0 auto;
+    block-size: 120%;
+    background:
+      radial-gradient(58% 42% at 50% 22%, var(--accent-wash), transparent 68%),
+      repeating-linear-gradient(90deg, var(--grid-line) 0 1px, transparent 1px 88px);
+    mask-image: linear-gradient(to bottom, #000 0%, #000 42%, transparent 88%);
+    pointer-events: none;
+  }
+
+  .hero-inner {
+    position: relative;
+    display: grid;
+    justify-items: center;
+    text-align: center;
+    gap: var(--s-4);
+  }
+
+  h1 {
+    font-size: clamp(1.85rem, 1.2rem + 2.9vw, 3.4rem);
+    /* Wide enough that `text-wrap: balance` settles on two even lines instead
+       of a four-line stack that pushes the prompt out of the first screen. */
+    max-inline-size: 30ch;
+    letter-spacing: -0.035em;
+  }
+
+  .hero-lede {
+    text-align: center;
+    max-inline-size: 58ch;
+    margin-block-end: var(--s-2);
+  }
+
+  .hero-lede em {
+    font-style: normal;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .secondary {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: var(--s-3);
+    margin-block-start: 0;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--faint);
+  }
+
+  .ghost-link {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 2.5rem;
+    color: var(--muted);
+    text-decoration: none;
+    border-block-end: 1px solid var(--line-strong);
+  }
+
+  .ghost-link:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  /* ------------------------------------------------------------------ pins */
+
+  .pins {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    gap: 1px;
+    margin-block-start: clamp(1.5rem, 3.5vw, 2.5rem);
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .pins > div {
+    background: var(--bg-raised);
+    padding: var(--s-3) var(--s-4);
+  }
+
+  .pins dt {
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  .pins dd {
+    margin: 0.2rem 0 0;
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  /* ------------------------------------------------------------- lifecycle */
+
+  .lifecycle-band {
+    border-block: 1px solid var(--line);
+    background: var(--bg-sunken);
+    padding-block: var(--s-6);
+  }
+
+  .lifecycle-band h2 {
+    margin-block-end: var(--s-4);
+  }
+
+  .lifecycle {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: var(--s-4) var(--s-5);
+  }
+
+  .lifecycle li {
+    display: grid;
+    grid-template-columns: 1.75rem minmax(0, 1fr);
+    gap: 0 var(--s-2);
+    padding-block-start: var(--s-2);
+    border-block-start: 1px solid var(--line-strong);
+  }
+
+  .n {
+    grid-row: 1 / span 2;
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    color: var(--accent-dim);
+    padding-block-start: 0.22rem;
+  }
+
+  .verb {
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .gloss {
+    color: var(--muted);
+    font-size: var(--step--1);
+    line-height: 1.5;
+  }
+
+  /* ----------------------------------------------------------------- board */
+
+  .board {
+    display: grid;
+    grid-template-columns: 12.5rem minmax(0, 1fr);
+    gap: clamp(1.5rem, 5vw, 4.5rem);
+    padding-block: clamp(2.5rem, 6vw, 4.5rem);
+  }
+
+  .index {
+    position: sticky;
+    top: 5rem;
+    align-self: start;
+    max-block-size: calc(100vh - 7rem);
+    overflow-y: auto;
+  }
+
+  .index-title {
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin-block-end: var(--s-3);
+  }
+
+  .index ol {
+    list-style: none;
+    padding: 0;
+    display: grid;
+  }
+
+  .index a {
+    display: grid;
+    grid-template-columns: 2rem minmax(0, 1fr);
+    align-items: baseline;
+    min-block-size: 2.35rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+    text-decoration: none;
+    border-inline-start: 2px solid transparent;
+    padding-inline-start: var(--s-3);
+    margin-inline-start: -2px;
+  }
+
+  .index a:hover {
+    color: var(--accent);
+    border-inline-start-color: var(--accent);
+  }
+
+  .index-n {
+    color: var(--faint);
+  }
+
+  .index a:hover .index-n {
+    color: inherit;
+  }
+
+  /* --------------------------------------------------------------- section */
+
+  .sections {
+    display: grid;
+    gap: clamp(3rem, 7vw, 5.5rem);
+    min-inline-size: 0;
+  }
+
+  .section-head {
+    display: grid;
+    grid-template-columns: 3.25rem minmax(0, 1fr);
+    gap: var(--s-4);
+    margin-block-end: var(--s-5);
+  }
+
+  .section-number {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    font-weight: 600;
+    color: var(--accent);
+    padding-block-start: 0.4rem;
+  }
+
+  .section h2 {
+    font-size: var(--step-2);
+    letter-spacing: -0.025em;
+  }
+
+  .section-lede {
+    margin-block-start: var(--s-3);
+    font-size: var(--step-0);
+  }
+
+  .section-lede :global(code) {
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 0.05em 0.32em;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  .section-lede :global(strong) {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .section-body {
+    display: grid;
+    gap: var(--s-5);
+    padding-inline-start: calc(3.25rem + var(--s-4));
+  }
+
+  .section-body > .prose:empty {
+    display: none;
+  }
+
+  .footnote {
+    color: var(--faint);
+    font-size: var(--step--1);
+    line-height: 1.6;
+    max-inline-size: 66ch;
+    padding-inline-start: var(--s-4);
+    border-inline-start: 2px solid var(--line-strong);
+  }
+
+  .footnote :global(code) {
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+
+  .footnote :global(strong) {
+    color: var(--muted);
+  }
+
+  @media (max-width: 66rem) {
+    .board {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .index {
+      position: static;
+      max-block-size: none;
+      padding-block-end: var(--s-5);
+      border-block-end: 1px solid var(--line);
+    }
+
+    .index ol {
+      grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    }
+  }
+
+  @media (max-width: 44rem) {
+    .section-head {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--s-2);
+    }
+
+    .section-number {
+      padding-block-start: 0;
+    }
+
+    .section-body {
+      padding-inline-start: 0;
+    }
+  }
+</style>

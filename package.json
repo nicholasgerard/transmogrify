@@ -1,0 +1,48 @@
+{
+  "name": "@nicholasgerard/transmogrify",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Operate exact-owned Codex and Claude Code lanes with native app visibility, steering, recovery, retirement, and worktree cleanup.",
+  "license": "MIT",
+  "author": {
+    "name": "Nick Gerard",
+    "email": "support@thebkapp.co"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicholasgerard/transmogrify.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nicholasgerard/transmogrify/issues"
+  },
+  "homepage": "https://github.com/nicholasgerard/transmogrify#readme",
+  "keywords": [
+    "codex",
+    "claude-code",
+    "agent-orchestration",
+    "multi-agent",
+    "operator",
+    "websocket",
+    "worktree"
+  ],
+  "files": [
+    "SKILL.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "ROADMAP.md",
+    "docs/",
+    "examples/",
+    "scripts/",
+    "install.sh"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "scripts": {
+    "runtime:up": "./scripts/runtime-up.sh",
+    "test": "node --test test/*.test.js"
+  }
+}

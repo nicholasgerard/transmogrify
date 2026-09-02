@@ -1,0 +1,126 @@
+---
+/**
+ * Rendered only when a measurement ID is configured for the build.
+ *
+ * Deliberately non-modal: declining, ignoring, or never seeing this panel must
+ * leave the site completely usable, so it never traps focus and never covers
+ * the page. It starts `hidden` and is revealed by the consent script only when
+ * the decision says the visitor should be asked.
+ */
+---
+
+<section
+  class="consent-dialog"
+  id="consent-dialog"
+  role="region"
+  aria-labelledby="consent-title"
+  tabindex="-1"
+  hidden
+>
+  <div class="inner">
+    <div class="copy">
+      <h2 id="consent-title">Allow anonymous analytics?</h2>
+      <p>
+        This site loads nothing from Google until you say yes. Choosing “No
+        thanks” keeps every part of the site working and sends no request. You
+        can change your mind at any time from <strong>Privacy choices</strong> in
+        the footer. <a href="/privacy#analytics">What this measures</a>.
+      </p>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn ghost" data-consent="deny">No thanks</button>
+      <button type="button" class="btn solid" data-consent="allow">Allow analytics</button>
+    </div>
+  </div>
+</section>
+
+<style>
+  .consent-dialog {
+    position: fixed;
+    inset-inline: 0;
+    inset-block-end: 0;
+    z-index: 90;
+    background: var(--bg-raised);
+    border-block-start: 1px solid var(--line-strong);
+    box-shadow: 0 -14px 40px -28px rgba(0, 0, 0, 0.85);
+    padding: var(--s-4) 0 calc(var(--s-4) + env(safe-area-inset-bottom));
+    transform: translateY(101%);
+    transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  .consent-dialog[data-open='true'] {
+    transform: translateY(0);
+  }
+
+  .inner {
+    inline-size: 100%;
+    max-inline-size: var(--shell);
+    margin-inline: auto;
+    padding-inline: clamp(1.15rem, 4vw, 2.5rem);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-4);
+  }
+
+  .copy {
+    flex: 1 1 24rem;
+    min-inline-size: 0;
+  }
+
+  h2 {
+    font-size: var(--step-0);
+    margin-block-end: 0.25rem;
+  }
+
+  p {
+    color: var(--muted);
+    font-size: var(--step--1);
+    line-height: 1.55;
+    max-inline-size: 62ch;
+  }
+
+  .actions {
+    display: flex;
+    gap: var(--s-2);
+    flex: none;
+  }
+
+  .btn {
+    min-block-size: 2.75rem;
+    padding: 0.5rem 1.1rem;
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border-control);
+    background: transparent;
+    transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+  }
+
+  .btn.ghost:hover {
+    border-color: var(--text);
+  }
+
+  .btn.solid {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-color: transparent;
+  }
+
+  .btn.solid:hover {
+    filter: brightness(1.08);
+  }
+
+  @media (max-width: 40rem) {
+    .actions {
+      inline-size: 100%;
+    }
+
+    .btn {
+      flex: 1;
+    }
+  }
+</style>

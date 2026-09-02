@@ -1,0 +1,21 @@
+---
+import { parseInline } from '../lib/inline-code.ts';
+
+interface Props {
+  text: string;
+}
+const { text } = Astro.props;
+const tokens = parseInline(text);
+---
+
+{
+  tokens.map((token) =>
+    token.kind === 'code' ? (
+      <code>{token.value}</code>
+    ) : token.kind === 'strong' ? (
+      <strong>{token.value}</strong>
+    ) : (
+      <Fragment>{token.value}</Fragment>
+    ),
+  )
+}

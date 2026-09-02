@@ -1,0 +1,130 @@
+---
+import Wordmark from './Wordmark.astro';
+import ThemeToggle from './ThemeToggle.astro';
+import { getRepoFacts } from '../lib/repo-facts.node.ts';
+
+const facts = getRepoFacts();
+const onLanding = Astro.url.pathname === '/' || Astro.url.pathname === '';
+---
+
+<header class="site-header">
+  <div class="shell bar">
+    <a class="brand" href="/" aria-label="Transmogrify home">
+      <Wordmark />
+      <span class="version">v{facts.packageVersion}</span>
+    </a>
+
+    <nav aria-label="Primary">
+      <ul>
+        {onLanding && (
+          <>
+            <li><a href="#matrix">Compatibility</a></li>
+            <li><a href="#install">Install</a></li>
+            <li><a href="#read">Docs</a></li>
+          </>
+        )}
+        {!onLanding && <li><a href="/">Home</a></li>}
+        <li>
+          <a href={facts.repositoryUrl} rel="noopener noreferrer external">
+            GitHub<span class="sr-only"> (opens on github.com)</span>
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <ThemeToggle />
+  </div>
+</header>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: color-mix(in srgb, var(--bg) 90%, transparent);
+    backdrop-filter: saturate(140%) blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: var(--s-4);
+    min-height: 3.5rem;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    text-decoration: none;
+    flex: none;
+  }
+
+  .brand:hover {
+    color: inherit;
+  }
+
+  .version {
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    color: var(--faint);
+    letter-spacing: 0.04em;
+  }
+
+  nav {
+    margin-left: auto;
+  }
+
+  nav ul {
+    display: flex;
+    align-items: center;
+    gap: clamp(0.75rem, 2vw, 1.5rem);
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+  }
+
+  nav a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
+    color: var(--muted);
+    text-decoration: none;
+  }
+
+  nav a:hover {
+    color: var(--accent);
+  }
+
+  /* The in-page links are a convenience; the section index inside the page is
+     the real navigation, so they step aside before they can crowd the brand. */
+  @media (max-width: 46rem) {
+    nav li:not(:last-child) {
+      display: none;
+    }
+  }
+
+  /* At phone widths the brand, the one remaining link, and the persistent
+     theme control have to share under 300px. The version chip is the only
+     piece with a home elsewhere (the footer), so it goes first. */
+  @media (max-width: 30rem) {
+    .bar {
+      gap: var(--s-3);
+    }
+
+    .version {
+      display: none;
+    }
+
+    .brand :global(.wordmark .text) {
+      font-size: var(--step--1);
+    }
+
+    nav ul {
+      gap: var(--s-3);
+    }
+  }
+</style>

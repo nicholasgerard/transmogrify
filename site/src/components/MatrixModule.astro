@@ -1,0 +1,259 @@
+---
+import Inline from './Inline.astro';
+import { getRepoFacts } from '../lib/repo-facts.node.ts';
+import { docUrl } from '../lib/site.ts';
+
+interface Props {
+  gated?: string[];
+}
+const { gated = [] } = Astro.props;
+
+const facts = getRepoFacts();
+const { headers, rows } = facts.supportMatrix;
+const [rowHeader, ...columnHeaders] = headers;
+---
+
+<div class="matrix-module">
+  <div class="table-wrap">
+    <table>
+      <caption class="sr-only">
+        Which orchestrator can drive which target provider. Rendered from the
+        support matrix in the repository README.
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">{rowHeader}</th>
+          {columnHeaders.map((header) => <th scope="col">{header}</th>)}
+        </tr>
+      </thead>
+      <tbody>
+        {
+          rows.map((row) => (
+            <tr>
+              <th scope="row">{row[0]}</th>
+              {row.slice(1).map((cell, index) => (
+                <td>
+                  <span class="cell-label" aria-hidden="true">{columnHeaders[index]}</span>
+                  <Inline text={cell ?? ''} />
+                </td>
+              ))}
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <p class="source">
+    Source of truth:
+    <a href={docUrl(facts.repositoryUrl, 'README.md')} rel="noopener noreferrer external">
+      README.md<span class="sr-only"> (opens on github.com)</span></a>. This table is
+    generated from it at build time.
+  </p>
+
+  {
+    gated.length > 0 && (
+      <section class="gated" aria-labelledby="gated-title">
+        <h3 id="gated-title">
+          <span class="gate-pip" aria-hidden="true" />
+          Not claimed yet
+        </h3>
+        <ul>
+          {gated.map((item) => (
+            <li><Inline text={item} /></li>
+          ))}
+        </ul>
+      </section>
+    )
+  }
+</div>
+
+<style>
+  .table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+  }
+
+  table {
+    inline-size: 100%;
+    min-inline-size: 46rem;
+    border-collapse: collapse;
+  }
+
+  th,
+  td {
+    text-align: start;
+    vertical-align: top;
+    padding: var(--s-4);
+    border-block-end: 1px solid var(--line);
+  }
+
+  thead th {
+    background: var(--bg-inset);
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    font-weight: 600;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    white-space: nowrap;
+  }
+
+  tbody th {
+    inline-size: 11rem;
+    background: var(--bg-inset);
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    font-weight: 600;
+    color: var(--text);
+    border-inline-end: 1px solid var(--line);
+  }
+
+  tbody tr:last-child th,
+  tbody tr:last-child td {
+    border-block-end: 0;
+  }
+
+  td {
+    color: var(--muted);
+    font-size: var(--step--1);
+    line-height: 1.6;
+  }
+
+  .cell-label {
+    display: none;
+  }
+
+  .source {
+    margin-block-start: var(--s-3);
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    letter-spacing: 0.04em;
+    color: var(--faint);
+  }
+
+  .source a {
+    color: var(--muted);
+  }
+
+  .gated {
+    margin-block-start: var(--s-6);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--warn-wash);
+    padding: var(--s-5);
+  }
+
+  .gated h3 {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-size: var(--step--2);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--warn);
+    margin-block-end: var(--s-4);
+  }
+
+  .gate-pip {
+    inline-size: 7px;
+    block-size: 7px;
+    border-radius: 2px;
+    background: var(--warn);
+    flex: none;
+  }
+
+  .gated ul {
+    display: grid;
+    gap: var(--s-3);
+    padding-inline-start: 1.1em;
+    color: var(--muted);
+    font-size: var(--step--1);
+    line-height: 1.65;
+  }
+
+  .gated :global(code) {
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 0.05em 0.32em;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  .gated :global(strong) {
+    color: var(--text);
+  }
+
+  /* Below the table's natural width, the grid becomes stacked records so the
+     row/column relationship survives instead of turning into a flat list. */
+  @media (max-width: 52rem) {
+    .table-wrap {
+      overflow-x: visible;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+    }
+
+    table,
+    thead,
+    tbody,
+    tr,
+    th,
+    td {
+      display: block;
+    }
+
+    table {
+      /* The scroll floor only applies to the real grid; the stacked form must
+         be free to shrink to the viewport. */
+      min-inline-size: 0;
+    }
+
+    thead {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+    }
+
+    tbody tr {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--bg-raised);
+      overflow: hidden;
+    }
+
+    tbody tr + tr {
+      margin-block-start: var(--s-4);
+    }
+
+    tbody th {
+      inline-size: auto;
+      border-inline-end: 0;
+      border-block-end: 1px solid var(--line);
+    }
+
+    tbody tr:last-child th {
+      border-block-end: 1px solid var(--line);
+    }
+
+    tbody tr:last-child td:last-child {
+      border-block-end: 0;
+    }
+
+    .cell-label {
+      display: block;
+      font-family: var(--mono);
+      font-size: var(--step--2);
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+      color: var(--faint);
+      margin-block-end: 0.3rem;
+    }
+  }
+</style>

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-09-01",
+  "headroomPercent": 10,
+  "globalLimits": {
+    "maxAssetRawBytes": 262144,
+    "maxScriptRawBytes": 32768,
+    "maxStyleRawBytes": 65536
+  },
+  "deploy": {
+    "rawBytes": 246747
+  },
+  "routes": {
+    "/404": {
+      "rawBytes": 32555,
+      "gzipBytes": 9122,
+      "brotliBytes": 7730,
+      "jsBrotliBytes": 2013,
+      "cssBrotliBytes": 3292,
+      "mediaRawBytes": 0,
+      "requests": 4
+    },
+    "/": {
+      "rawBytes": 86699,
+      "gzipBytes": 20184,
+      "brotliBytes": 17003,
+      "jsBrotliBytes": 2013,
+      "cssBrotliBytes": 5849,
+      "mediaRawBytes": 0,
+      "requests": 4
+    },
+    "/privacy": {
+      "rawBytes": 41977,
+      "gzipBytes": 12842,
+      "brotliBytes": 10731,
+      "jsBrotliBytes": 2013,
+      "cssBrotliBytes": 3496,
+      "mediaRawBytes": 0,
+      "requests": 4
+    },
+    "/terms": {
+      "rawBytes": 40305,
+      "gzipBytes": 12142,
+      "brotliBytes": 10123,
+      "jsBrotliBytes": 2013,
+      "cssBrotliBytes": 3496,
+      "mediaRawBytes": 0,
+      "requests": 4
+    }
+  }
+}

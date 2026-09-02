@@ -1,0 +1,1070 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync, spawn } = require('node:child_process');
+const test = require('node:test');
+const {
+  appendLaneExecutionEpoch,
+  ensureRegistry,
+  acquireLock,
+  beginLaneOperation,
+  beginOperation,
+  bindClaudeProviderIdentity,
+  bindClaudeSpawnObservation,
+  bindLaneSeat,
+  bindLaneProvider,
+  bindLaneProviderBridge,
+  completeLaneOperation,
+  listLanes,
+  listOperations,
+  mutateLane,
+  observeLaneStopped,
+  pendingOperationForLane,
+  processMatches,
+  projectPaths,
+  readRegistry,
+  resolveProject,
+  rebindClaudeRuntime,
+  registerLane,
+  releaseLock,
+  reserveLane,
+  reserveSpawn,
+  requireOwnedLane,
+  requireOwnedProviderLane,
+  settleTerminalLaneOperationPointer,
+  updateLane,
+  updateOperation,
+  updatePendingLaneOperation,
+} = require('../scripts/lib/state');
+const { createStateFixture } = require('./helpers/state-fixture');
+
+function claudeSpawnIntent(operationId, displayName, suffix) {
+  return {
+    operationId,
+    spawnNonce: `${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}-${suffix}${suffix}${suffix}${suffix}-4${suffix}${suffix}${suffix}-8${suffix}${suffix}${suffix}-${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}${suffix}`,
+    displayName,
+    promptSha256: 'a'.repeat(64),
+    promptMarkerSha256: 'b'.repeat(64),
+    preflightSessionIds: [],
+    stdoutPath: `/tmp/${suffix}-stdout`,
+    stderrPath: `/tmp/${suffix}-stderr`,
+  };
+}
+
+test('registry is outside the repository and binds to canonical Git identity', (t) => {
+  const fixture = createStateFixture(t);
+  const { paths, registry } = ensureRegistry(fixture.repoRoot, fixture.env);
+  assert.equal(paths.registry.startsWith(`${fixture.repoRoot}${path.sep}`), false);
+  assert.equal(registry.project.root, fs.realpathSync(fixture.repoRoot));
+  assert.equal(registry.project.commonDir, fs.realpathSync(path.join(fixture.repoRoot, '.git')));
+});
+
+test('repository identity ignores ambient Git repository redirection', (t) => {
+  const fixture = createStateFixture(t);
+  const other = path.join(fixture.root, 'other-repo');
+  fs.mkdirSync(other);
+  execFileSync('git', ['init', '--quiet', other]);
+  const poisoned = {
+    GIT_DIR: path.join(other, '.git'),
+    GIT_WORK_TREE: fixture.repoRoot,
+    GIT_COMMON_DIR: path.join(other, '.git'),
+    GIT_INDEX_FILE: path.join(other, '.git', 'index'),
+    GIT_OBJECT_DIRECTORY: path.join(other, '.git', 'objects'),
+  };
+  const original = Object.fromEntries(Object.keys(poisoned).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, poisoned);
+  try {
+    const project = resolveProject(fixture.repoRoot);
+    assert.equal(project.root, fs.realpathSync(fixture.repoRoot));
+    assert.equal(project.commonDir, fs.realpathSync(path.join(fixture.repoRoot, '.git')));
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('exact backend and provider id establish ownership; names and prefixes do not', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'thread-123456',
+    displayName: '[test] collision-friendly name',
+    state: 'active',
+  }, fixture.env);
+  assert.equal(
+    requireOwnedProviderLane(fixture.repoRoot, 'codex-app-server', 'thread-123456', fixture.env).laneId,
+    lane.laneId,
+  );
+  assert.throws(() => {
+    requireOwnedProviderLane(fixture.repoRoot, 'codex-app-server', 'thread-123', fixture.env);
+  }, /NOT_OWNED/);
+  assert.throws(() => {
+    requireOwnedProviderLane(fixture.repoRoot, 'codex-native', 'thread-123456', fixture.env);
+  }, /NOT_OWNED/);
+});
+
+test('lane provider identity is immutable and state updates are atomic', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'thread-1',
+    displayName: '[test] lane',
+  }, fixture.env);
+  updateLane(fixture.repoRoot, lane.laneId, { state: 'retireRequested' }, fixture.env);
+  const updated = updateLane(fixture.repoRoot, lane.laneId, {
+    state: 'archivedVerified',
+    lastVerifiedAt: '2026-09-01T00:00:00.000Z',
+  }, fixture.env);
+  assert.equal(updated.state, 'archivedVerified');
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'archivedVerified');
+  assert.throws(() => {
+    updateLane(fixture.repoRoot, lane.laneId, { providerId: 'thread-2' }, fixture.env);
+  }, /immutable/);
+});
+
+test('two live lane records cannot claim the same worktree seat', (t) => {
+  const fixture = createStateFixture(t);
+  const seat = { path: '/tmp/exact-seat', managed: true };
+  registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'thread-a',
+    displayName: '[test] lane a',
+    seat,
+  }, fixture.env);
+  assert.throws(() => registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'thread-b',
+    displayName: '[test] lane b',
+    seat,
+  }, fixture.env), /seat is already owned/);
+});
+
+test('a seat reservation precedes provider creation and binds identity once', (t) => {
+  const fixture = createStateFixture(t);
+  const seat = { path: '/tmp/reserved-seat', managed: true };
+  const reserved = reserveLane(fixture.repoRoot, {
+    laneId: 'lane-reserved',
+    backend: 'codex-app-server',
+    displayName: '[test] reserved',
+    seat,
+    runtime: { endpoint: 'ws://127.0.0.1:8843/' },
+  }, fixture.env);
+  assert.equal(reserved.providerId, null);
+  assert.throws(() => reserveLane(fixture.repoRoot, {
+    laneId: 'lane-collision',
+    backend: 'codex-app-server',
+    displayName: '[test] collision',
+    seat,
+  }, fixture.env), /seat is already owned/);
+  const bound = bindLaneProvider(fixture.repoRoot, reserved.laneId, 'thread-bound', {
+    runtime: {
+      endpoint: 'ws://127.0.0.1:8843/',
+      codexHome: '/tmp/codex-home',
+      platformFamily: 'unix',
+      platformOs: 'test',
+    },
+  }, fixture.env);
+  assert.equal(bound.providerId, 'thread-bound');
+  assert.equal(requireOwnedLane(fixture.repoRoot, reserved.laneId, fixture.env).providerId, 'thread-bound');
+  assert.throws(() => bindLaneProvider(
+    fixture.repoRoot, reserved.laneId, 'thread-bound', {
+      seat: { path: '/tmp/replaced-seat', managed: true },
+    }, fixture.env,
+  ), /unsupported field seat/);
+  bindLaneProvider(fixture.repoRoot, reserved.laneId, 'thread-bound', {
+    ownership: { creationReceipt: { providerId: 'thread-bound' } },
+  }, fixture.env);
+  assert.throws(() => bindLaneProvider(
+    fixture.repoRoot, reserved.laneId, 'thread-bound', {
+      ownership: { creationReceipt: { providerId: 'thread-replacement' } },
+    }, fixture.env,
+  ), /immutable lane ownership field creationReceipt/);
+  assert.throws(() => bindLaneProvider(
+    fixture.repoRoot, reserved.laneId, 'thread-bound', {
+      runtime: { ...bound.runtime, platformOs: 'drifted' },
+    }, fixture.env,
+  ), /immutable lane runtime/);
+  const protectedBefore = requireOwnedLane(fixture.repoRoot, reserved.laneId, fixture.env);
+  mutateLane(fixture.repoRoot, reserved.laneId, (draft) => {
+    draft.seat.path = '/tmp/mutated-in-place';
+    draft.runtime.endpoint = 'ws://127.0.0.1:9999/';
+    return { patch: { lastVerifiedAt: '2026-09-01T18:00:00.000Z' } };
+  }, fixture.env);
+  const protectedAfter = requireOwnedLane(fixture.repoRoot, reserved.laneId, fixture.env);
+  assert.deepEqual(protectedAfter.seat, protectedBefore.seat);
+  assert.deepEqual(protectedAfter.runtime, protectedBefore.runtime);
+  assert.throws(() => bindLaneProvider(
+    fixture.repoRoot, reserved.laneId, 'thread-replacement', {}, fixture.env,
+  ), /immutable/);
+});
+
+test('state paths inside the repository and symlinked state files are rejected', (t) => {
+  const fixture = createStateFixture(t);
+  assert.throws(() => ensureRegistry(fixture.repoRoot, {
+    ...fixture.env,
+    TRANSMOGRIFY_STATE_DIR: path.join(fixture.repoRoot, '.transmogrify-state'),
+  }), /outside the repository/);
+
+  const { registry } = projectPaths(fixture.repoRoot, fixture.env);
+  const external = path.join(fixture.root, 'external-registry.json');
+  fs.copyFileSync(registry, external);
+  fs.chmodSync(external, 0o600);
+  fs.unlinkSync(registry);
+  fs.symlinkSync(external, registry);
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /unsafe JSON state file/);
+});
+
+test('state directories and JSON receipts must remain private and owner-controlled', (t) => {
+  const fixture = createStateFixture(t);
+  const paths = projectPaths(fixture.repoRoot, fixture.env);
+  fs.chmodSync(fixture.stateDir, 0o777);
+  assert.throws(
+    () => projectPaths(fixture.repoRoot, fixture.env),
+    /non-(?:private state directory|owner-controlled state ancestor)/,
+  );
+  fs.chmodSync(fixture.stateDir, 0o700);
+
+  fs.chmodSync(paths.registry, 0o644);
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /non-private JSON state file/);
+  fs.chmodSync(paths.registry, 0o600);
+
+  fs.rmSync(paths.operations, { recursive: true });
+  const external = path.join(fixture.root, 'external-operations');
+  fs.mkdirSync(external, { mode: 0o700 });
+  fs.symlinkSync(external, paths.operations);
+  assert.throws(() => beginOperation(fixture.repoRoot, {
+    type: 'status',
+    laneId: null,
+  }, fixture.env), /symlinked state directory/);
+});
+
+test('state creation refuses a group/world-writable existing ancestor', (t) => {
+  const fixture = createStateFixture(t);
+  const shared = path.join(fixture.root, 'shared-state-parent');
+  fs.mkdirSync(shared);
+  fs.chmodSync(shared, 0o777);
+  assert.throws(() => ensureRegistry(fixture.repoRoot, {
+    ...fixture.env,
+    TRANSMOGRIFY_STATE_DIR: path.join(shared, 'private-leaf', 'state'),
+  }), /non-owner-controlled state ancestor/);
+  assert.equal(fs.existsSync(path.join(shared, 'private-leaf')), false);
+});
+
+test('ownership locks remain usable without ps and never reap an unverified live pid', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-lock-no-ps-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, 'lock');
+  const selfStartMs = 1_777_777_777_000;
+  const owner = acquireLock(lockDirectory, {
+    dependencies: {
+      processBirth: () => null,
+      selfPid: process.pid,
+      selfStartMs,
+    },
+  });
+  assert.equal(owner.processBirth, `self-start-ms:${selfStartMs}`);
+  releaseLock(lockDirectory, owner);
+
+  assert.equal(processMatches({
+    pid: 44444,
+    processBirth: 'unavailable-birth',
+  }, {
+    kill() {},
+    processBirth: () => null,
+    selfPid: process.pid,
+  }), true);
+  assert.equal(processMatches({
+    pid: 55555,
+    processBirth: 'dead-birth',
+  }, {
+    kill() { const error = new Error('gone'); error.code = 'ESRCH'; throw error; },
+    processBirth: () => null,
+  }), false);
+});
+
+test('operation journal records intent before provider identity is known', (t) => {
+  const fixture = createStateFixture(t);
+  const operation = beginOperation(fixture.repoRoot, {
+    type: 'spawn',
+    laneId: 'lane-planned',
+    details: { name: '[test] planned lane' },
+  }, fixture.env);
+  assert.equal(operation.state, 'planned');
+  assert.equal(operation.providerId, null);
+  const updated = updateOperation(fixture.repoRoot, operation.operationId, {
+    state: 'providerCreated',
+    providerId: 'thread-created',
+  }, fixture.env);
+  assert.equal(updated.providerId, 'thread-created');
+  assert.equal(updateOperation(fixture.repoRoot, operation.operationId, {
+    providerId: 'thread-created',
+  }, fixture.env).providerId, 'thread-created');
+  assert.throws(() => updateOperation(fixture.repoRoot, operation.operationId, {
+    providerId: 'thread-replacement',
+  }, fixture.env), /immutable operation field providerId/);
+  assert.throws(() => updateOperation(fixture.repoRoot, operation.operationId, {
+    details: { name: '[test] rewritten lane' },
+  }, fixture.env), /immutable operation detail name/);
+  assert.equal(updateOperation(fixture.repoRoot, operation.operationId, {
+    details: { ...operation.details, providerReceiptSha256: 'd'.repeat(64) },
+  }, fixture.env).details.providerReceiptSha256, 'd'.repeat(64));
+  assert.equal(listOperations(fixture.repoRoot, fixture.env).length, 1);
+});
+
+test('spawn reservation is durable before managed seat materialization and seat binds once', (t) => {
+  const fixture = createStateFixture(t);
+  const laneId = '12121212-1212-4121-8121-121212121212';
+  const operationId = '34343434-3434-4343-8343-343434343434';
+  const seatIntent = {
+    version: 1,
+    laneId,
+    path: '/tmp/transmogrify-worktrees/lane-one',
+    worktreesRoot: '/tmp/transmogrify-worktrees',
+    gitCommonDir: '/tmp/repository/.git',
+    branchRef: 'refs/heads/transmogrify/lane-one',
+    baseCommit: 'a'.repeat(40),
+    managed: true,
+  };
+  const reserved = reserveSpawn(fixture.repoRoot, {
+    operation: {
+      operationId,
+      type: 'spawn',
+      laneId,
+      details: { target: 'codex', name: '[test] pre-seat' },
+    },
+    lane: {
+      laneId,
+      backend: 'codex-app-server',
+      displayName: '[test] pre-seat',
+      operationId,
+      seatIntent,
+    },
+  }, fixture.env);
+  assert.equal(reserved.operation.state, 'planned');
+  assert.equal(reserved.lane.seat, null);
+  assert.deepEqual(reserved.lane.seatIntent, seatIntent);
+  assert.equal(reserved.lane.pendingOperationId, operationId);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env).operationId, operationId);
+
+  assert.throws(() => reserveSpawn(fixture.repoRoot, {
+    operation: {
+      operationId: '56565656-5656-4565-8565-565656565656',
+      type: 'spawn',
+      laneId: '78787878-7878-4787-8787-787878787878',
+    },
+    lane: {
+      laneId: '78787878-7878-4787-8787-787878787878',
+      backend: 'codex-app-server',
+      displayName: '[test] collision',
+      operationId: '56565656-5656-4565-8565-565656565656',
+      seatIntent: { ...seatIntent, laneId: '78787878-7878-4787-8787-787878787878' },
+    },
+  }, fixture.env), /seat is already owned/);
+
+  const seat = {
+    path: seatIntent.path,
+    worktreesRoot: seatIntent.worktreesRoot,
+    gitCommonDir: seatIntent.gitCommonDir,
+    branchRef: seatIntent.branchRef,
+    head: seatIntent.baseCommit,
+    device: 1,
+    inode: 2,
+    managed: true,
+  };
+  assert.throws(() => bindLaneSeat(
+    fixture.repoRoot, laneId, operationId, { ...seat, head: 'b'.repeat(40) }, fixture.env,
+  ), /baseCommit/);
+  const seated = bindLaneSeat(fixture.repoRoot, laneId, operationId, seat, fixture.env);
+  assert.deepEqual(seated.seat, seat);
+  assert.deepEqual(bindLaneSeat(
+    fixture.repoRoot, laneId, operationId, seat, fixture.env,
+  ).seat, seat);
+  assert.throws(() => bindLaneSeat(
+    fixture.repoRoot, laneId, operationId, { ...seat, inode: 3 }, fixture.env,
+  ), /immutable lane field seat/);
+  const operation = pendingOperationForLane(fixture.repoRoot, laneId, fixture.env);
+  assert.equal(operation.state, 'seatReady');
+  assert.deepEqual(operation.details.seat, seat);
+});
+
+test('pending lane operation pointers reject stale writers and clear only after durable completion', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'pointer-provider',
+    displayName: '[test] pointer lane',
+    state: 'active',
+  }, fixture.env);
+  const operationId = '90909090-9090-4909-8909-909090909090';
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    operationId,
+    type: 'steer',
+    details: { inputSha256: 'c'.repeat(64) },
+  }, fixture.env);
+  assert.equal(operation.laneId, lane.laneId);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).operationId, operationId);
+  assert.throws(() => beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'status',
+  }, fixture.env), /already has pending operation/);
+  assert.throws(() => updateOperation(fixture.repoRoot, operationId, {
+    laneId: 'another-lane',
+  }, fixture.env), /immutable operation field laneId/);
+  assert.throws(() => updatePendingLaneOperation(
+    fixture.repoRoot, lane.laneId, 'abababab-abab-4aba-8aba-abababababab', { state: 'sent' }, fixture.env,
+  ), /not pending/);
+  assert.equal(updatePendingLaneOperation(
+    fixture.repoRoot, lane.laneId, operationId, { state: 'sent' }, fixture.env,
+  ).state, 'sent');
+  const completed = completeLaneOperation(
+    fixture.repoRoot, lane.laneId, operationId, { state: 'complete' }, fixture.env,
+  );
+  assert.equal(completed.state, 'complete');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  assert.equal(completeLaneOperation(
+    fixture.repoRoot, lane.laneId, operationId, { state: 'complete' }, fixture.env,
+  ).state, 'complete');
+});
+
+test('terminal operation pointer reconciliation closes the durable write-order crash boundary', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'terminal-pointer-provider',
+    displayName: '[test] terminal pointer lane',
+    state: 'idle',
+  }, fixture.env);
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'steer',
+    details: { inputSha256: 'd'.repeat(64) },
+  }, fixture.env);
+  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, {
+    state: 'complete',
+    details: { ...operation.details, responseVerified: true },
+  }, fixture.env);
+  assert.equal(pendingOperationForLane(
+    fixture.repoRoot, lane.laneId, fixture.env,
+  ).state, 'complete');
+
+  const settled = settleTerminalLaneOperationPointer(
+    fixture.repoRoot, lane.laneId, fixture.env,
+  );
+  assert.equal(settled.state, 'complete');
+  assert.equal(settled.details.responseVerified, true);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  assert.equal(settleTerminalLaneOperationPointer(
+    fixture.repoRoot, lane.laneId, fixture.env,
+  ), null);
+});
+
+test('Claude provider identity binds exact handles once and records immutable epochs', (t) => {
+  const fixture = createStateFixture(t);
+  const displayName = '[test] Claude lane';
+  const operation = beginOperation(fixture.repoRoot, {
+    type: 'spawn',
+    laneId: 'claude-reserved',
+  }, fixture.env);
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  const identity = {
+    version: 1,
+    sessionId: null,
+    jobId: null,
+    bridgeId: null,
+    executionEpochs: [],
+    runtimeEpochs: [],
+  };
+  const initialRuntime = {
+    protocolGeneration: 1,
+    platform: 'darwin',
+    arch: 'arm64',
+    cliPath: '/tmp/claude-2.1.257',
+    cliVersion: '2.1.257',
+    cliSha256: 'c'.repeat(64),
+    configDir: '/tmp/claude-config',
+    configDevice: 1,
+    configInode: 2,
+    projectsDirectory: '/tmp/claude-config/projects',
+    projectsDevice: 1,
+    projectsInode: 3,
+    accountFingerprint: 'd'.repeat(64),
+  };
+  const spawnIntent = claudeSpawnIntent(operation.operationId, displayName, '4');
+  const reserved = reserveLane(fixture.repoRoot, {
+    laneId: 'claude-reserved',
+    backend: 'claude-code',
+    displayName,
+    operationId: operation.operationId,
+    runtime: initialRuntime,
+    providerIdentity: identity,
+    spawnIntent,
+  }, fixture.env);
+  assert.equal(reserved.providerId, null);
+  assert.deepEqual(reserved.providerIdentity, identity);
+  assert.deepEqual(reserved.ownership.spawnIntent, spawnIntent);
+
+  const creationReceipt = { stdoutSha256: 'a'.repeat(64) };
+  const bound = bindClaudeProviderIdentity(fixture.repoRoot, reserved.laneId, {
+    sessionId,
+    jobId: '11111111',
+    creationReceipt,
+  }, fixture.env);
+  assert.equal(bound.providerId, sessionId);
+  assert.equal(bound.providerIdentity.jobId, '11111111');
+  assert.deepEqual(bound.ownership.creationReceipt, creationReceipt);
+  assert.equal(bindClaudeProviderIdentity(fixture.repoRoot, reserved.laneId, {
+    sessionId,
+    jobId: '11111111',
+    creationReceipt,
+  }, fixture.env).providerId, sessionId);
+  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, reserved.laneId, {
+    sessionId: '55555555-5555-4555-8555-555555555555',
+    jobId: '55555555',
+    creationReceipt,
+  }, fixture.env), /immutable Claude provider identity/);
+
+  const bridgeReceipt = { source: 'owned-session-metadata' };
+  assert.throws(() => bindLaneProviderBridge(
+    fixture.repoRoot, reserved.laneId, 'session_testBridge', undefined, fixture.env,
+  ), /bridge receipt is required/);
+  const bridged = bindLaneProviderBridge(
+    fixture.repoRoot, reserved.laneId, 'session_testBridge', bridgeReceipt, fixture.env,
+  );
+  assert.equal(bridged.providerIdentity.bridgeId, 'session_testBridge');
+  assert.equal(bindLaneProviderBridge(
+    fixture.repoRoot, reserved.laneId, 'session_testBridge', bridgeReceipt, fixture.env,
+  ).providerIdentity.bridgeId, 'session_testBridge');
+  assert.throws(() => bindLaneProviderBridge(
+    fixture.repoRoot, reserved.laneId, 'session_replacement', bridgeReceipt, fixture.env,
+  ), /immutable Claude bridge/);
+  assert.throws(() => bindLaneProviderBridge(
+    fixture.repoRoot, reserved.laneId, 'session_bad_bridge', bridgeReceipt, fixture.env,
+  ), /bridge id is invalid/);
+
+  const epoch = {
+    epochId: '22222222-2222-4222-8222-222222222222',
+    pid: 123,
+    processBirth: 'Tue Sep  1 15:00:00 2026',
+    socket: {
+      path: '/tmp/transmogrify-owned/claude.sock',
+      device: 1,
+      inode: 2,
+      uid: 501,
+      mode: 0o600,
+    },
+    observedAt: '2026-09-01T19:00:00.000Z',
+  };
+  const recorded = appendLaneExecutionEpoch(fixture.repoRoot, reserved.laneId, epoch, fixture.env);
+  assert.equal(recorded.providerIdentity.executionEpochs[0].ordinal, 1);
+  assert.equal(appendLaneExecutionEpoch(
+    fixture.repoRoot, reserved.laneId, epoch, fixture.env,
+  ).providerIdentity.executionEpochs.length, 1);
+  assert.throws(() => appendLaneExecutionEpoch(fixture.repoRoot, reserved.laneId, {
+    ...epoch,
+    pid: 124,
+  }, fixture.env), /immutable Claude execution epoch/);
+  assert.throws(() => appendLaneExecutionEpoch(fixture.repoRoot, reserved.laneId, {
+    ...epoch,
+    epochId: '66666666-6666-4666-8666-666666666666',
+    socket: { ...epoch.socket, token: 'secret' },
+  }, fixture.env), /unsupported field token/);
+
+  const nextRuntime = {
+    ...initialRuntime,
+    cliPath: '/tmp/claude-2.1.258',
+    cliVersion: '2.1.258',
+    cliSha256: 'e'.repeat(64),
+  };
+  const transition = {
+    transitionId: '77777777-7777-4777-8777-777777777777',
+    fromCliSha256: initialRuntime.cliSha256,
+    runtime: nextRuntime,
+    worker: { path: nextRuntime.cliPath, sha256: nextRuntime.cliSha256 },
+    epoch: {
+      ...epoch,
+      epochId: '77777777-7777-4777-8777-777777777777',
+      pid: 124,
+      processBirth: 'Tue Sep  1 15:01:00 2026',
+      socket: { ...epoch.socket, path: '/tmp/transmogrify-owned/claude-2.sock', inode: 3 },
+    },
+    observedAt: '2026-09-01T19:01:00.000Z',
+  };
+  const rebound = rebindClaudeRuntime(
+    fixture.repoRoot, reserved.laneId, transition, fixture.env,
+  );
+  assert.equal(rebound.providerIdentity.runtimeEpochs[0].ordinal, 1);
+  assert.equal(rebound.providerIdentity.runtimeEpochs[0].executionEpochOrdinal, 2);
+  assert.equal(rebound.providerIdentity.executionEpochs[1].pid, 124);
+  assert.equal(rebindClaudeRuntime(
+    fixture.repoRoot, reserved.laneId, transition, fixture.env,
+  ).providerIdentity.runtimeEpochs.length, 1);
+  assert.throws(() => rebindClaudeRuntime(fixture.repoRoot, reserved.laneId, {
+    ...transition,
+    transitionId: '88888888-8888-4888-8888-888888888888',
+    fromCliSha256: nextRuntime.cliSha256,
+    runtime: { ...nextRuntime, accountFingerprint: 'f'.repeat(64), cliSha256: '0'.repeat(64) },
+    worker: { path: nextRuntime.cliPath, sha256: '0'.repeat(64) },
+    epoch: { ...transition.epoch, epochId: '88888888-8888-4888-8888-888888888888' },
+  }, fixture.env), /immutable provider identity/);
+
+  assert.throws(() => updateLane(fixture.repoRoot, reserved.laneId, {
+    providerIdentity: identity,
+  }, fixture.env), /immutable lane field providerIdentity/);
+  assert.throws(() => mutateLane(fixture.repoRoot, reserved.laneId, () => ({
+    patch: { providerIdentity: identity },
+  }), fixture.env), /immutable lane field providerIdentity/);
+  const protectedBefore = requireOwnedLane(fixture.repoRoot, reserved.laneId, fixture.env);
+  mutateLane(fixture.repoRoot, reserved.laneId, (draft) => {
+    draft.providerIdentity.executionEpochs.length = 0;
+    draft.ownership.spawnIntent.displayName = '[test] rewritten';
+    return { patch: { lastVerifiedAt: '2026-09-01T20:00:00.000Z' } };
+  }, fixture.env);
+  const protectedAfter = requireOwnedLane(fixture.repoRoot, reserved.laneId, fixture.env);
+  assert.deepEqual(protectedAfter.providerIdentity, protectedBefore.providerIdentity);
+  assert.deepEqual(protectedAfter.ownership, protectedBefore.ownership);
+  assert.equal(requireOwnedProviderLane(
+    fixture.repoRoot, 'claude-code', sessionId, fixture.env,
+  ).laneId, reserved.laneId);
+  assert.throws(() => requireOwnedProviderLane(
+    fixture.repoRoot, 'claude-code', '11111111', fixture.env,
+  ), /NOT_OWNED/);
+});
+
+test('Claude spawn intent validates a recorded model selector and preserves legacy omission', (t) => {
+  const fixture = createStateFixture(t);
+  const displayName = '[test] Claude model selector';
+  const operation = beginOperation(fixture.repoRoot, {
+    type: 'spawn', laneId: 'claude-model-selector',
+  }, fixture.env);
+  reserveLane(fixture.repoRoot, {
+    laneId: 'claude-model-selector',
+    backend: 'claude-code',
+    displayName,
+    operationId: operation.operationId,
+    runtime: {
+      protocolGeneration: 1,
+      platform: 'darwin',
+      arch: 'arm64',
+      cliPath: '/tmp/claude-2.1.258',
+      cliVersion: '2.1.258',
+      cliSha256: 'c'.repeat(64),
+      configDir: '/tmp/claude-config',
+      configDevice: 1,
+      configInode: 2,
+      projectsDirectory: '/tmp/claude-config/projects',
+      projectsDevice: 1,
+      projectsInode: 3,
+      accountFingerprint: 'd'.repeat(64),
+    },
+    providerIdentity: {
+      version: 1, sessionId: null, jobId: null, bridgeId: null,
+      executionEpochs: [], runtimeEpochs: [],
+    },
+    spawnIntent: {
+      ...claudeSpawnIntent(operation.operationId, displayName, '7'),
+      modelSelector: 'claude-opus-5',
+    },
+  }, fixture.env);
+  assert.equal(
+    readRegistry(fixture.repoRoot, fixture.env).registry.lanes['claude-model-selector']
+      .ownership.spawnIntent.modelSelector,
+    'claude-opus-5',
+  );
+
+  const { registry } = projectPaths(fixture.repoRoot, fixture.env);
+  const raw = JSON.parse(fs.readFileSync(registry, 'utf8'));
+  raw.lanes['claude-model-selector'].ownership.spawnIntent.modelSelector = '--unsafe';
+  fs.writeFileSync(registry, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /spawn intent model is invalid/);
+
+  // Existing Claude fixtures in this suite omit modelSelector and continue to
+  // validate as serialized version-1 spawn intents.
+});
+
+test('Claude spawn observation atomically binds all stable handles, receipts, and first epoch', (t) => {
+  const fixture = createStateFixture(t);
+  const laneId = '13571357-1357-4357-8357-135713571357';
+  const operationId = '24682468-2468-4468-8468-246824682468';
+  const displayName = '[test] atomic Claude observation';
+  reserveSpawn(fixture.repoRoot, {
+    operation: {
+      operationId,
+      type: 'spawn',
+      laneId,
+      state: 'dispatching',
+      details: { target: 'claude' },
+    },
+    lane: {
+      laneId,
+      backend: 'claude-code',
+      displayName,
+      operationId,
+      providerIdentity: {
+        version: 1,
+        sessionId: null,
+        jobId: null,
+        bridgeId: null,
+        executionEpochs: [],
+      },
+      spawnIntent: claudeSpawnIntent(operationId, displayName, 'e'),
+    },
+  }, fixture.env);
+  const observation = {
+    sessionId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    jobId: 'eeeeeeee',
+    bridgeId: 'session_atomicBridge',
+    creationReceipt: { source: 'agents-census', transcriptMarkerSha256: 'd'.repeat(64) },
+    bridgeReceipt: { source: 'owned-session-metadata' },
+    epoch: {
+      epochId: '35793579-3579-4579-8579-357935793579',
+      pid: 456,
+      processBirth: 'Tue Sep  1 16:00:00 2026',
+      socket: {
+        path: '/tmp/transmogrify-owned/atomic.sock',
+        device: 3,
+        inode: 4,
+        uid: 501,
+        mode: 0o600,
+      },
+      observedAt: '2026-09-01T20:00:00.000Z',
+    },
+  };
+  const bound = bindClaudeSpawnObservation(
+    fixture.repoRoot, laneId, observation, fixture.env,
+  );
+  assert.equal(bound.state, 'created');
+  assert.equal(bound.providerId, observation.sessionId);
+  assert.equal(bound.providerIdentity.bridgeId, observation.bridgeId);
+  assert.equal(bound.providerIdentity.executionEpochs.length, 1);
+  assert.equal(bound.providerIdentity.executionEpochs[0].ordinal, 1);
+  const operation = pendingOperationForLane(fixture.repoRoot, laneId, fixture.env);
+  assert.equal(operation.providerId, observation.sessionId);
+  assert.equal(operation.state, 'providerObserved');
+
+  updateLane(fixture.repoRoot, laneId, { state: 'active' }, fixture.env);
+  assert.equal(bindClaudeSpawnObservation(
+    fixture.repoRoot, laneId, observation, fixture.env,
+  ).state, 'active');
+  assert.throws(() => bindClaudeSpawnObservation(fixture.repoRoot, laneId, {
+    ...observation,
+    bridgeReceipt: { source: 'replacement' },
+  }, fixture.env), /immutable Claude spawn observation receipts/);
+});
+
+test('Claude provider handle collisions and corrupt identities fail closed', (t) => {
+  const fixture = createStateFixture(t);
+  const identity = {
+    version: 1,
+    sessionId: null,
+    jobId: null,
+    bridgeId: null,
+    executionEpochs: [],
+  };
+  for (const laneId of ['claude-a', 'claude-b']) {
+    const operation = beginOperation(fixture.repoRoot, {
+      type: 'spawn',
+      laneId,
+    }, fixture.env);
+    reserveLane(fixture.repoRoot, {
+      laneId,
+      backend: 'claude-code',
+      displayName: `[test] ${laneId}`,
+      operationId: operation.operationId,
+      providerIdentity: identity,
+      spawnIntent: claudeSpawnIntent(operation.operationId, `[test] ${laneId}`, laneId === 'claude-a' ? 'a' : 'b'),
+    }, fixture.env);
+  }
+  bindClaudeProviderIdentity(fixture.repoRoot, 'claude-a', {
+    sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    jobId: 'aaaaaaaa',
+    creationReceipt: { source: 'test-a' },
+  }, fixture.env);
+  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, 'claude-b', {
+    sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    jobId: 'aaaaaaaa',
+    creationReceipt: { source: 'test-b' },
+  }, fixture.env), /already owned/);
+
+  const { registry } = projectPaths(fixture.repoRoot, fixture.env);
+  const corrupt = JSON.parse(fs.readFileSync(registry, 'utf8'));
+  corrupt.lanes['claude-a'].providerIdentity.jobId = 'bbbbbbbb';
+  fs.writeFileSync(registry, `${JSON.stringify(corrupt)}\n`);
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /job id does not match/);
+});
+
+test('Claude identity reservation requires exact backend, intent, receipts, and lifecycle', (t) => {
+  const fixture = createStateFixture(t);
+  const identity = {
+    version: 1,
+    sessionId: null,
+    jobId: null,
+    bridgeId: null,
+    executionEpochs: [],
+  };
+  const operation = beginOperation(fixture.repoRoot, {
+    type: 'spawn',
+    laneId: 'claude-invalid',
+  }, fixture.env);
+  assert.throws(() => reserveLane(fixture.repoRoot, {
+    laneId: 'claude-invalid',
+    backend: 'codex-app-server',
+    displayName: '[test] invalid backend',
+    operationId: operation.operationId,
+    providerIdentity: identity,
+    spawnIntent: claudeSpawnIntent(operation.operationId, '[test] invalid backend', 'c'),
+  }, fixture.env), /uses Claude provider identity with backend/);
+
+  const lane = reserveLane(fixture.repoRoot, {
+    laneId: 'claude-valid',
+    backend: 'claude-code',
+    displayName: '[test] valid lifecycle',
+    operationId: operation.operationId,
+    providerIdentity: identity,
+    spawnIntent: claudeSpawnIntent(operation.operationId, '[test] valid lifecycle', 'd'),
+  }, fixture.env);
+  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, lane.laneId, {
+    sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    jobId: 'dddddddd',
+  }, fixture.env), /creation receipt is required/);
+  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, lane.laneId, {
+    sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    jobId: 'dddddddd',
+    creationReceipt: { accessToken: 'must-not-persist' },
+  }, fixture.env), /secret-bearing field accessToken/);
+  updateLane(fixture.repoRoot, lane.laneId, { state: 'failed' }, fixture.env);
+  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, lane.laneId, {
+    sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    jobId: 'dddddddd',
+    creationReceipt: { source: 'too-late' },
+  }, fixture.env), /from lane state failed/);
+});
+
+test('registry rejects duplicate canonical providers, mismatched lane keys, and mixed-case Claude ids', (t) => {
+  const fixture = createStateFixture(t);
+  const first = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'provider-one',
+    displayName: '[test] one',
+  }, fixture.env);
+  const second = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'provider-two',
+    displayName: '[test] two',
+  }, fixture.env);
+  const { registry } = projectPaths(fixture.repoRoot, fixture.env);
+  let corrupt = JSON.parse(fs.readFileSync(registry, 'utf8'));
+  corrupt.lanes[second.laneId].providerId = first.providerId;
+  fs.writeFileSync(registry, `${JSON.stringify(corrupt)}\n`);
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /already owned/);
+
+  corrupt = JSON.parse(fs.readFileSync(registry, 'utf8'));
+  corrupt.lanes[second.laneId].providerId = 'provider-two';
+  corrupt.lanes[second.laneId].laneId = 'different-key';
+  fs.writeFileSync(registry, `${JSON.stringify(corrupt)}\n`);
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /invalid canonical identity/);
+});
+
+test('Claude stop and recover lifecycle transitions are explicit', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'transition-provider',
+    displayName: '[test] transitions',
+    state: 'active',
+  }, fixture.env);
+  updateLane(fixture.repoRoot, lane.laneId, { state: 'stopRequested' }, fixture.env);
+  updateLane(fixture.repoRoot, lane.laneId, { state: 'stopped' }, fixture.env);
+  updateLane(fixture.repoRoot, lane.laneId, { state: 'recoverRequested' }, fixture.env);
+  assert.equal(updateLane(
+    fixture.repoRoot, lane.laneId, { state: 'idle' }, fixture.env,
+  ).state, 'idle');
+});
+
+test('provider disappearance can stop a live lane only with an immutable observation receipt', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'claude-code-test-double',
+    providerId: 'observed-stop-provider',
+    displayName: '[test] observed stop',
+    state: 'active',
+  }, fixture.env);
+  const observation = {
+    observationId: '46804680-4680-4680-8680-468046804680',
+    observedAt: '2026-09-01T21:00:00.000Z',
+    receipt: { source: 'exact-owned-agent-census', present: false },
+  };
+  const stopped = observeLaneStopped(fixture.repoRoot, lane.laneId, observation, fixture.env);
+  assert.equal(stopped.state, 'stopped');
+  assert.equal(stopped.observedStops[0].fromState, 'active');
+  assert.equal(stopped.lastVerifiedAt, observation.observedAt);
+  assert.equal(observeLaneStopped(
+    fixture.repoRoot, lane.laneId, observation, fixture.env,
+  ).observedStops.length, 1);
+  assert.throws(() => observeLaneStopped(fixture.repoRoot, lane.laneId, {
+    ...observation,
+    receipt: { source: 'changed' },
+  }, fixture.env), /immutable observed-stop record/);
+  assert.throws(() => updateLane(fixture.repoRoot, lane.laneId, {
+    observedStops: [],
+  }, fixture.env), /immutable lane field observedStops/);
+
+  updateLane(fixture.repoRoot, lane.laneId, { state: 'recoverRequested' }, fixture.env);
+  assert.equal(updateLane(
+    fixture.repoRoot, lane.laneId, { state: 'stopRequested' }, fixture.env,
+  ).state, 'stopRequested');
+});
+
+test('Codex-only records omit Claude provider identity', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'codex-thread',
+    displayName: '[test] Codex-only lane',
+  }, fixture.env);
+  assert.equal(Object.hasOwn(lane, 'providerIdentity'), false);
+  assert.equal(Object.hasOwn(readRegistry(fixture.repoRoot, fixture.env).registry.lanes[lane.laneId], 'providerIdentity'), false);
+});
+
+test('corrupt registry state fails closed', (t) => {
+  const fixture = createStateFixture(t);
+  const { registry } = projectPaths(fixture.repoRoot, fixture.env);
+  fs.writeFileSync(registry, '{truncated');
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /refusing corrupt JSON state/);
+});
+
+test('ownership lock serializes concurrent writers', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-lock-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, 'lock');
+  const eventsFile = path.join(root, 'events');
+  const worker = path.join(__dirname, 'helpers', 'lock-worker.js');
+
+  const children = Array.from({ length: 20 }, (_, index) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [worker, lockDirectory, eventsFile, String(index)], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolve() : reject(new Error(stderr)));
+  }));
+  await Promise.all(children);
+
+  let inside = 0;
+  for (const event of fs.readFileSync(eventsFile, 'utf8').trim().split('\n')) {
+    if (event.startsWith('enter ')) inside += 1;
+    else inside -= 1;
+    assert.ok(inside === 0 || inside === 1, `lock overlap at ${event}`);
+  }
+  assert.equal(inside, 0);
+});
+
+test('ownership lock refuses symlinks and another owner cannot release it', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-lock-safety-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, 'lock');
+  const owner = acquireLock(lockDirectory);
+  assert.throws(() => {
+    releaseLock(lockDirectory, { ...owner, token: 'not-the-owner' });
+  }, /owned by another process/);
+  releaseLock(lockDirectory, owner);
+
+  const outside = path.join(root, 'outside');
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, lockDirectory);
+  assert.throws(() => acquireLock(lockDirectory), /unsafe ownership lock path/);
+});
+
+test('concurrent stale-lock reapers do not steal the replacement owner', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-stale-lock-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, 'lock');
+  const eventsFile = path.join(root, 'events');
+  fs.mkdirSync(lockDirectory);
+  fs.writeFileSync(path.join(lockDirectory, 'owner.json'), `${JSON.stringify({
+    token: 'dead-owner',
+    pid: 999999,
+    processBirth: 'not-running',
+    createdAt: '2020-01-01T00:00:00.000Z',
+  })}\n`, { mode: 0o600 });
+  const old = new Date('2020-01-01T00:00:00.000Z');
+  fs.utimesSync(path.join(lockDirectory, 'owner.json'), old, old);
+  fs.utimesSync(lockDirectory, old, old);
+
+  const worker = path.join(__dirname, 'helpers', 'lock-worker.js');
+  const children = Array.from({ length: 12 }, (_, index) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [worker, lockDirectory, eventsFile, String(index), '1000'], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolve() : reject(new Error(stderr)));
+  }));
+  await Promise.all(children);
+  const events = fs.readFileSync(eventsFile, 'utf8').trim().split('\n');
+  assert.equal(events.filter((entry) => entry.startsWith('enter ')).length, 12);
+  assert.equal(fs.existsSync(lockDirectory), false);
+  assert.equal(fs.existsSync(`${lockDirectory}.reaper`), false);
+});
+
+test('a crashed stale-lock reaper is itself receipt-reclaimed', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-reaper-recovery-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, 'lock');
+  const reaperDirectory = `${lockDirectory}.reaper`;
+  const old = new Date('2020-01-01T00:00:00.000Z');
+  for (const [directory, token] of [
+    [lockDirectory, 'dead-lock-owner'],
+    [reaperDirectory, 'dead-reaper-owner'],
+  ]) {
+    fs.mkdirSync(directory);
+    const ownerFile = path.join(directory, 'owner.json');
+    fs.writeFileSync(ownerFile, `${JSON.stringify({
+      token,
+      pid: 999999,
+      processBirth: 'not-running',
+      hostname: 'test',
+      createdAt: old.toISOString(),
+    })}\n`, { mode: 0o600 });
+    fs.utimesSync(ownerFile, old, old);
+    fs.utimesSync(directory, old, old);
+  }
+
+  const owner = acquireLock(lockDirectory, {
+    waitMs: 1000,
+    pollMs: 5,
+    ownerlessGraceMs: 1,
+  });
+  assert.equal(fs.existsSync(reaperDirectory), false);
+  releaseLock(lockDirectory, owner);
+  assert.equal(fs.existsSync(lockDirectory), false);
+});
+
+test('a live stale-lock reaper is not stolen and contenders still time out', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-live-reaper-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, 'lock');
+  const reaperDirectory = `${lockDirectory}.reaper`;
+  fs.mkdirSync(lockDirectory);
+  fs.writeFileSync(path.join(lockDirectory, 'owner.json'), `${JSON.stringify({
+    token: 'dead-owner',
+    pid: 999999,
+    processBirth: 'not-running',
+    createdAt: '2020-01-01T00:00:00.000Z',
+  })}\n`, { mode: 0o600 });
+  const old = new Date('2020-01-01T00:00:00.000Z');
+  fs.utimesSync(path.join(lockDirectory, 'owner.json'), old, old);
+  fs.utimesSync(lockDirectory, old, old);
+
+  const reaperOwner = acquireLock(reaperDirectory);
+  assert.throws(() => acquireLock(lockDirectory, {
+    waitMs: 30,
+    pollMs: 5,
+    ownerlessGraceMs: 1,
+  }), /timed out waiting/);
+  releaseLock(reaperDirectory, reaperOwner);
+});

@@ -1,0 +1,116 @@
+name: Site deploy
+
+# Prepared but inert until the repository variable below is set to `true`.
+# The repository contains no Cloudflare account identifier or deployment token.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/site-deploy.yml'
+      - 'README.md'
+      - 'SKILL.md'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-deploy-production
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: site
+
+jobs:
+  gate:
+    name: deployment gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - id: decide
+        env:
+          ENABLED: ${{ vars.CLOUDFLARE_DEPLOY_ENABLED }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          if [ "$ENABLED" = "true" ] && [ "$IS_MAIN" = "true" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+        working-directory: .
+
+  deploy:
+    name: verified production deploy
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      PUBLIC_GA_MEASUREMENT_ID: ${{ vars.PUBLIC_GA_MEASUREMENT_ID }}
+      TRANSMOGRIFY_RELEASE_COMMIT: ${{ github.sha }}
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install from lockfile
+        run: npm ci
+
+      - name: Require an exact published release commit
+        run: |
+          if [[ ! "$TRANSMOGRIFY_RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "TRANSMOGRIFY_RELEASE_COMMIT must be one exact 40-character lowercase Git object ID"
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$TRANSMOGRIFY_RELEASE_COMMIT" ]; then
+            echo "TRANSMOGRIFY_RELEASE_COMMIT must equal the exact checked-out GitHub Actions commit"
+            exit 1
+          fi
+          git cat-file -e "$TRANSMOGRIFY_RELEASE_COMMIT^{commit}"
+
+      - name: Check, test, build, and audit
+        run: |
+          npm run check
+          npm test
+          npm run build
+          npm run verify:base
+          if [ -n "$PUBLIC_GA_MEASUREMENT_ID" ]; then
+            npm run verify:analytics
+          else
+            npm run verify:no-analytics
+          fi
+
+      - name: Publish production to Workers Static Assets
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          workingDirectory: site
+          wranglerVersion: '4.128.0'
+          command: deploy
+
+  skipped:
+    name: deploy skipped
+    needs: gate
+    if: needs.gate.outputs.deploy != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "Cloudflare production deploy is disabled or this is not main." >> "$GITHUB_STEP_SUMMARY"
+        working-directory: .

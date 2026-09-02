@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible Transmogrify defect without private provider data.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Remove credentials, private paths, session IDs, transcripts, and unrelated
+        provider rows. Use private vulnerability reporting for sensitive findings.
+  - type: input
+    id: version
+    attributes:
+      label: Transmogrify version or commit
+      placeholder: 0.1.0 or full commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target provider
+      options:
+        - Codex
+        - Claude Code
+        - Both
+        - Installer or documentation only
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Sanitized environment
+      description: OS/architecture, Node, Codex CLI/app-server, Claude CLI/Desktop, and install target as relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include exact commands and safe exit codes, but no identifiers or private output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed credentials, private paths, provider identifiers, transcripts, and unrelated session data.
+          required: true
+        - label: If I ran a live probe, it used an exact-owned disposable lane and did not touch foreign sessions.
+          required: true
