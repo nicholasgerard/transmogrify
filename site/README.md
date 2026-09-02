@@ -113,7 +113,7 @@ The analytics variable is optional and is not committed.
 | Variable | Effect |
 | --- | --- |
 | `PUBLIC_GA_MEASUREMENT_ID` | A `G-XXXXXXX` measurement ID. **Absent by default.** With it absent, no analytics code, consent UI, or request-capable Google resource exists in the output. |
-| `TRANSMOGRIFY_RELEASE_COMMIT` | Exact lowercase 40-character published release commit used to generate `/start`. **Absent by default**, which disables remote installation safely. |
+| `TRANSMOGRIFY_RELEASE_COMMIT` | Exact lowercase published release commit (40 hex characters; the generator also accepts a 64-character SHA-256 object ID, which CI does not use) used to generate `/start`. **Absent by default**, which disables remote installation safely. |
 
 Canonical metadata always points to `https://transmogrify.sh`. Cloudflare's
 version-preview responses carry `X-Robots-Tag: noindex`, so previews remain
@@ -193,8 +193,9 @@ path that is not content-fingerprinted. Only `/_astro/*` is immutable; HTML stay
 revalidatable.
 
 `public/_redirects` provides short links to the canonical repository documents
-(`/skill`, `/protocol`, `/security`, `/roadmap`, `/license`, `/issues`,
-`/github`) and is validated against Cloudflare's documented syntax and limits.
+(`/github`, `/source`, `/skill`, `/protocol`, `/security`, `/roadmap`,
+`/license`, `/issues`) plus the in-site conveniences `/docs`, `/install`, and
+`/home`, and is validated against Cloudflare's documented syntax and limits.
 
 ## Verification
 

@@ -3,8 +3,9 @@
 Transmogrify is an agent skill and a set of zero-framework Node tools for
 operating worktree-seated Codex and Claude Code lanes. It gives either Codex or
 Claude a provider-neutral lifecycle—spawn, steer, status, stop, recover,
-durable output harvest, retire, and reconcile—while preserving native app
-visibility when the provider's current host-integration receipt passes.
+durable output harvest, retire, and reconcile—and records each lane's
+native-visibility state honestly: Claude lanes carry a Remote Control receipt,
+and Codex lanes are protocol-only in 0.2.x.
 
 The transport is deliberately provider-specific:
 
@@ -23,11 +24,10 @@ target repository; existing operation details cannot be rewritten as phases
 advance. It never adopts a lane by name and never reconciles or removes an
 unowned session or worktree.
 
-Codex documents app-server WebSocket transport as experimental and unsupported
-for production; Transmogrify pins the exact method and shape contract it has
-verified for this release. Claude's archival endpoint remains
-a private, version-pinned surface. Read [Security](SECURITY.md) before using
-Transmogrify on sensitive work.
+Transmogrify pins the exact Codex app-server method and shape contract it has
+verified for this release, and Claude's archival endpoint remains a private,
+version-pinned surface. Read [Security](SECURITY.md) before using Transmogrify
+on sensitive work.
 
 ## Why “Transmogrify”?
 
@@ -57,10 +57,12 @@ lane still goes through `lane.js` so its provenance, execution profile,
 lineage, events, retirement, and cleanup remain portable across hosts.
 
 On the recorded compatibility tuple, both orchestrators created Codex lanes
-that rendered in the Codex/ChatGPT desktop and mobile apps. A later Desktop
+that rendered in Codex Desktop and the ChatGPT mobile app. A later Desktop
 restart demonstrated that a surviving standalone runtime can remain
-protocol-compatible without remaining the app's live control plane. The dated
-visibility and post-restart boundary are recorded in the
+protocol-compatible without remaining the app's live control plane. In 0.2.x
+every new Codex lane is therefore recorded protocol-only: `spawn` requires
+`--allow-protocol-only`, and no runtime check can prove live Desktop or mobile
+attachment. The dated visibility and post-restart boundary are recorded in the
 [protocol contract](docs/PROTOCOL.md#codex-lane-lifecycle). The Claude adapter
 creates named local Claude Code Remote Control sessions. Desktop and mobile
 visibility, mobile-originated input, and native archive behavior are
@@ -74,9 +76,9 @@ live-verified on the dated client and host tuple. See
   `npm --version`, `git --version`, and `lsof -v`.
 - Codex CLI/app-server `0.151.x` for Codex targets, live-verified with `0.151.0`
   on 2026-09-01. Native surfaces were verified on 2026-09-02 with Codex Desktop
-  `26.825.51511` (`7377`) and ChatGPT for iOS `1.2026.230`
-  (`32543289983`). Install and sign in using the
-  [official Codex CLI guide](https://developers.openai.com/codex/cli).
+  `26.825.51511` (`7377`), the Codex surface of the ChatGPT desktop app, and
+  ChatGPT for iOS `1.2026.230` (`32543289983`). Install and sign in using the
+  [official Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
 - Standalone Codex tools are CI-tested on macOS and Linux; Windows is not a
   supported host in this release.
 - For Claude targets: Apple Silicon macOS and the pinned Claude Code CLI
@@ -117,7 +119,7 @@ npm ci --ignore-scripts
 By default the installer copies the complete skill and tools to both
 `~/.claude/skills/transmogrify` and
 `~/.agents/skills/transmogrify`, Codex's documented personal skill location
-([official OpenAI documentation](https://developers.openai.com/codex/skills)). Existing installations are
+([official OpenAI documentation](https://learn.chatgpt.com/docs/build-skills)). Existing installations are
 moved to timestamped backups outside scanned skill directories. An occupied
 target without Transmogrify's install sentinel is refused. Use `--target codex` or
 `--target claude` for a single host and `./install.sh --help` for all installer
@@ -178,8 +180,8 @@ The registry is private local control state. Transmogrify creates its
 directories with mode `0700` and JSON records with mode `0600`; existing state
 paths must retain those owner-only permissions.
 
-Use `--target all` for the turnkey bidirectional preflight on the pinned macOS
-Claude host, or `--target claude` when only the Claude surface is needed. A
+Use `--target all` to preflight both providers on the pinned macOS Claude
+host, or `--target claude` when only the Claude surface is needed. A
 Codex-only Linux host should keep `--target codex`.
 
 If a verified Codex runtime is already listening, reuse it. If none exists,
@@ -195,7 +197,10 @@ does not complete the Codex initialize handshake, and captures and verifies
 exact process identity while launching or cleaning up its own child. A
 concurrent compatible listener is reused without killing it. Never use the
 launcher to replace or reconfigure a
-shared runtime owned by another program.
+shared runtime owned by another program. A newly launched child also runs with
+`-c mcp_servers.codex_app={command="",enabled=false}`, which disables the
+Desktop-only `codex_app` MCP bridge on the runtime this installation owns; a
+reused listener is never reconfigured.
 
 The standalone launcher inherits only a bounded non-secret environment,
 including `HOME` and `CODEX_HOME`; it deliberately excludes ambient API keys,
@@ -410,7 +415,8 @@ for substantial steer and Codex recovery input.
 seat and stop, or review and remove that exact managed seat manually; only then
 rerun its exact `retire` command with `--accept-manual-seat-removal`. The retry
 proves the path is absent, Git no longer lists it, and the preserved branch is
-still at the harvested HEAD before local Claude-record removal can continue.
+still at the harvested HEAD before the retirement journal closes; for Claude,
+local record removal then continues.
 
 ## Documentation
 

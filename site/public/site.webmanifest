@@ -1,7 +1,7 @@
 {
   "name": "Transmogrify",
   "short_name": "Transmogrify",
-  "description": "Operate exact-owned, worktree-seated Codex and Claude Code lanes with native app visibility.",
+  "description": "Operate exact-owned, worktree-seated Codex and Claude Code lanes with receipt-gated native app visibility.",
   "start_url": "/",
   "scope": "/",
   "display": "browser",

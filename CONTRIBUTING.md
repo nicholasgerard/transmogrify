@@ -68,7 +68,7 @@ Run:
 ```bash
 npm test
 find scripts -name '*.js' -print0 | xargs -0 -n1 node --check
-find . -name '*.sh' -not -path './node_modules/*' -print0 | xargs -0 -n1 bash -n
+bash -n scripts/*.sh install.sh
 git diff --check
 npm pack --dry-run
 
@@ -110,3 +110,8 @@ Transmogrify follows semantic versioning. Breaking changes to the installed skil
 host-parameter table, durable state, provider identity, or CLI contract require
 a versioned migration. Releases are cut only after the acceptance gate in
 [ROADMAP.md](ROADMAP.md) is green.
+
+Before publishing a release, a maintainer also confirms that the public GitHub
+repository retains its description, homepage, topics, Discussions, private
+vulnerability reporting, secret scanning, and push-protection configuration,
+and that the deployed `/start` document pins the exact published commit.

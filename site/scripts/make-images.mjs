@@ -87,7 +87,7 @@ function ogHtml(pins) {
 <div class="row">${glyph(34)}<span class="mark">transmogrify</span></div>
 <div>
   <h1>One lifecycle for <em>exact-owned</em> agent lanes.</h1>
-  <p class="sub">Codex and Claude Code lanes, seated in their own worktrees, visible in each provider&rsquo;s native apps, never adopted by name.</p>
+  <p class="sub">Codex and Claude Code lanes, seated in their own worktrees, visible in the native apps where receipted, never adopted by name.</p>
 </div>
 <div class="row" style="justify-content:space-between;align-items:flex-end">
   <div class="pins">${pins.map((p) => `<span class="pin">${p[0]} <b>${p[1]}</b></span>`).join('')}</div>

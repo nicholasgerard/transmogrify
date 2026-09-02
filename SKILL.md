@@ -233,8 +233,9 @@ Follow [docs/EXECUTION-PROFILES.md](docs/EXECUTION-PROFILES.md); do
 not invent a selector, infer account availability, or silently fall back.
 
 Spawn automatically canonicalizes the task title to `::: <summary>` and puts a
-safe ASCII provenance block before the first user message. Do not add
-`[Claude]`, `[claude]`, `[codex]`, `[maint]`, or another ownership prefix.
+safe ASCII provenance block before the first user message. Do not add a
+bracketed pseudo-owner prefix such as `[codex]`; spawn strips those before
+the marker.
 
 Treat the returned `laneId` as the only public lifecycle handle. Persist it in
 the host's durable execution record together with the returned `dispatchId`.
@@ -367,6 +368,13 @@ with `--input` or `--input-file`, it resumes the same thread and starts one new
 turn at the explicit boundary. Claude recovery runs
 `--resume <full-session-uuid> --bg`, rejects correlated copies, and records a
 new worker/socket execution epoch before restoring control.
+
+A Codex lane whose thread exists but whose first turn has no receipt keeps its
+spawn journal open. Reconciliation never replays that input; the parent
+receives one `child.needs-attention` event per journal state. When the owner
+decides to abandon the lane, run its exact `retire` command: it re-inspects
+the thread, refuses while a turn is active, closes the spawn journal as failed
+when no receipt exists, and archives the empty thread.
 
 ## 8. Harvest, retirement, and cleanup
 

@@ -16,7 +16,7 @@ import { renderStart } from '../scripts/build-start.mjs';
 const siteRoot = resolve(import.meta.dirname, '..');
 
 describe('the start prompt', () => {
-  const remotePrompt = renderStart({ releaseCommit: '1'.repeat(40), version: '0.1.0' });
+  const remotePrompt = renderStart({ releaseCommit: '1'.repeat(40), version: '0.2.0' });
 
   test('the copyable bootstrap is exactly one short line', () => {
     assert.equal(START_PROMPT.split('\n').length, 1);

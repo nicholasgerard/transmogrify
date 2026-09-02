@@ -2,6 +2,19 @@
 
 ## 0.2.0
 
+- Require `--allow-protocol-only` for every Codex spawn and record those lanes
+  protocol-only until a machine-verifiable native-visibility receipt exists.
+- Add `retire --accept-manual-seat-removal` for both providers so an
+  owner-removed blocked seat can close its retirement journal exactly once.
+- Let exact retirement close a Codex spawn journal whose first turn never
+  receipted, after proving no turn is active and without replaying input.
+- Observe every outstanding child on each parent wait, raise one attention
+  event for an unresolved spawn or an unavailable child repository, and report
+  a verified spawn honestly when its parent event cannot be recorded.
+- Keep provider catalog identifiers intact in `capabilities`, `children`, and
+  `wait` output while still redacting provider control handles.
+- Reclaim ownership locks whose holder no longer exists, code lock timeouts as
+  safe refusals, and ignore Finder metadata in private state directories.
 - Add provider-neutral execution intents with explicit model, effort, and
   Standard/Fast controls, immutable requested/resolved/observed receipts, and
   recovery-safe provider compilation.

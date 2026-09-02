@@ -174,11 +174,17 @@ node "$SKILL_ROOT/scripts/lane.js" ack \
   --event "$EVENT_ID"
 ```
 
-Unacknowledged events are redelivered even when a caller supplies an `--after`
-cursor beyond their sequence. The cursor is only an optimization for already
-acknowledged history; it cannot suppress unfinished parent work. At most 100
+Unacknowledged events are redelivered regardless of any `--after` cursor. The
+CLI never returns acknowledged events, so the cursor can neither hide nor
+replay anything; it is accepted for forward compatibility only. At most 100
 events are returned per call. State scans are bounded and fail closed instead
 of becoming unbounded as an installation ages.
+
+While any event is unacknowledged, `wait` returns it immediately and observes
+no child in that call. Acknowledge every returned event after handling it;
+observation of the other children resumes on the next wait. Within one
+observation round every outstanding child is observed before the durable
+queue is read, so a busy child cannot starve a later child's terminal event.
 
 `--timeout-ms 0` is an immediate durable-queue snapshot. It does not contact a
 provider. A positive timeout observes exact children and uses each lane's
@@ -222,7 +228,13 @@ provider ID, a positive wait consults the exact pending spawn journal and runs
 provider-specific non-replaying reconciliation. A merely old reservation is
 not declared failed: it becomes an attention event only after the current
 implementation's bounded reservation grace period, and no provider mutation is
-replayed from age alone.
+replayed from age alone. If the spawn journal stays open after that
+reconciliation because the first turn has no receipt, the parent receives one
+`child.needs-attention` event per journal state; the owner then chooses
+between an exact retirement, which closes the journal after proving no turn
+is active, and leaving the lane for review. A child whose repository can no
+longer be resolved is reported by `children` as `repository-unavailable` and
+raises one attention event instead of failing the whole parent.
 
 If a parent process is no longer running, no portable cross-provider API can
 inject a new message into that ended turn. Durability is the recovery guarantee:
@@ -252,12 +264,12 @@ for review.
 
 Transmogrify never scans provider rows and assigns them to parents by title,
 path, age, or similarity. Rows without the installation's exact lineage remain
-foreign or legacy. This applies even to old rows named `[Claude]`, `[maint]`, or
-with the current `::: ` visual marker.
+foreign or legacy. This applies even to rows that carry the current `::: `
+visual marker or a bracketed pseudo-owner prefix.
 
-The title normalizer removes legacy `[Claude]`, `[claude]`, `[codex]`, and
-`[maint]` prefixes only from a newly requested Transmogrify title before spawn.
-It does not rename or adopt an existing task.
+The title normalizer strips bracketed pseudo-owner prefixes such as `[codex]`
+or `[maint]` only from a newly requested Transmogrify title before spawn. It
+does not rename or adopt an existing task.
 
 ## Future host and provider adapters
 

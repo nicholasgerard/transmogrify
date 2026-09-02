@@ -15,9 +15,10 @@ SCHEMA_DIR="$(mktemp -d)"
 codex app-server generate-json-schema --out "$SCHEMA_DIR"
 ```
 
-The receipts below were refreshed against Codex app-server `0.151.0` on
-2026-09-02. The supported runtime line is `0.151.x`; generated filenames are
-relative to that output directory.
+The protocol handshake and lifecycle receipts below were live-verified against
+Codex app-server `0.151.0` on 2026-09-01; the native-surface and
+runtime-topology receipts were added on 2026-09-02. The supported runtime line
+is `0.151.x`; generated filenames are relative to that output directory.
 
 ## Transport and handshake
 
@@ -157,8 +158,8 @@ persisted receipt is part of the normal spawn and boundary-resume contract
 rather than only a transport-loss recovery path.
 
 **Live-verified 2026-09-02:** Codex lanes created from both Codex and Claude
-hosts rendered in Codex Desktop `26.825.51511` (`7377`) and ChatGPT for iOS
-`1.2026.230` (`32543289983`). These are exact client-build receipts, not a claim
+hosts rendered in Codex Desktop `26.825.51511` (`7377`), the Codex surface of
+the ChatGPT desktop app, and in ChatGPT for iOS `1.2026.230` (`32543289983`). These are exact client-build receipts, not a claim
 about unmeasured or future client builds.
 
 **Official product boundary, checked 2026-09-02:** OpenAI's
@@ -187,9 +188,10 @@ exactly once, and returned a visible reply. The open compatibility seam is
 therefore pre-restart lane reattachment, not post-restart creation or general
 mobile execution.
 
-**Live-verified runtime topology, 2026-09-02:** ChatGPT Desktop
-`26.831.21537` (`7579`) launched bundled Codex `0.152.1` as its own private
-stdio child while a standalone `0.151.0` app-server continued listening on
+**Live-verified runtime topology, 2026-09-02:** after a same-day Desktop
+update, Codex Desktop `26.831.21537` (`7579`) launched bundled Codex `0.152.1`
+as its own private stdio child while a standalone `0.151.0` app-server
+continued listening on
 `ws://127.0.0.1:8843`. Desktop held no connection to that WebSocket runtime.
 The `Codex Desktop/0.151.0` initialize user-agent returned by the standalone
 listener therefore did not prove Desktop process attachment. Bundled
@@ -200,7 +202,7 @@ attachment path to Desktop's private child. These read-only receipts establish
 the current boundary; they do not authorize using either private socket as a
 control plane.
 
-**Official SSH-host boundary, checked 2026-09-02:** ChatGPT Desktop's local
+**Official SSH-host boundary, checked 2026-09-02:** Codex Desktop's local
 bundled private stdio child has no documented external attachment path.
 Separately, OpenAI documents Desktop-managed SSH projects in which Desktop
 starts and manages a Codex app-server on the remote host.
@@ -214,17 +216,25 @@ uses that daemon/proxy path or that a second exact client may safely share it.
 Both remain unverified until a disposable live acceptance run proves process
 ownership, multi-client notification delivery, and the full native lifecycle.
 
-**Implementation contract:** the standalone Codex CLI fixes new turns to
-`sandbox:"workspace-write"` and `approvalPolicy:"never"`. The public CLI does
-not expose overrides in this release; an action that requires unavailable
+**Implementation contract:** Transmogrify's Codex adapter starts every thread
+with `sandbox:"workspace-write"` and `approvalPolicy:"never"`; `lane.js`
+exposes no override in this release. An action that requires unavailable
 approval must fail or return to the host rather than silently broadening lane
 authority.
 
 **Known protocol boundary:** generated `ThreadStartParams` exposes no client
 idempotency token. A process can fail after the server creates a thread but
 before the returned thread ID becomes durable. The adapter records this as
-unknown and refuses blind replay. A server-supported idempotency key would close
-this window.
+unknown, raises one parent attention event for the lane, and refuses blind
+replay. A server-supported idempotency key would close this window.
+
+**Implementation contract:** when the thread ID is durable but the first
+`turn/start` has no receipt, the spawn journal stays open and reconciliation
+never replays the input. Only an exact retirement closes it: the adapter
+re-inspects the thread, refuses while the newest turn is `inProgress`, pages
+`thread/items/list` for the exact client-message receipt one more time, and
+then either completes the journal with the recovered turn or marks it failed
+as superseded by retirement before archiving the thread.
 
 ## Steering and turn selection
 
@@ -377,8 +387,10 @@ non-delivery or pre-dispatch refusal may report `Not delivered` or
 example, Claude stop verified with archive not attempted—without claiming the
 whole retirement succeeded.
 
-The CLI exits 0 for confirmed results, 2 for safe refusals and precondition
-failures, and 3 for transport/protocol/provider uncertainty. Server JSON-RPC
+`lane.js` and `doctor.js` exit 0 for confirmed results, 2 for safe refusals and
+precondition failures, and 3 for transport/protocol/provider uncertainty; the
+compatibility tools `steer.js` and `rpc.js` document their own narrower exit
+codes in `--help`. Server JSON-RPC
 errors preserve numeric `code` and string `message` internally as defined by
 `JSONRPCErrorError.json`; routine public CLI output uses fixed redacted
 messages.

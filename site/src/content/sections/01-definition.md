@@ -21,13 +21,13 @@ ledger:
       Codex lanes speak JSON-RPC to a shared `codex app-server` WebSocket.
       Claude lanes use public background Remote Control sessions and `--cloud`
       follow-ups. Transport symmetry is not the goal; lifecycle parity is.
-  - term: Native app visibility
+  - term: Native app visibility, with a receipt
     tone: affirm
     detail: >-
-      Managed lanes use the provider's native Code surfaces only when the
-      current host-integration receipt passes. Dated observations, client-build
-      limits, and release gates come from the repository support matrix and
-      protocol receipts rendered below.
+      Claude lanes present through Remote Control with a recorded deep-link
+      receipt. Codex lanes are recorded protocol-only in 0.2.x; their dated
+      Desktop and mobile observations live in the protocol receipts, not in a
+      runtime check. The support matrix below is rendered from the repository.
   - term: GUI automation
     tone: deny
     detail: >-
@@ -53,8 +53,10 @@ ledger:
   - term: A server, an account, or a hosted service
     tone: deny
     detail: >-
-      Transmogrify is an installed skill plus standalone Node tools. Install,
-      operation, and recovery never depend on DNS or on this website.
+      Transmogrify is an installed skill plus standalone Node tools. Operation
+      and recovery never depend on DNS or on this website, and neither does
+      installation from a Git checkout; the `/start` prompt is a convenience,
+      not a dependency.
 ---
 
 The host repository stays the authority for **what** a lane may do — scope,

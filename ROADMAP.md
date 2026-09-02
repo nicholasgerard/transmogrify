@@ -35,11 +35,12 @@ attachment is not implied by a successful app-server handshake. A Desktop
 update or restart can leave an independently managed `0.151.x` runtime alive
 while the app starts a distinct bundled runtime. Tasks on the surviving runtime
 can remain controllable there yet appear in Desktop as controlled from another
-app, without live activity. Until the official Desktop-owned SSH path and the
-CLI-exposed daemon/proxy surface prove a safe attachment path, pause new
-cross-host Codex dispatches
-after a Desktop lifecycle change and run a disposable exact-owned visibility
-check against the selected runtime before claiming native control.
+app, without live activity. Every new Codex lane in 0.2.x is therefore
+recorded protocol-only and requires `--allow-protocol-only` at spawn. Until
+the official Desktop-owned SSH path and the CLI-exposed daemon/proxy surface
+prove a safe attachment path, pause new cross-host Codex dispatches after a
+Desktop lifecycle change and run a disposable exact-owned visibility check
+against the selected runtime before claiming native control.
 
 Managed dispatch now has two provider-neutral contracts. Execution profiles
 resolve a task intent or explicit override to an immutable model, effort, and
@@ -82,9 +83,6 @@ provider claim:
 - Leave a dirty managed worktree and confirm cleanup blocks without data loss.
 - Seed foreign sessions with colliding names and short IDs and confirm no
   mutation reaches them.
-- Verify the public GitHub repository retains its description, homepage,
-  topics, Discussions, private vulnerability reporting, secret scanning, and
-  push protection configuration.
 
 No GUI automation is part of the control plane. Native deep links may present an
 already-owned session, but session identity and lifecycle control come from
@@ -112,6 +110,10 @@ provider or measured local interfaces.
   device/inode reuse, renamed binaries, and provider response expansion.
 - Exercise long-disconnect Remote Control recovery and documented session
   expiry behavior.
+- Measure what name and row a `--resume <session> --bg` copy carries when the
+  original session is not resumed in place; today fork detection correlates by
+  exact seat, dispatch window, and lane name, so an unnamed copy would run
+  untracked rather than be refused.
 - Add a compatibility refresh fixture for every documented Claude selector and
   Codex catalog lifecycle state, including account-restricted and retired
   outcomes, without weakening the pre-mutation refusal policy.
@@ -136,8 +138,13 @@ provider or measured local interfaces.
 - Replace direct eligible-seat deletion with a recoverable quarantine where the
   platform permits it. Preserve the current final census, and close the
   same-user write window between that census and irreversible removal.
-- Add retention policy for completed operation receipts and superseded installer
-  backups, with dry-run output and recoverable deletion.
+- Add retention policy for completed operation receipts, acknowledged parent
+  events, and superseded installer backups, with dry-run output and
+  recoverable deletion. Parent event stores are bounded today; a long-lived
+  parent that reaches the bound must start a new context.
+- Add an explicit owner-authorized abandon operation for a lane whose
+  `thread/start` outcome was lost before its thread ID became durable, so the
+  reserved seat and journal can close without inferring provider state.
 
 ## Priority 3: reduce private and version-specific surface
 

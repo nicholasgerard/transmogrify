@@ -2,7 +2,7 @@
   "name": "@nicholasgerard/transmogrify",
   "version": "0.2.0",
   "private": true,
-  "description": "Operate exact-owned Codex and Claude Code lanes with native app visibility, steering, recovery, retirement, and worktree cleanup.",
+  "description": "Operate exact-owned Codex and Claude Code lanes with receipt-gated native app visibility, provider-specific steering, recovery, retirement, and worktree cleanup.",
   "license": "MIT",
   "author": {
     "name": "Nick Gerard",
@@ -28,6 +28,8 @@
   "files": [
     "SKILL.md",
     "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
     "CHANGELOG.md",
     "ROADMAP.md",
     "docs/",

@@ -189,7 +189,8 @@ the persistent `"default"` value is an implementation policy; the generated
 schema types that field but does not define its semantics. The explicit policy
 prevents an ambient Fast host preference from turning a Standard lane into
 premium execution after its first turn. A contradictory tier in a provider
-response is a protocol error.
+response is refused as `EXECUTION_PROFILE_UNSUPPORTED`; after `thread/start`
+it surfaces as a partial-success stop rather than a new turn.
 
 OpenAI describes Fast as the same model at lower latency with increased credit
 use. Prefer Standard for autonomous, long-running, or cost-sensitive work; use

@@ -106,9 +106,9 @@ replace it with a branch, tag, or different revision.
    Use the external \`WORKTREES\` root established above instead of the
    inside-repository default.
 5. Choose target providers independently from the host installation. For
-   turnkey bidirectional operation on a compatible Apple Silicon macOS host,
-   inspect both. A deliberately single-provider host may select only the target
-   it can satisfy:
+   bidirectional operation on a compatible Apple Silicon macOS host, inspect
+   both providers. A deliberately single-provider host may select only the
+   target it can satisfy:
 
    \`\`\`bash
    export TRANSMOGRIFY_DOCTOR_TARGET=all  # or: codex | claude
@@ -128,9 +128,10 @@ replace it with a branch, tag, or different revision.
    Transmogrify installation does not exactly own. If no compatible Codex
    runtime is available, ask before starting one.
 7. Reconcile only exact-owned pending operations. Before the first managed
-   spawn, create or recover the current task's durable parent context with
-   \`TRANSMOGRIFY_HOST_PROVIDER\` and \`TRANSMOGRIFY_HOST_APP\` as specified in
-   \`SKILL.md\`; pass its absolute context file to every spawn and
+   spawn, create or recover the current task's durable parent context, passing
+   \`TRANSMOGRIFY_HOST_PROVIDER\` and \`TRANSMOGRIFY_HOST_APP\` as the
+   \`--host-provider\` and \`--host-app\` values that \`SKILL.md\` specifies;
+   pass its absolute context file to every spawn and
    remain in the documented bounded wait/acknowledgement loop until all of its
    children are handled. Report the doctor result and any release-gate
    limitation, then continue with the user's requested work through the

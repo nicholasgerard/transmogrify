@@ -16,9 +16,11 @@ gated:
     Claude integration contract.
   - >-
     A compatible Codex app-server handshake does not prove that the current
-    ChatGPT Desktop launch or paired mobile app is attached to that runtime.
-    After a Desktop restart or update, pause new cross-host dispatches until a
-    disposable exact-owned lane visibly streams in the current app.
+    Codex Desktop launch or paired mobile app is attached to that runtime. Every
+    new Codex lane in 0.2.x is recorded protocol-only and requires
+    `--allow-protocol-only` at spawn. After a Desktop restart or update, pause
+    new cross-host dispatches until a disposable exact-owned lane visibly
+    streams in the current app.
   - >-
     Claude lifecycle mutations run only on Apple Silicon macOS with the pinned
     Claude Code CLI, a first-party `claude.ai` account, and the default config
@@ -45,7 +47,7 @@ footnote: >-
 ---
 
 On the recorded compatibility tuple, both orchestrators created Codex lanes
-that rendered in the Codex and ChatGPT desktop and mobile apps. A current-launch
+that rendered in Codex Desktop and the ChatGPT mobile app. A current-launch
 visibility receipt remains required because the app can own a different runtime
 after restart. The Claude adapter creates named local Claude Code Remote Control
 sessions, which execute on your machine and connect outward through Anthropic

@@ -35,9 +35,11 @@ steps:
       The one-line bootstrap installs the complete skill and tools into the
       selected host's personal skill location. An explicit dual-host install can
       populate both. Existing Transmogrify installs move to timestamped backups
-      outside scanned skill directories. Keep the absolute root it reports.
+      outside scanned skill directories. Keep the absolute root it reports: a
+      Codex host installs under `~/.agents/skills`, a Claude Code host under
+      `~/.claude/skills`.
     code: |
-      export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
+      export SKILL_ROOT="$HOME/.agents/skills/transmogrify"   # Claude Code host: $HOME/.claude/skills/transmogrify
   - title: Run the read-only doctor
     body: >-
       Run this before every operator session. The doctor performs an

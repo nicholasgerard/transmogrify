@@ -44,7 +44,7 @@ Live verification on 2026-09-01 and 2026-09-02 used:
 | Platform | Darwin arm64 |
 | Current Claude Code CLI | `2.1.258` |
 | Current CLI SHA-256 | `b63136194160791c27cfa7b0403060d85eb0752991625fde8c09f9acacb17c78` |
-| Prior CLI SHA-256 | `64590d7d9d9c189d33fb3dfa58c5408eaf2a10fe556bd84155d95efaab46b60e` |
+| Prior CLI SHA-256 (source build of the 2026-09-01 runtime-transition receipt; not accepted by the pinned adapter) | `64590d7d9d9c189d33fb3dfa58c5408eaf2a10fe556bd84155d95efaab46b60e` |
 | Claude Desktop | `1.40609.1` |
 | Desktop bundle ID | `com.anthropic.claudefordesktop` |
 | Desktop `app.asar` SHA-256 | `0fcf5499f5eee77bb769362a3603a4278b5ba9a8ae2620395146afc60c13861f` |
@@ -81,7 +81,7 @@ drift remains a hard stop.
 The adapter launches the public CLI with exact argument positions equivalent to:
 
 ```text
-claude --bg --name <name> --remote-control <name> [--model <selector>] <prompt-with-unique-marker>
+claude --bg --name <name> --remote-control <name> [--model <selector>] [--effort <level|ultracode>] [--settings '{"fastMode":<bool>}'] <prompt-with-unique-marker>
 ```
 
 Both name arguments receive the same canonical `::: <summary>` value. The
@@ -204,7 +204,7 @@ is not the same operation as clicking Archive in Claude's native session list.
 As of 2026-09-01, review of the public
 [CLI reference](https://code.claude.com/docs/en/cli-usage),
 [Remote Control documentation](https://code.claude.com/docs/en/remote-control),
-and [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview) found no
+and [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) found no
 documented archive method for that native Remote Control row.
 
 The current adapter therefore uses one narrowly pinned private request:
@@ -214,6 +214,10 @@ POST /v1/code/sessions/<cse-id>/archive
 ```
 
 It verifies archive status with the corresponding GET before and after POST.
+The bridge ID is the one recorded from the exact worker's metadata at spawn;
+the adapter relies on `--remote-control <name>` creating a new bridge rather
+than attaching to an existing one, which matched every measured launch, and
+the status endpoint exposes no local-session field that could cross-check it.
 The bridge ID is canonicalized to the exact `cse_…` resource. Every status GET
 must contain one recognized status and agree on the requested resource ID. The
 POST response body is not trusted as proof; even an accepted already-archived

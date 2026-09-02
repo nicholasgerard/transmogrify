@@ -1,9 +1,10 @@
 # Troubleshooting
 
 Transmogrify fails closed when provider identity, runtime identity, ownership, or a
-destructive cleanup precondition cannot be proved. Exit code 2 means a safe
-refusal or incomplete exact-owned operation; exit code 3 means an uncertain or
-unexpected failure that requires observation before any retry.
+destructive cleanup precondition cannot be proved. For `lane.js` and
+`doctor.js`, exit code 2 means a safe refusal or incomplete exact-owned
+operation; exit code 3 means an uncertain or unexpected failure that requires
+observation before any retry.
 
 Set the installed skill root before running lifecycle commands. Use the Claude
 path for a Claude-only installation.
@@ -153,7 +154,10 @@ Reuse a listener only after the initialize handshake succeeds. Run
 `"$SKILL_ROOT/scripts/runtime-up.sh"` only when no compatible runtime exists and the machine
 owner authorizes this Transmogrify installation to own the new detached process.
 The launcher refuses non-loopback endpoints and never cleans up a process it
-did not launch and identify exactly.
+did not launch and identify exactly. A newly launched child runs with
+`-c mcp_servers.codex_app={command="",enabled=false}` so the Desktop-only
+`codex_app` MCP bridge stays off on the runtime this installation owns; a
+reused listener keeps its own configuration.
 
 An initialize handshake proves protocol compatibility, not native-app
 attachment. `doctor.js` therefore reports Codex `nativeVisibility.verified` as
@@ -174,14 +178,12 @@ behavior, control socket, and safe multi-client semantics still require the
 roadmap's disposable live acceptance test. A private Desktop IPC or app-tools
 socket is not an alternative.
 
-Legacy `[Claude]` titles identify a stale skill context, not ownership. When
-they appear together with no live spinner or a “controlled from another app”
-banner, freeze new Codex spawns and directives. Reinstall the current skill,
-open `SKILL.md` again from disk in the long-running parent, and verify its
-version and `::: <summary>` naming contract. Continue harvesting and retiring
-only that parent's exact registry-owned lanes through their recorded runtime.
-Do not rename, adopt, or replay existing rows, and do not resume new Codex
-dispatches until a current-launch visibility check passes.
+A native row whose title lacks the `::: ` marker, or that shows a “controlled
+from another app” banner with no live activity, was not created by this
+installation's current runtime. Never rename, adopt, or replay it. Continue
+harvesting and retiring only the exact registry-owned lanes through their
+recorded runtime, and do not resume new Codex dispatches until a
+current-launch visibility check passes.
 
 Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 `PATH`, `TRANSMOGRIFY_URL` or `TRANSMOGRIFY_PORT` for the loopback endpoint, and
@@ -276,6 +278,25 @@ an unknown spawn, steer, stop, recovery, archive, or removal.
 Claude retirement cleanup that already has a durable harvest receipt can be
 continued explicitly with `--finish-retirements --private-archive`. Do not use
 that flag for general reconciliation.
+
+A Codex lane whose thread was created but whose first turn never receipted
+stays pending after reconciliation, and its parent receives one
+`child.needs-attention` event per journal state. Reconciliation never replays
+the input. To abandon the lane, run its exact `retire` command with the
+harvest digest of whatever output exists; retirement re-inspects the thread,
+refuses while a turn is active, closes the spawn journal, and archives the
+empty thread. A lane that never received its thread ID keeps its attention
+event and its seat for owner review; no provider call can be replayed for it.
+
+`PARENT_EVENT_UNRECORDED` with exit code 3 means the spawn itself is verified
+and journaled, but the durable parent event could not be written, most often
+because the parent's bounded event store is full (`LOCAL_STATE_LIMIT`). Do not
+respawn: the lane is exact-owned and can be steered, observed, and retired by
+its `laneId`. Create a fresh parent context for further dispatches.
+
+`LOCAL_LOCK_TIMEOUT` with exit code 2 means another live Transmogrify process
+holds the private state lock. Nothing was attempted; retry after it finishes.
+A lock left by a process that no longer exists is reclaimed automatically.
 
 ## Cleanup is blocked
 
