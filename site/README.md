@@ -282,13 +282,15 @@ files natively.
 extensionless canonical URLs, enables the generated 404 page, exposes immutable
 preview versions, and maps production to the `transmogrify.sh` custom domain.
 
-`.github/workflows/site-deploy.yml` remains inert until the repository variable
+`.github/workflows/site-deploy.yml` is gated until the repository variable
 `CLOUDFLARE_DEPLOY_ENABLED` is exactly `true`. To activate it:
 
 1. Create a Cloudflare API token from the **Edit Cloudflare Workers** template,
    restricted to the one account and the `transmogrify.sh` zone.
-2. Create a protected `production` GitHub Environment, restrict it to `main`,
-   enable required reviewers, and prevent self-review.
+2. Create a protected `production` GitHub Environment and restrict it to
+   `main`. When the repository has at least two maintainers, add required
+   reviewers and prevent self-review; a single-maintainer repository must omit
+   that reviewer gate or every deployment will remain blocked.
 3. Add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as secrets on that
    environment. Never store either value in a repository variable or file.
 4. Keep the `production` environment variable `PUBLIC_GA_MEASUREMENT_ID` unset
@@ -305,6 +307,11 @@ is pinned to the exact `${{ github.sha }}` checked out by the workflow and the
 job verifies that object before building. Credentials are released only through
 the protected `production` environment. Wrangler and every GitHub Action are
 pinned.
+
+Production deployment for this repository was activated on 2026-09-02. The
+environment accepts only `main`, the Cloudflare credential is restricted to The
+Brooklyn App Company account and the `transmogrify.sh` zone, and analytics
+remains unset.
 
 Cloudflare receipts, verified 2026-09-01:
 
