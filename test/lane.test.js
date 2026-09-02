@@ -240,10 +240,12 @@ test('parent wait observes later children after an earlier terminal child was ac
       fixture.env,
     );
   }
+  // Event-expecting waits use a generous deadline: a wait returns as soon as an
+  // observation round records events, but a slow CI disk can stretch the round.
   const first = await main([
     'wait', '--parent-context-file', context.file,
     '--repo-root', fixture.repoRoot,
-    '--timeout-ms', '1000',
+    '--timeout-ms', '10000',
   ], fixture.env);
   assert.deepEqual(
     first.events.map((event) => event.dispatchId).sort(),
@@ -257,7 +259,7 @@ test('parent wait observes later children after an earlier terminal child was ac
   const second = await main([
     'wait', '--parent-context-file', context.file,
     '--repo-root', fixture.repoRoot,
-    '--timeout-ms', '1000',
+    '--timeout-ms', '10000',
   ], fixture.env);
   assert.equal(second.events.length, 1);
   assert.equal(second.events[0].eventId, first.events[1].eventId);

@@ -578,7 +578,13 @@ async function reconcilePendingSpawnDispatch(dispatch, lane, values, env, timeou
     timeoutMs,
     commandTimeoutMs: timeoutMs,
   };
-  await providerForBackend(lane.backend).reconcile(options, env);
+  try {
+    await providerForBackend(lane.backend).reconcile(options, env);
+  } catch (error) {
+    // Exhausting this child's share of the wait budget is not an observation
+    // failure: the journal is unchanged and the next round retries.
+    if (error.code !== 'TIMEOUT') throw error;
+  }
   return requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
 }
 

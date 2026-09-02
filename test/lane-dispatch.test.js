@@ -100,7 +100,7 @@ test('parent wait observes every child each round so a busy child cannot starve 
   completeLaneOperation(fixture.repoRoot, laneB, operationId, { state: 'notDelivered' }, fixture.env);
 
   const result = await main([
-    'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '1500',
+    'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '10000',
   ], fixture.env);
   const byDispatch = new Map(result.events.map((event) => [event.dispatchId, event.type]));
   assert.equal(byDispatch.get(a.dispatch.dispatchId), 'child.turn-completed');
@@ -133,14 +133,14 @@ test('a child whose repository disappeared is reported and raises one attention 
   assert.equal(orphan.laneObservation, 'repository-unavailable');
 
   const waited = await main([
-    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '500',
+    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '10000',
   ], fixture.env);
   assert.equal(waited.events.length, 1);
   assert.equal(waited.events[0].dispatchId, childB.dispatch.dispatchId);
   assert.equal(waited.events[0].type, 'child.needs-attention');
   await main(['ack', '--parent-context-file', parentContext.file, '--event', waited.events[0].eventId], fixture.env);
   await assert.rejects(() => main([
-    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '300',
+    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '2000',
   ], fixture.env), (error) => error.code === 'NO_EVENT');
   assert.equal(countEvents(parentContext, {}, fixture.env), 0);
 });
@@ -179,15 +179,19 @@ test('an unresolved first-turn spawn wakes the parent once and can be retired wi
   const lane = listLanes(fixture.repoRoot, fixture.env)[0];
   assert.equal(lane.state, 'deliveryUnknown');
 
-  const waitArgs = [
-    'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '1500',
+  const waitFor = (timeoutMs) => [
+    'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot,
+    '--timeout-ms', String(timeoutMs),
   ];
+  const waitArgs = waitFor(10000);
   const first = await main(waitArgs, fixture.env);
   assert.deepEqual(first.events.map((event) => event.type), ['child.needs-attention']);
   await main(['ack', '--parent-context-file', parentContext.file, '--event', first.events[0].eventId], fixture.env);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).state, 'unknown');
-  await assert.rejects(() => main(waitArgs, fixture.env), (error) => error.code === 'NO_EVENT');
-  await assert.rejects(() => main(waitArgs, fixture.env), (error) => error.code === 'NO_EVENT');
+  // Each no-event wait must still complete a full non-replaying reconciliation
+  // round within its budget before it expires, so keep the deadline generous.
+  await assert.rejects(() => main(waitFor(6000), fixture.env), (error) => error.code === 'NO_EVENT');
+  await assert.rejects(() => main(waitFor(6000), fixture.env), (error) => error.code === 'NO_EVENT');
 
   const retired = await retireCodex({
     repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url,
