@@ -48,7 +48,7 @@ try {
     clientInfo: {
       name: 'transmogrify-runtime-probe',
       title: 'transmogrify runtime probe',
-      version: '0.1.0',
+      version: '0.2.0',
     },
   });
   try {
@@ -56,7 +56,7 @@ try {
     if (!client.verifiedRuntime) {
       throw new Error(`unsupported Codex app-server ${initialized.userAgent}; verified line is 0.151.x`);
     }
-    console.log(`Codex app-server verified: ${initialized.userAgent}`);
+    console.log(`Codex app-server protocol verified: ${initialized.userAgent}`);
   } catch (error) {
     void error;
     console.error('runtime probe failed: app-server handshake or compatibility verification failed');

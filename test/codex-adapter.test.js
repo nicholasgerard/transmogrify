@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const test = require('node:test');
 const {
+  executionCapabilities,
   interrupt,
   recover,
   resume,
@@ -14,6 +15,7 @@ const {
   status,
   steer,
 } = require('../scripts/lib/codex-adapter');
+const { AppServerClient } = require('../scripts/lib/app-server');
 const {
   beginLaneOperation,
   completeLaneOperation,
@@ -31,6 +33,7 @@ const {
   removeManagedSeat,
   verifySeat,
 } = require('../scripts/lib/worktree');
+const { createParentContext, listEvents, readDispatch } = require('../scripts/lib/dispatch');
 const { NO_RESPONSE, startMockAppServer } = require('./helpers/mock-app-server');
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
 
@@ -40,7 +43,8 @@ function baseOptions(fixture, url) {
     worktrees: fixture.worktreesRoot,
     cwd: fixture.seat,
     url,
-    name: '[test] lane: materialize before name',
+    allowProtocolOnly: true,
+    name: 'lane: materialize before name',
     input: 'Return one short sentence without using tools.',
   };
 }
@@ -74,6 +78,42 @@ function threadReadResult(fixture, thread) {
 function threadReadAt(cwd, thread) {
   return { result: { thread: { ...thread, cwd } } };
 }
+
+test('Codex spawn fails closed without explicit protocol-only authorization', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  await assert.rejects(
+    () => spawn({
+      ...baseOptions(fixture, 'ws://127.0.0.1:65534'),
+      allowProtocolOnly: false,
+    }, fixture.env),
+    (error) => error.code === 'NATIVE_VISIBILITY_REQUIRED',
+  );
+  assert.deepEqual(listLanes(fixture.repoRoot, fixture.env), []);
+  assert.deepEqual(listOperations(fixture.repoRoot, fixture.env), []);
+});
+
+test('Codex capabilities expose the live provider catalog and neutral intent vocabulary', async (t) => {
+  const server = await startMockAppServer((request) => {
+    if (request.method !== 'model/list') throw new Error(`unexpected ${request.method}`);
+    return { result: { data: [{
+      id: 'terra-id', model: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra',
+      description: 'Everyday model', hidden: false, isDefault: true,
+      supportedReasoningEfforts: [
+        { reasoningEffort: 'medium', description: 'Balanced' },
+      ],
+      defaultReasoningEffort: 'medium',
+      serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Premium fast speed' }],
+      defaultServiceTier: null,
+    }], nextCursor: null } };
+  });
+  t.after(() => server.close());
+  const result = await executionCapabilities({ url: server.url });
+  assert.equal(result.target, 'codex');
+  assert.equal(result.catalog.models[0].selector, 'gpt-5.6-terra');
+  assert.deepEqual(result.intents.map((entry) => entry.id), [
+    'provider-default', 'fast-loop', 'balanced', 'deep', 'max-quality',
+  ]);
+});
 
 test('Codex spawn validates bounded single-line names before state or transport mutation', async (t) => {
   const fixture = createRepoWithSeat(t);
@@ -128,7 +168,7 @@ test('Codex spawn persists identity, materializes, then names and verifies', asy
     if (request.method === 'thread/read') {
       return threadReadResult(fixture, {
         id: 'thread-1',
-        name: '[test] lane: materialize before name',
+        name: '::: lane: materialize before name',
         status: { type: 'active', activeFlags: [] },
       });
     }
@@ -139,12 +179,16 @@ test('Codex spawn persists identity, materializes, then names and verifies', asy
   const result = await spawn(baseOptions(fixture, server.url), fixture.env);
   assert.equal(result.ok, true);
   assert.equal(result.receipt.providerId, 'thread-1');
+  assert.deepEqual(result.visibility, {
+    surface: 'codex',
+    state: 'protocolOnlyByOwnerOverride',
+  });
   assert.deepEqual(order, ['thread/start', 'turn/start', 'thread/name/set', 'thread/read']);
   const [lane] = listLanes(fixture.repoRoot, fixture.env);
   assert.equal(lane.providerId, 'thread-1');
   assert.equal(lane.turnId, 'turn-1');
   assert.equal(lane.state, 'active');
-  assert.deepEqual(lane.visibility, { surface: 'codex', state: 'providerNativeUnverified' });
+  assert.deepEqual(lane.visibility, { surface: 'codex', state: 'protocolOnlyByOwnerOverride' });
   assert.deepEqual(lane.ownership.creationReceipt, {
     providerId: 'thread-1',
     requestedCwd: providerCwd(fixture),
@@ -154,6 +198,131 @@ test('Codex spawn persists identity, materializes, then names and verifies', asy
     createdAt: lane.ownership.creationReceipt.createdAt,
   });
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].state, 'complete');
+});
+
+test('Codex dispatched profiles use live capabilities, render provenance, and receipt observation', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'claude',
+    hostApp: 'claude-desktop',
+    displayName: 'Cross-provider operator',
+  }, fixture.env);
+  const catalog = { data: [{
+    id: 'sol-id',
+    model: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6 Sol',
+    description: 'Reliable agentic workhorse.',
+    hidden: false,
+    isDefault: true,
+    supportedReasoningEfforts: [
+      { reasoningEffort: 'low', description: 'Low' },
+      { reasoningEffort: 'high', description: 'High' },
+      { reasoningEffort: 'max', description: 'Maximum' },
+    ],
+    defaultReasoningEffort: 'low',
+    serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Premium fast speed' }],
+    defaultServiceTier: null,
+  }], nextCursor: null };
+  const methods = [];
+  let verifiedSpawn = false;
+  let turnStarts = 0;
+  let reportedResumeTier = 'default';
+  const server = await startMockAppServer((request) => {
+    methods.push(request.method);
+    if (request.method === 'model/list') return { result: catalog };
+    if (request.method === 'thread/start') {
+      assert.equal(request.params.model, 'gpt-5.6-sol');
+      assert.equal(request.params.serviceTier, 'default');
+      return { result: {
+        ...threadStartResult(fixture, 'thread-profile').result,
+        model: 'gpt-5.6-sol',
+        reasoningEffort: 'low',
+        serviceTier: 'default',
+      } };
+    }
+    if (request.method === 'turn/start') {
+      turnStarts += 1;
+      assert.equal(request.params.model, 'gpt-5.6-sol');
+      assert.equal(request.params.effort, 'high');
+      assert.equal(request.params.serviceTier, 'default');
+      assert.equal(request.params.serviceTierForTurn, 'default');
+      if (turnStarts === 1) {
+        assert.match(request.params.input[0].text, /^\+-- transmogrify dispatch -+\n/);
+        assert.match(request.params.input[0].text, /\| parent-provider: "claude"\n/);
+        assert.match(request.params.input[0].text, /\| parent-app: "claude-desktop"\n/);
+        assert.match(request.params.input[0].text, /\| parent-task: "Cross-provider operator"\n/);
+        assert.match(request.params.input[0].text,
+          /\| profile: "intent=deep, model=gpt-5.6-sol, effort=high, speed=standard"\n/);
+        return turnStartResult(request, 'turn-profile');
+      }
+      assert.equal(request.params.input[0].text, 'Continue with the same execution profile.');
+      return turnStartResult(request, 'turn-profile-resumed');
+    }
+    if (request.method === 'thread/name/set') return { result: {} };
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, {
+        id: 'thread-profile',
+        name: '::: lane: materialize before name',
+        status: verifiedSpawn ? { type: 'idle' } : { type: 'active', activeFlags: [] },
+      });
+    }
+    if (request.method === 'thread/turns/list') {
+      return { result: { data: [{ id: 'turn-profile', status: 'completed', items: [] }] } };
+    }
+    if (request.method === 'thread/resume') {
+      assert.equal(request.params.model, 'gpt-5.6-sol');
+      assert.equal(request.params.serviceTier, 'default');
+      return { result: {
+        ...threadStartResult(fixture, 'thread-profile').result,
+        serviceTier: reportedResumeTier,
+      } };
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  t.after(() => server.close());
+
+  const result = await spawn({
+    ...baseOptions(fixture, server.url),
+    parentContext,
+    intent: 'deep',
+  }, fixture.env);
+  verifiedSpawn = true;
+  assert.deepEqual(methods, [
+    'model/list', 'model/list', 'thread/start', 'turn/start', 'thread/name/set', 'thread/read',
+  ]);
+  const lane = listLanes(fixture.repoRoot, fixture.env)[0];
+  assert.equal(lane.executionProfile.resolved.effort.level, 'high');
+  assert.equal(lane.lineage.parentRef, parentContext.parent.parentRef);
+  assert.equal(result.receipt.executionProfile.observed.model, 'gpt-5.6-sol');
+  assert.equal(result.receipt.executionProfile.observed.effort, null);
+  const dispatch = readDispatch(lane.lineage.dispatchId, fixture.env);
+  assert.equal(dispatch.resolvedProfile.speed.nativeControl.value, 'default');
+  assert.equal(dispatch.observedProfile.speed, 'standard');
+  assert.equal(listEvents(parentContext, {}, fixture.env)[0].type, 'child.spawned');
+
+  await status({ repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url }, fixture.env);
+  const resumed = await resume({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    url: server.url,
+    message: 'Continue with the same execution profile.',
+  }, fixture.env);
+  assert.equal(resumed.receipt.turnId, 'turn-profile-resumed');
+  assert.equal(turnStarts, 2);
+
+  await status({ repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url }, fixture.env);
+  reportedResumeTier = 'priority';
+  await assert.rejects(() => resume({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    url: server.url,
+    message: 'This turn must not start under a contradictory provider tier.',
+  }, fixture.env), (error) => error.code === 'RECOVERY_UNCERTAIN');
+  assert.equal(turnStarts, 2);
+  assert.equal(
+    pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).details.causeCode,
+    'EXECUTION_PROFILE_UNSUPPORTED',
+  );
 });
 
 test('Codex spawn fails closed when provider cwd does not match the reserved seat', async (t) => {
@@ -255,7 +424,7 @@ test('Codex spawn treats a post-turn provider cwd mismatch as partial success', 
     if (request.method === 'thread/read') {
       return threadReadAt(`${providerCwd(fixture)}-wrong`, {
         id: 'thread-postcondition',
-        name: '[test] lane: materialize before name',
+        name: '::: lane: materialize before name',
         status: { type: 'active', activeFlags: [] },
       });
     }
@@ -321,7 +490,7 @@ test('Codex spawn verifies a persisted input receipt when turn/start omits its c
     if (request.method === 'thread/read') {
       return threadReadResult(fixture, {
         id: 'thread-persisted-receipt',
-        name: '[test] persisted receipt',
+        name: '::: [test] persisted receipt',
         status: { type: 'active', activeFlags: [] },
       });
     }
@@ -535,7 +704,7 @@ test('Codex spawn creates and records an operator-managed seat when cwd is omitt
     if (request.method === 'thread/read') {
       return threadReadResult({ ...fixture, seat: startedCwd }, {
         id: 'thread-managed',
-        name: '[test] managed',
+        name: '::: [test] managed',
         status: { type: 'active', activeFlags: [] },
       });
     }
@@ -575,7 +744,7 @@ test('Codex spawn can keep its driver attached through turn completion', async (
     if (request.method === 'thread/read') {
       return threadReadResult(fixture, {
         id: 'thread-driven',
-        name: '[test] driven',
+        name: '::: [test] driven',
         status: { type: 'active', activeFlags: [] },
       });
     }
@@ -606,7 +775,7 @@ test('Codex spawn preserves a verified provider effect when completion observati
     if (request.method === 'thread/read') {
       return threadReadResult(fixture, {
         id: 'thread-completion-timeout',
-        name: '[test] completion timeout',
+        name: '::: [test] completion timeout',
         status: { type: 'active', activeFlags: [] },
       });
     }
@@ -639,7 +808,7 @@ test('Codex spawn preserves a verified provider effect when its host callback fa
     if (request.method === 'thread/read') {
       return threadReadResult(fixture, {
         id: 'thread-callback-failure',
-        name: '[test] callback failure',
+        name: '::: [test] callback failure',
         status: { type: 'active', activeFlags: [] },
       });
     }
@@ -712,7 +881,7 @@ test('concurrent Codex spawns reserve a shared seat before provider mutation', a
     if (request.method === 'thread/read') {
       return threadReadResult(fixture, {
         id: 'thread-reserved-once',
-        name: '[test] reserve race',
+        name: '::: [test] reserve race',
         status: { type: 'active', activeFlags: [] },
       });
     }
@@ -1175,7 +1344,7 @@ test('Codex recovery clears a terminal operation pointer without provider replay
   assert.deepEqual(result.recovered[0].repaired, ['terminalOperationPointer']);
   assert.equal(result.recovered[0].delivery, 'confirmed');
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
-  assert.deepEqual(server.requests.map((request) => request.method), ['initialize']);
+  assert.deepEqual(server.requests.map((request) => request.method), []);
 });
 
 test('Codex recovery normalizes a providerless spawn whose failure became terminal before lane update', async (t) => {
@@ -1220,7 +1389,7 @@ test('Codex recovery normalizes a providerless spawn whose failure became termin
   ]);
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'failed');
   assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env), null);
-  assert.deepEqual(server.requests.map((request) => request.method), ['initialize']);
+  assert.deepEqual(server.requests.map((request) => request.method), []);
 });
 
 test('Codex recovery preserves the complete cwd receipt when binding a provider-created spawn', async (t) => {
@@ -1335,7 +1504,7 @@ test('Codex recovery normalizes a failed spawn after its terminal pointer was al
   assert.deepEqual(steady.recovered[0].repaired, []);
   assert.deepEqual(
     server.requests.filter((request) => request.id !== undefined).map((request) => request.method),
-    ['initialize', 'initialize'],
+    [],
   );
 });
 
@@ -2018,6 +2187,33 @@ test('Codex status and recovery read only exact registry-owned ids', async (t) =
   assert.deepEqual(readIds, ['thread-owned', 'thread-owned']);
 });
 
+test('Codex recovery subtracts local reconciliation from its client connection budget', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  registerOwned(fixture, 'ws://127.0.0.1:65534');
+  const originalConnect = AppServerClient.prototype.connect;
+  const originalNow = Date.now;
+  let now = 10_000;
+  let observedTimeoutMs;
+  Date.now = () => now;
+  AppServerClient.prototype.connect = async function connectProbe() {
+    observedTimeoutMs = this.timeoutMs;
+    throw new Error('connection budget captured');
+  };
+  try {
+    const recovering = recover({
+      repoRoot: fixture.repoRoot,
+      url: 'ws://127.0.0.1:65534',
+      timeoutMs: 1_000,
+    }, fixture.env);
+    now += 400;
+    await assert.rejects(recovering, /connection budget captured/);
+  } finally {
+    AppServerClient.prototype.connect = originalConnect;
+    Date.now = originalNow;
+  }
+  assert.equal(observedTimeoutMs, 600);
+});
+
 test('Codex status normalizes provider status before output and persistence', async (t) => {
   const fixture = createRepoWithSeat(t);
   const secret = 'must-not-persist';
@@ -2172,10 +2368,7 @@ test('Codex aggregate recovery reports failure when an owned lane belongs to ano
   assert.equal(result.ok, false);
   assert.equal(result.recovered.length, 1);
   assert.equal(result.recovered[0].skipped, 'differentRuntime');
-  assert.equal(server.requests[0].method, 'initialize');
-  assert.equal(server.requests.some((request) =>
-    !['initialize', 'initialized'].includes(request.method)
-  ), false);
+  assert.equal(server.requests.length, 0);
 });
 
 test('Codex recovery does not complete or dispatch an unstarted pending retirement', async (t) => {
@@ -2231,7 +2424,7 @@ test('Codex recovery repairs a transport-unknown first turn without replaying in
       return { result: { thread: {
         id: 'thread-recovery',
         cwd: fs.realpathSync(fixture.seat),
-        name: nameSets ? '[test] recovery' : fs.realpathSync(fixture.seat),
+        name: nameSets ? '::: [test] recovery' : fs.realpathSync(fixture.seat),
         status: { type: 'active', activeFlags: [] },
       } } };
     }

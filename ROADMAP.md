@@ -10,6 +10,10 @@ best provider-native control channel available, reconciles interrupted work,
 harvests results, archives finished lanes, and removes only its own clean
 worktrees.
 
+Every new native row begins with the provider-neutral `::: ` ownership marker.
+The marker is a visual cue only; lifecycle authority continues to require the
+installation's exact durable identity receipt.
+
 Transport symmetry is not the goal. Lifecycle parity is. Codex and Claude may
 use different spawn, steer, status, stop, recovery, and archive channels as long
 as the observable contract and safety invariants match.
@@ -26,11 +30,26 @@ The canonical support matrix is in [README.md](README.md#support-matrix). The
 standalone adapters implement both target providers on the pinned compatibility
 tuple. Claude Desktop/mobile visibility, mobile-originated input, and native
 archive behavior are live-verified on the recorded build tuple. Codex mobile
-visibility is also live-verified on its recorded build tuple, but mobile
-execution on a pre-restart lane after a Desktop restart remains an open
-compatibility limitation; a newly created post-restart lane succeeds. Until
-native reattachment is verified, create a fresh exact-owned lane after a
-Desktop host restart instead of assuming an older visible row can execute.
+visibility is also live-verified on its recorded build tuple, but Desktop
+attachment is not implied by a successful app-server handshake. A Desktop
+update or restart can leave an independently managed `0.151.x` runtime alive
+while the app starts a distinct bundled runtime. Tasks on the surviving runtime
+can remain controllable there yet appear in Desktop as controlled from another
+app, without live activity. Until the official Desktop-owned SSH path and the
+CLI-exposed daemon/proxy surface prove a safe attachment path, pause new
+cross-host Codex dispatches
+after a Desktop lifecycle change and run a disposable exact-owned visibility
+check against the selected runtime before claiming native control.
+
+Managed dispatch now has two provider-neutral contracts. Execution profiles
+resolve a task intent or explicit override to an immutable model, effort, and
+Standard/Fast receipt; provider adapters compile that receipt to their native
+controls and reapply it on recovery. Parent contexts reserve every child before
+mutation, prefix its first message with safe visible provenance, and retain
+durable sequenced events until the parent explicitly handles and acknowledges
+them. The current contracts are in
+[Execution profiles](docs/EXECUTION-PROFILES.md) and
+[Dispatch and lineage](docs/DISPATCH.md).
 
 ## Acceptance program: turnkey bidirectional operation
 
@@ -50,17 +69,22 @@ provider claim:
   record only after its seat path is absent.
 - Restart the orchestrator between lifecycle stages and reconcile without
   duplicate spawn, duplicate steer, wrong-lane mutation, or leaked worktree.
+- Restart a parent with an unacknowledged child event and confirm the same event
+  is redelivered before new dispatch; then acknowledge it and confirm it is not
+  delivered again.
+- Exercise every neutral execution intent and both speed modes supported by
+  each provider, verifying requested/resolved/observed receipts and recovery
+  reuse the same selector and controls.
 - Restart each desktop host while its separately managed runtime survives;
   record whether mobile reattaches to the exact lane without changing project
   identity or routing to another app-server process. Codex pre-restart lane
-  reattachment remains a known limitation in 0.1.0.
+  reattachment remains a known limitation in 0.2.x.
 - Leave a dirty managed worktree and confirm cleanup blocks without data loss.
 - Seed foreign sessions with colliding names and short IDs and confirm no
   mutation reaches them.
-- Publish the GitHub repository with its description, homepage, topics,
-  Discussions, private vulnerability reporting, secret scanning, and push
-  protection configured. Keep Cloudflare deployment disabled until a verified
-  preview is accepted.
+- Verify the public GitHub repository retains its description, homepage,
+  topics, Discussions, private vulnerability reporting, secret scanning, and
+  push protection configuration.
 
 No GUI automation is part of the control plane. Native deep links may present an
 already-owned session, but session identity and lifecycle control come from
@@ -71,6 +95,13 @@ provider or measured local interfaces.
 - Close and rerun the Codex pre-restart-lane reattachment case after a Desktop
   restart; capture the exact failing provider boundary if the current app tuple
   still rejects it.
+- Verify the supported Desktop-owned SSH runtime path. Determine whether
+  Desktop's SSH launcher uses `app-server daemon` and `app-server proxy`,
+  identify its CLI-exposed control socket and lifecycle owner, then prove that a
+  second Transmogrify client can initialize, create one disposable task, stream
+  live in Desktop and mobile, steer, stop, and archive without restarting or
+  reconfiguring the Desktop-owned daemon. A healthy independent WebSocket
+  runtime is insufficient, and private app sockets are not control surfaces.
 - Run and record the complete fresh bidirectional acceptance suite above,
   including mobile-originated input on both providers.
 - Add a reproducible compatibility refresh command that inventories the Codex
@@ -81,18 +112,15 @@ provider or measured local interfaces.
   device/inode reuse, renamed binaries, and provider response expansion.
 - Exercise long-disconnect Remote Control recovery and documented session
   expiry behavior.
-- Publish a provider capability catalog for model, effort, context, and
-  speed/service-tier selection. Give operators task-oriented descriptions,
-  compatibility pins, cost/latency tradeoffs, safe fallbacks, and exact
-  dispatch receipts instead of requiring them to memorize vendor flags.
-- Define provider-neutral dispatch intents such as routine implementation,
-  latency-sensitive triage, long-context synthesis, adversarial review, and
-  high-autonomy work. Resolve each intent to a measured provider-native model,
-  effort, and speed configuration, while still permitting an explicit pinned
-  override.
-- Verify the effective selection where each provider exposes a receipt. Keep
-  requested aliases distinct from resolved model versions, and never silently
-  retry on a cheaper, faster, or different-capability model.
+- Add a compatibility refresh fixture for every documented Claude selector and
+  Codex catalog lifecycle state, including account-restricted and retired
+  outcomes, without weakening the pre-mutation refusal policy.
+- Add explicit profile-migration as an owner-authorized operation. Recovery
+  must continue using the original resolved profile until that new operation
+  records and verifies a replacement.
+- Measure provider-reported effective model, effort, and speed fields whenever
+  a native surface adds them; keep absence represented as unknown rather than
+  copying requested values into observed receipts.
 
 ## Priority 2: autonomous maintenance without overreach
 
@@ -119,10 +147,12 @@ provider or measured local interfaces.
   reconciled without an unknown orphan. Until then, this is a launch-relevant
   recovery boundary: the adapter refuses blind replay but cannot discover a
   thread whose created ID was lost before durable persistence.
-- Request a documented Desktop-host registration or exact thread-adoption
-  contract for independently managed app-server runtimes. It must preserve the
-  same provider identity and project seat across Desktop restarts so paired
-  mobile clients can reattach without duplication or routing drift.
+- If the Desktop-owned SSH daemon/proxy route cannot safely accept a second
+  client, request a documented Desktop-host registration or exact
+  thread-adoption contract for independently managed app-server runtimes. It
+  must preserve the same provider identity and project seat across Desktop
+  restarts so paired mobile clients can reattach without duplication or routing
+  drift.
 - Evaluate Claude's public multi-session Remote Control server mode for shared
   runtime reuse if Anthropic documents an exact external spawn/ownership API;
   do not adopt its transient private daemon socket as a control contract.
@@ -150,24 +180,22 @@ provider or measured local interfaces.
   define an adapter only if exact identity, live app visibility, directed
   control, recovery, and safe retirement can meet the same conformance suite.
 
-## Website launch: transmogrify.sh
+## Website: transmogrify.sh
 
 The repository contains a self-contained static Astro package in `site/`. It
 builds repository facts from their canonical Markdown sources, exposes the
 versioned agent bootstrap at `/start`, and keeps all website build dependencies
 outside the `ws`-only lifecycle runtime and installed skill.
 
-Open launch work:
+Ongoing acceptance work:
 
 - Complete a rendered desktop/mobile, keyboard, screen-reader, reduced-motion,
   theme, copy, and no-JavaScript acceptance pass against the final tree.
 - Run a clean-agent test from the one-line homepage prompt through `/start`,
   installation, doctor, and exact-owned operation in a disposable repository.
-- Publish the GitHub repository before enabling deployment.
-- Add narrowly scoped Cloudflare credentials and protected GitHub environments,
-  enable the inert deployment gate, and accept a Workers Static Assets preview.
-- Verify `/start`, redirects, headers, cache behavior, default no-analytics
-  output, social/search metadata, bundle budgets, and the custom domain live.
+- Reverify `/start`, redirects, headers, cache behavior, default no-analytics
+  output, social/search metadata, bundle budgets, and the custom domain on each
+  compatibility release.
 - Keep analytics disabled until the Privacy Policy names the controller and
   private contact channel and documents retention, processor, and transfer
   terms for the configured service.

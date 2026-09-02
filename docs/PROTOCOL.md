@@ -21,6 +21,13 @@ relative to that output directory.
 
 ## Transport and handshake
 
+**Official product boundary, checked 2026-09-02:** OpenAI documents stdio,
+WebSocket, and Unix-socket app-server transports, but labels WebSocket
+experimental and unsupported for production. Transmogrify's WebSocket path is
+therefore a pinned loopback compatibility surface, not a production transport
+support claim. See the
+[official app-server reference](https://learn.chatgpt.com/docs/app-server).
+
 **Schema-derived:** `JSONRPCMessage.json`, `JSONRPCRequest.json`, and
 `JSONRPCResponse.json` define the JSON-RPC request, response, notification, and
 error envelopes.
@@ -100,6 +107,19 @@ success. A failure after `thread/start` is partial or unknown; the adapter
 observes and repairs the exact recorded operation and does not replay the
 initial input.
 
+Before reservation or provider creation, the adapter canonicalizes the requested
+summary to one native ownership marker: `::: <summary>`. The marker is visual
+only; durable backend and provider identifiers remain the ownership authority.
+
+**Implementation contract:** every managed spawn is reserved under an exact
+installation-owned parent context before provider mutation. The first child
+message begins with the bounded Transmogrify provenance block defined in
+[Dispatch and lineage](DISPATCH.md), followed by the caller's input. The block
+contains safe display labels and durable Transmogrify references; it never
+contains repository paths, provider credentials, or provider-private IDs.
+Provider acknowledgement applies to the entire prefixed input, and the durable
+operation receipt hashes that exact content.
+
 **Schema-derived and implementation contract:** `v2/ThreadReadResponse.json`
 requires the returned thread's `cwd`. Every status read and every later Codex
 mutation requires it to match the lane's durable seat before provider state is
@@ -107,6 +127,21 @@ accepted or another mutation is sent. `v2/ThreadResumeParams.json` and
 `v2/TurnStartParams.json` permit an explicit `cwd`; the adapter supplies the
 owned seat to both. `v2/ThreadResumeResponse.json` requires both a top-level
 `cwd` and a thread `cwd`; both must match before the boundary input is sent.
+
+**Schema-derived:** `v2/ThreadStartParams.json` and
+`v2/ThreadResumeParams.json` permit persistent `model` and `serviceTier` fields.
+`v2/TurnStartParams.json` permits `model`, `effort`, persistent `serviceTier`,
+and turn-only `serviceTierForTurn`; its generated description identifies the
+turn-only `"default"` value as Standard execution.
+
+**Implementation contract:** the adapter compiles Standard to the explicit
+provider value `"default"` and Fast to `"priority"`. It supplies the persistent
+field conservatively as well as the schema-described turn-only field, rather
+than claiming omission means Standard or claiming the generated schema defines
+the persistent field's semantics. It reapplies the resolved model, effort, and
+tier on creation and every later execution boundary, including recovery, and
+refuses a contradictory provider receipt. The selection contract and live
+model catalog are documented in [Execution profiles](EXECUTION-PROFILES.md).
 
 **Live-verified against app-server 0.151.0 on 2026-09-01:** a disposable
 `turn/start` response omitted the exact client marker even though the persisted
@@ -151,6 +186,33 @@ created after the same restart accepted a mobile-originated input, persisted it
 exactly once, and returned a visible reply. The open compatibility seam is
 therefore pre-restart lane reattachment, not post-restart creation or general
 mobile execution.
+
+**Live-verified runtime topology, 2026-09-02:** ChatGPT Desktop
+`26.831.21537` (`7579`) launched bundled Codex `0.152.1` as its own private
+stdio child while a standalone `0.151.0` app-server continued listening on
+`ws://127.0.0.1:8843`. Desktop held no connection to that WebSocket runtime.
+The `Codex Desktop/0.151.0` initialize user-agent returned by the standalone
+listener therefore did not prove Desktop process attachment. Bundled
+`app-server proxy` rejected Desktop's private `ipc.sock`, and the bundled app
+tools MCP accepted an external MCP initialize but closed its host pipe on tool
+listing. OpenAI's documented app-server transports do not define an external
+attachment path to Desktop's private child. These read-only receipts establish
+the current boundary; they do not authorize using either private socket as a
+control plane.
+
+**Official SSH-host boundary, checked 2026-09-02:** ChatGPT Desktop's local
+bundled private stdio child has no documented external attachment path.
+Separately, OpenAI documents Desktop-managed SSH projects in which Desktop
+starts and manages a Codex app-server on the remote host.
+
+**Local CLI-help receipt, checked 2026-09-02:** Codex CLI `0.151.0` exposes
+`app-server daemon bootstrap` for durable SSH-driven app-server management and
+`app-server proxy --sock` for proxying stdio to its control socket. These
+commands are not documented in the official app-server reference. Neither the
+official documentation nor this local help receipt establishes that Desktop
+uses that daemon/proxy path or that a second exact client may safely share it.
+Both remain unverified until a disposable live acceptance run proves process
+ownership, multi-client notification delivery, and the full native lifecycle.
 
 **Implementation contract:** the standalone Codex CLI fixes new turns to
 `sandbox:"workspace-write"` and `approvalPolicy:"never"`. The public CLI does
@@ -270,15 +332,21 @@ is not atomic with the census: another process running as the same user can
 write a new ignored file after the final check and before Git removes the seat.
 Stop the owned lane/provider execution before cleanup, and do not let unrelated
 local writers target a managed seat during retirement. That same-user
-concurrency window is outside the 0.1.0 isolation boundary.
+concurrency window is outside the 0.2.x isolation boundary.
 
 If cleanup fails after archive verification, the lane remains provider-retired
 with a pending cleanup journal. A transient local Git/filesystem failure is
 `CLEANUP_RETRYABLE`; a later retry performs no provider mutation. An observed
 dirt, changed HEAD, seat/repository mismatch, or other unsafe invariant is
 `CLEANUP_BLOCKED` and remains preserved for manual review.
-If the process stops after Git removed the worktree but before the operation
-journal closes, the next retry verifies the absence and completes the journal.
+Preserving the seat leaves the refusal intact. After the owner manually removes
+the exact managed seat, only an exact-lane retirement with
+`--accept-manual-seat-removal` can journal that acknowledgement; it rejects a
+surviving path entry or Git worktree row and requires the preserved branch at
+the harvested HEAD. Fleet-wide reconciliation cannot infer acknowledgement
+from disappearance. If the process stops after an ordinary eligible Git
+removal but before the operation journal closes, the next retry verifies the
+absence and completes the journal without this manual-removal gate.
 
 ## Durable state and failure classes
 
@@ -321,6 +389,16 @@ the account, config, provider IDs, seat, worker binary, process birth, and socke
 identity remain exact; it never overwrites the spawn runtime. See
 [Claude Code integration](CLAUDE-CODE.md#measured-compatibility-tuple).
 
+Parent/child delivery is also durable state, not a transient process callback.
+An exact parent context owns immutable dispatch reservations and sequenced child
+events. The parent must acknowledge an event by its exact ID and digest; a
+missing or malformed acknowledgement cannot suppress redelivery. Every
+unacknowledged event is returned again after a parent restart regardless of a
+newer observation cursor. Observation may reconcile an exact incomplete spawn
+journal, but it never infers provider creation from a title or elapsed time and
+never replays an unknown mutation. The complete parent loop and event meanings
+are in [Dispatch and lineage](DISPATCH.md).
+
 ## Security-relevant schema surface
 
 **Schema-derived:** `ClientRequest.json` exposes authority-bearing methods beyond
@@ -328,9 +406,12 @@ the adapter. `v2/ThreadShellCommandParams.json` describes unsandboxed full-acces
 command execution. `v2/FsRemoveParams.json` accepts an absolute path and
 recursive removal. `v2/ThreadDeleteParams.json` deletes by thread ID.
 
-Therefore the WebSocket is an unauthenticated local control plane, not a safe
-general-purpose localhost API. Bind it to `127.0.0.1`, inspect listeners and
-clients, and never expose a generic mutation proxy.
+Therefore Transmogrify's accepted root-path loopback configuration is an
+unauthenticated local control plane, not a safe general-purpose localhost API.
+Codex documents authenticated remote WebSockets, but this release rejects
+non-loopback endpoints and URL credentials. Bind the selected local runtime to
+`127.0.0.1`, inspect listeners and clients, and never expose a generic mutation
+proxy.
 
 ## Claude Code protocol boundary
 

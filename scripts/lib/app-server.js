@@ -71,7 +71,7 @@ class AppServerClient extends EventEmitter {
     this.clientInfo = options.clientInfo || {
       name: 'transmogrify',
       title: 'transmogrify',
-      version: '0.1.0',
+      version: '0.2.0',
     };
     this.serverRequestHandler = options.serverRequestHandler || null;
     this.socket = null;
@@ -84,6 +84,7 @@ class AppServerClient extends EventEmitter {
 
   async connect() {
     if (this.socket) throw new AppServerError('client is already connected', { code: 'CLIENT_STATE' });
+    const deadline = Date.now() + this.timeoutMs;
     await new Promise((resolve, reject) => {
       let socket;
       try {
@@ -114,10 +115,17 @@ class AppServerClient extends EventEmitter {
       socket.on('close', () => this.#onClose());
     });
 
+    const initializeTimeoutMs = Math.floor(deadline - Date.now());
+    if (initializeTimeoutMs < 1) {
+      throw new AppServerError('timeout awaiting initialize', {
+        code: 'TRANSPORT_UNKNOWN',
+        method: 'initialize',
+      });
+    }
     const initialized = await this.call('initialize', {
       clientInfo: this.clientInfo,
       capabilities: { experimentalApi: true },
-    });
+    }, initializeTimeoutMs);
     const canonicalUserAgent = canonicalCodexUserAgent(initialized?.userAgent);
     if (!initialized || !validCodexHome(initialized.codexHome) ||
         !/^[0-9A-Za-z._-]{1,64}$/.test(initialized.platformFamily || '') ||

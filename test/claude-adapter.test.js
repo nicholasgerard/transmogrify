@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  executionCapabilities,
   recover,
   reconcile,
   retire,
@@ -15,12 +16,13 @@ const {
   stop,
 } = require('../scripts/lib/claude-adapter');
 const { errorEffect } = require('../scripts/lane');
+const { createParentContext, readDispatch } = require('../scripts/lib/dispatch');
 const { exactOwnedAgent, MAX_STEER_BYTES } = require('../scripts/lib/claude-surface');
 const {
-  beginLaneOperation, listLanes, listOperations, pendingOperationForLane, projectPaths,
-  updatePendingLaneOperation,
+  beginLaneOperation, completeLaneOperation, listLanes, listOperations,
+  pendingOperationForLane, projectPaths, reserveSpawn, updatePendingLaneOperation,
 } = require('../scripts/lib/state');
-const { removeManagedSeat } = require('../scripts/lib/worktree');
+const { removeManagedSeat, verifySeat } = require('../scripts/lib/worktree');
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
@@ -32,7 +34,7 @@ function fakeRuntime() {
     platform: 'darwin',
     arch: 'arm64',
     cliPath: '/tmp/fake-claude',
-    cliVersion: '2.1.257',
+    cliVersion: '2.1.258',
     cliSha256: 'a'.repeat(64),
     configDir: '/tmp/fake-claude-config',
     configDevice: 1,
@@ -61,8 +63,8 @@ function createFakeSurface(configuration = {}) {
       calls.push({ method: 'preflight', options });
       return runtime;
     },
-    async agents() {
-      calls.push({ method: 'agents' });
+    async agents(_runtime, options = {}) {
+      calls.push({ method: 'agents', options });
       if (surface.onAgents) surface.onAgents(rows);
       return rows.map((row) => ({ ...row }));
     },
@@ -85,8 +87,8 @@ function createFakeSurface(configuration = {}) {
     exactOwnedAgent(agents, identity, expected) {
       return exactOwnedAgent(agents, identity, expected);
     },
-    discoverExecution(_runtime, expected, agent) {
-      calls.push({ method: 'discoverExecution', expected, pid: agent.pid });
+    discoverExecution(_runtime, expected, agent, options = {}) {
+      calls.push({ method: 'discoverExecution', expected, pid: agent.pid, options });
       if (surface.failDiscoveryOnce) {
         surface.failDiscoveryOnce = false;
         const error = new Error('simulated crash boundary');
@@ -111,12 +113,12 @@ function createFakeSurface(configuration = {}) {
         promptMarkerSha256: expected.promptMarkerSha256,
       };
     },
-    executionReceipt(_runtime, lane, agent) {
-      calls.push({ method: 'executionReceipt', laneId: lane.laneId, pid: agent.pid });
+    executionReceipt(_runtime, lane, agent, options = {}) {
+      calls.push({ method: 'executionReceipt', laneId: lane.laneId, pid: agent.pid, options });
       return execution(agent.pid);
     },
-    async dispatchDeepLink(_runtime, bridgeId) {
-      calls.push({ method: 'dispatchDeepLink', bridgeId });
+    async dispatchDeepLink(_runtime, bridgeId, options = {}) {
+      calls.push({ method: 'dispatchDeepLink', bridgeId, options });
       if (surface.deepLinkFailures > 0) {
         surface.deepLinkFailures -= 1;
         const error = new Error('deep link dispatch failed');
@@ -178,7 +180,7 @@ function createFakeSurface(configuration = {}) {
           ? { ...row, pid: null, status: 'stopped' }
           : row);
       } else if (args[0] === '--resume') {
-        assert.deepEqual(args, ['--resume', sessionId, '--bg']);
+        assert.deepEqual(args, surface.expectedResumeArgs || ['--resume', sessionId, '--bg']);
         currentPid = 202;
         rows = rows.map((row) => row.sessionId === sessionId
           ? { ...row, pid: currentPid, status: 'idle' }
@@ -223,7 +225,7 @@ function spawnOptions(fixture, surface) {
     repoRoot: fixture.repoRoot,
     worktrees: fixture.worktreesRoot,
     cwd: fixture.seat,
-    name: '[test] native Claude lane',
+    name: 'native Claude lane',
     input: 'Return CLAUDE_READY.',
     surface,
     discoveryAttempts: 2,
@@ -238,6 +240,22 @@ async function spawnedLane(t, overrides = {}) {
   return { fixture, surface, result, lane: listLanes(fixture.repoRoot, fixture.env)[0] };
 }
 
+test('Claude capabilities expose the pinned CLI catalog and neutral intent vocabulary', () => {
+  const surface = createFakeSurface();
+  surface.runtime.cliVersion = '2.1.258';
+  const result = executionCapabilities({ surface });
+  assert.equal(result.target, 'claude');
+  assert.equal(result.catalog.models.some((entry) => entry.id === 'claude-opus-5'), true);
+  assert.deepEqual(result.catalog.executionSettings.map((entry) => entry.id), ['ultracode']);
+  assert.deepEqual(
+    result.selectionGuide.executionSettings.map((entry) => entry.setting),
+    ['ultracode'],
+  );
+  assert.deepEqual(result.intents.map((entry) => entry.id), [
+    'provider-default', 'fast-loop', 'balanced', 'deep', 'max-quality',
+  ]);
+});
+
 test('Claude spawn journals intent, uses exact argv, binds three identifiers, and dispatches the native bridge', async (t) => {
   const { fixture, surface, result, lane } = await spawnedLane(t);
   assert.equal(result.ok, true);
@@ -249,7 +267,7 @@ test('Claude spawn journals intent, uses exact argv, binds three identifiers, an
   assert.equal(result.receipt.presentation, 'deepLinkDispatched');
   const launch = surface.calls.find((call) => call.method === 'launch');
   assert.deepEqual(launch.args.slice(0, 5), [
-    '--bg', '--name', '[test] native Claude lane', '--remote-control', '[test] native Claude lane',
+    '--bg', '--name', '::: native Claude lane', '--remote-control', '::: native Claude lane',
   ]);
   assert.match(launch.args[5], /^Return CLAUDE_READY\.\n\n\[transmogrify spawn [0-9a-f-]{36}\]$/);
   assert.equal(launch.options.cwd, fs.realpathSync(fixture.seat));
@@ -289,14 +307,116 @@ test('Claude spawn records and forwards an explicit model selection', async (t) 
   const lane = listLanes(fixture.repoRoot, fixture.env)[0];
   const launch = surface.calls.find((call) => call.method === 'launch');
   assert.deepEqual(launch.args.slice(0, 7), [
-    '--bg', '--name', '[test] native Claude lane',
-    '--remote-control', '[test] native Claude lane',
+    '--bg', '--name', '::: native Claude lane',
+    '--remote-control', '::: native Claude lane',
     '--model', 'claude-opus-5',
   ]);
   assert.match(launch.args[7], /^Return CLAUDE_READY\./);
   assert.equal(lane.ownership.spawnIntent.modelSelector, 'claude-opus-5');
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].details.modelSelector, 'claude-opus-5');
   assert.equal(result.receipt.requestedModelSelector, 'claude-opus-5');
+});
+
+test('Claude dispatched profiles render provenance and survive exact-session recovery', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  surface.runtime.cliVersion = '2.1.258';
+  const parentContext = createParentContext({
+    hostProvider: 'codex',
+    hostApp: 'codex-desktop',
+    displayName: 'Release operator',
+  }, fixture.env);
+  const result = await spawn({
+    ...spawnOptions(fixture, surface),
+    parentContext,
+    intent: 'deep',
+  }, fixture.env);
+  const lane = listLanes(fixture.repoRoot, fixture.env)[0];
+  const launch = surface.calls.find((call) => call.method === 'launch');
+  assert.deepEqual(launch.args.slice(0, 11), [
+    '--bg', '--name', '::: native Claude lane',
+    '--remote-control', '::: native Claude lane',
+    '--model', 'claude-opus-5', '--effort', 'high',
+    '--settings', '{"fastMode":false}',
+  ]);
+  assert.match(launch.args[11], /^\+-- transmogrify dispatch -+\n/);
+  assert.match(launch.args[11], /\| parent-app: "codex-desktop"\n/);
+  assert.match(launch.args[11], /\| parent-task: "Release operator"\n/);
+  assert.match(launch.args[11], /\| profile: "intent=deep, model=claude-opus-5, effort=high, speed=standard"\n/);
+  assert.equal(lane.executionProfile.requested.intent, 'deep');
+  assert.equal(lane.lineage.parentRef, parentContext.parent.parentRef);
+  const dispatch = readDispatch(lane.lineage.dispatchId, fixture.env);
+  assert.equal(dispatch.resolvedProfile.model.selector, 'claude-opus-5');
+  assert.equal(dispatch.observedProfile, null);
+  assert.equal(result.receipt.executionProfile.observed, null);
+
+  surface.expectedResumeArgs = [
+    '--resume', SESSION_ID, '--bg', '--model', 'claude-opus-5',
+    '--effort', 'high', '--settings', '{"fastMode":false}',
+  ];
+  await stop({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    stopVerifyAttempts: 2,
+    stopVerifyDelayMs: 0,
+  }, fixture.env);
+  await recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    recoveryVerifyAttempts: 2,
+    recoveryVerifyDelayMs: 0,
+  }, fixture.env);
+});
+
+test('Claude ultracode compiles xhigh plus dynamic workflows and survives recovery', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  const parentContext = createParentContext({
+    hostProvider: 'codex',
+    hostApp: 'codex-desktop',
+    displayName: 'Workflow operator',
+  }, fixture.env);
+  await spawn({
+    ...spawnOptions(fixture, surface),
+    parentContext,
+    model: 'claude-opus-5',
+    effort: 'ultracode',
+  }, fixture.env);
+  const lane = listLanes(fixture.repoRoot, fixture.env)[0];
+  const launch = surface.calls.find((call) => call.method === 'launch');
+  assert.deepEqual(launch.args.slice(0, 11), [
+    '--bg', '--name', '::: native Claude lane',
+    '--remote-control', '::: native Claude lane',
+    '--model', 'claude-opus-5', '--effort', 'ultracode',
+    '--settings', '{"fastMode":false}',
+  ]);
+  assert.equal(lane.executionProfile.requested.effort, null);
+  assert.equal(lane.executionProfile.requested.setting, 'ultracode');
+  assert.deepEqual(lane.executionProfile.resolved.effort, {
+    level: 'xhigh', selection: 'execution-setting',
+  });
+  assert.equal(lane.executionProfile.resolved.setting.id, 'ultracode');
+
+  surface.expectedResumeArgs = [
+    '--resume', SESSION_ID, '--bg', '--model', 'claude-opus-5',
+    '--effort', 'ultracode', '--settings', '{"fastMode":false}',
+  ];
+  await stop({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    stopVerifyAttempts: 2,
+    stopVerifyDelayMs: 0,
+  }, fixture.env);
+  await recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    recoveryVerifyAttempts: 2,
+    recoveryVerifyDelayMs: 0,
+  }, fixture.env);
 });
 
 test('Claude spawn rejects unsafe model selectors before provider access or lane reservation', async (t) => {
@@ -345,7 +465,7 @@ test('Claude steer rejects a framed message over the transport bound before jour
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'active');
 });
 
-test('Claude status, whole-session stop, and no-extra-flags recovery preserve identity and append an epoch', async (t) => {
+test('Claude status, whole-session stop, and profile-pinned recovery preserve identity and append an epoch', async (t) => {
   const { fixture, surface, lane } = await spawnedLane(t, { model: 'claude-opus-5' });
   await steer({
     repoRoot: fixture.repoRoot,
@@ -408,6 +528,23 @@ test('Claude status persists only closed phase and waiting projections', async (
   const persisted = listLanes(fixture.repoRoot, fixture.env)[0].providerState;
   assert.deepEqual(persisted, { phase: 'waiting', waiting: true, pid: 101 });
   assert.equal(JSON.stringify(persisted).includes(secret), false);
+});
+
+test('Claude status threads one bounded command budget through listing and worker verification', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  surface.calls.length = 0;
+  await status({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    commandTimeoutMs: 2_000,
+  }, fixture.env);
+  const preflightCall = surface.calls.find((call) => call.method === 'preflight');
+  const agentsCall = surface.calls.find((call) => call.method === 'agents');
+  const receiptCall = surface.calls.find((call) => call.method === 'executionReceipt');
+  assert.ok(preflightCall.options.commandTimeoutMs <= 2_000);
+  assert.ok(agentsCall.options.timeoutMs <= preflightCall.options.commandTimeoutMs);
+  assert.ok(receiptCall.options.timeoutMs <= agentsCall.options.timeoutMs);
 });
 
 test('Claude stop does not replay an unknown provider mutation while the exact agent remains running', async (t) => {
@@ -679,6 +816,101 @@ test('Claude reconcile clears a terminal operation pointer without provider repl
   assert.deepEqual(surface.calls, []);
 });
 
+function reserveUnstartedClaudeLane(fixture, operationState = 'planned') {
+  const laneId = require('node:crypto').randomUUID();
+  const operationId = require('node:crypto').randomUUID();
+  const spawnNonce = require('node:crypto').randomUUID();
+  const name = '::: unstarted Claude recovery';
+  const paths = projectPaths(fixture.repoRoot, fixture.env);
+  const runtime = fakeRuntime();
+  delete runtime.cleanEnv;
+  delete runtime.orgId;
+  reserveSpawn(fixture.repoRoot, {
+    operation: {
+      operationId,
+      type: 'spawn',
+      laneId,
+      details: {
+        target: 'claude',
+        name,
+        promptSha256: 'a'.repeat(64),
+        promptMarkerSha256: 'b'.repeat(64),
+        spawnNonce,
+        stdoutPath: path.join(paths.operations, `${operationId}.spawn.stdout`),
+        stderrPath: path.join(paths.operations, `${operationId}.spawn.stderr`),
+      },
+    },
+    lane: {
+      laneId,
+      backend: 'claude-code',
+      target: 'claude',
+      displayName: name,
+      state: 'planned',
+      operationId,
+      runtime,
+      seat: verifySeat(fixture.repoRoot, fixture.seat, fixture.worktreesRoot),
+      capabilities: {},
+      providerIdentity: {
+        version: 1,
+        sessionId: null,
+        jobId: null,
+        bridgeId: null,
+        executionEpochs: [],
+        runtimeEpochs: [],
+      },
+      spawnIntent: {
+        operationId,
+        spawnNonce,
+        displayName: name,
+        promptSha256: 'a'.repeat(64),
+        promptMarkerSha256: 'b'.repeat(64),
+        preflightSessionIds: [],
+        stdoutPath: path.join(paths.operations, `${operationId}.spawn.stdout`),
+        stderrPath: path.join(paths.operations, `${operationId}.spawn.stderr`),
+      },
+    },
+  }, fixture.env);
+  if (operationState !== 'planned') {
+    updatePendingLaneOperation(fixture.repoRoot, laneId, operationId, {
+      state: operationState,
+    }, fixture.env);
+  }
+  return { laneId, operationId };
+}
+
+for (const operationState of ['planned', 'seatReady']) {
+  test(`Claude reconcile proves an unstarted ${operationState} spawn was not delivered`, async (t) => {
+    const fixture = createRepoWithSeat(t);
+    const surface = createFakeSurface();
+    const { laneId } = reserveUnstartedClaudeLane(fixture, operationState);
+    surface.calls.length = 0;
+    const result = await reconcile({ repoRoot: fixture.repoRoot, laneId, surface }, fixture.env);
+    assert.equal(result.ok, true);
+    assert.equal(result.results[0].outcome, 'spawnNotDelivered');
+    assert.equal(result.results[0].delivery, 'notDelivered');
+    assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'failed');
+    assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env), null);
+    assert.deepEqual(surface.calls, []);
+  });
+}
+
+test('Claude reconcile repairs a providerless spawn after its terminal pointer was already cleared', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  const { laneId, operationId } = reserveUnstartedClaudeLane(fixture);
+  completeLaneOperation(fixture.repoRoot, laneId, operationId, {
+    state: 'notDelivered',
+  }, fixture.env);
+  surface.calls.length = 0;
+  const result = await reconcile({ repoRoot: fixture.repoRoot, laneId, surface }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(result.results[0].delivery, 'notDelivered');
+  assert.deepEqual(result.results[0].repaired, ['failedSpawnState']);
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'failed');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env), null);
+  assert.deepEqual(surface.calls, []);
+});
+
 test('Claude reconcile binds only an exact job from the durable spawn receipt and never respawns', async (t) => {
   const fixture = createRepoWithSeat(t);
   const surface = createFakeSurface();
@@ -695,6 +927,7 @@ test('Claude reconcile binds only an exact job from the durable spawn receipt an
     surface,
     discoveryAttempts: 2,
     discoveryDelayMs: 0,
+    commandTimeoutMs: 500,
   }, fixture.env);
   assert.equal(result.ok, true);
   assert.equal(result.results[0].outcome, 'spawnBoundFromDurableReceipt');
@@ -703,6 +936,8 @@ test('Claude reconcile binds only an exact job from the durable spawn receipt an
   assert.equal(fs.existsSync(rebound.ownership.spawnIntent.stdoutPath), false);
   assert.equal(fs.existsSync(rebound.ownership.spawnIntent.stderrPath), false);
   assert.equal(surface.calls.filter((call) => call.method === 'launch').length, launchesBefore);
+  const presentation = surface.calls.find((call) => call.method === 'dispatchDeepLink');
+  assert.ok(presentation.options.timeoutMs <= 2_000);
 });
 
 test('Claude reconcile finishes not-delivered spawn capture cleanup without provider replay', async (t) => {
@@ -811,11 +1046,13 @@ test('Claude presentation failure preserves one completed provider lane and reco
   assert.equal(pendingOperationForLane(fixture.repoRoot, lanes[0].laneId, fixture.env), null);
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].state, 'complete');
   const launches = surface.calls.filter((call) => call.method === 'launch').length;
+  const callsBeforeReconcile = surface.calls.length;
 
   const repaired = await reconcile({
     repoRoot: fixture.repoRoot,
     laneId: lanes[0].laneId,
     surface,
+    commandTimeoutMs: 2_000,
   }, fixture.env);
   assert.equal(repaired.results[0].outcome, 'repaired');
   assert.deepEqual(repaired.results[0].repaired, ['presentation']);
@@ -823,6 +1060,13 @@ test('Claude presentation failure preserves one completed provider lane and reco
   assert.equal(lanes.length, 1);
   assert.equal(lanes[0].visibility.state, 'deepLinkDispatched');
   assert.equal(surface.calls.filter((call) => call.method === 'launch').length, launches);
+  const calls = surface.calls.slice(callsBeforeReconcile).filter((call) => [
+    'preflight', 'agents', 'discoverExecution', 'dispatchDeepLink',
+  ].includes(call.method));
+  const timeouts = calls.map((call) => call.method === 'preflight'
+    ? call.options.commandTimeoutMs : call.options.timeoutMs);
+  assert.equal(timeouts.every((timeout) => Number.isInteger(timeout) && timeout > 0), true);
+  assert.deepEqual([...timeouts].sort((a, b) => b - a), timeouts);
 });
 
 test('Claude status journals an externally stopped exact session as stopped', async (t) => {
@@ -1007,6 +1251,108 @@ test('Claude delayed steer receipt reconciles without writing the message twice'
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'active');
 });
 
+test('Claude pending steer reconciliation stops when its aggregate deadline is spent', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  surface.failDeliveryObservationOnce = true;
+  await assert.rejects(() => steer({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    message: 'Observe this exactly once.',
+    surface,
+  }, fixture.env), (error) => error.code === 'DELIVERY_UNCERTAIN');
+  surface.calls.length = 0;
+
+  const originalNow = Date.now;
+  const originalPreflight = surface.preflight.bind(surface);
+  let now = 20_000;
+  Date.now = () => now;
+  surface.preflight = (options) => {
+    const runtime = originalPreflight(options);
+    now += 500;
+    return runtime;
+  };
+  let reconciled;
+  try {
+    reconciled = await reconcile({
+      repoRoot: fixture.repoRoot,
+      laneId: lane.laneId,
+      surface,
+      commandTimeoutMs: 400,
+    }, fixture.env);
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.equal(reconciled.ok, false);
+  assert.equal(reconciled.results[0].outcome, 'steerUnknown');
+  assert.equal(surface.calls.some((call) => call.method === 'verifyDeliveryTranscript'), false);
+});
+
+test('Claude pending stop reconciliation receives the aggregate deadline remainder', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  const run = surface.run.bind(surface);
+  surface.run = async (...args) => {
+    await run(...args);
+    throw new Error('stop response lost after effect');
+  };
+  await assert.rejects(() => stop({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    stopVerifyAttempts: 1,
+  }, fixture.env), (error) => error.code === 'STOP_UNCERTAIN');
+  surface.calls.length = 0;
+
+  const reconciled = await reconcile({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    commandTimeoutMs: 2_000,
+  }, fixture.env);
+  assert.equal(reconciled.ok, true);
+  assert.equal(reconciled.results[0].outcome, 'stoppedObserved');
+  const preflightCall = surface.calls.find((call) => call.method === 'preflight');
+  const agentsCall = surface.calls.find((call) => call.method === 'agents');
+  assert.equal(Number.isInteger(agentsCall.options.timeoutMs), true);
+  assert.equal(agentsCall.options.timeoutMs <= preflightCall.options.commandTimeoutMs, true);
+});
+
+test('Claude pending recovery reconciliation shares one deadline across observation', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  await stop({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    stopVerifyAttempts: 1,
+  }, fixture.env);
+  surface.failDiscoveryOnce = true;
+  await assert.rejects(() => recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    recoveryVerifyAttempts: 1,
+    recoveryVerifyDelayMs: 0,
+  }, fixture.env), (error) => error.code === 'RECOVERY_UNCERTAIN');
+  surface.calls.length = 0;
+
+  const reconciled = await reconcile({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    commandTimeoutMs: 2_000,
+    recoveryVerifyAttempts: 1,
+    recoveryVerifyDelayMs: 0,
+  }, fixture.env);
+  assert.equal(reconciled.ok, true);
+  assert.equal(reconciled.results[0].outcome, 'recoveryVerified');
+  const calls = surface.calls.filter((call) => [
+    'preflight', 'agents', 'discoverExecution', 'dispatchDeepLink',
+  ].includes(call.method));
+  const timeouts = calls.map((call) => call.method === 'preflight'
+    ? call.options.commandTimeoutMs : call.options.timeoutMs);
+  assert.equal(timeouts.every((timeout) => Number.isInteger(timeout) && timeout > 0), true);
+  assert.deepEqual([...timeouts].sort((a, b) => b - a), timeouts);
+});
+
 test('Claude pending steer maps hostile receipt inspection to delivery-uncertain without replay', async (t) => {
   const { fixture, surface, lane } = await spawnedLane(t);
   const message = 'Keep this mutation exactly once.';
@@ -1067,7 +1413,7 @@ test('Claude recovery ignores unrelated concurrent rows but rejects a correlated
     cwd: correlated.fixture.seat,
     id: '44444444',
     kind: 'background',
-    name: '[test] native Claude lane',
+    name: '::: native Claude lane',
     pid: 404,
     sessionId: '44444444-4444-4444-8444-444444444444',
     startedAt: Date.now(),
@@ -1255,6 +1601,37 @@ test('Claude cleanup block remains permanent after the managed worktree is resto
   assert.equal(surface.calls.length, providerCalls);
   assert.equal(archiveCalls, 1);
   assert.equal(surface.calls.some((call) => call.method === 'run' && call.args[0] === 'rm'), false);
+
+  execFileSync('git', [
+    '-C', fixture.repoRoot, 'worktree', 'remove', '--force', '--', lane.seat.path,
+  ]);
+  fs.symlinkSync(path.join(fixture.root, 'missing-seat-target'), lane.seat.path);
+  await assert.rejects(() => retire({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    acceptManualSeatRemoval: true,
+    removeVerifyAttempts: 1,
+  }, fixture.env), (error) => error.code === 'CLEANUP_BLOCKED');
+  fs.unlinkSync(lane.seat.path);
+  await assert.rejects(() => retire({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    removeVerifyAttempts: 1,
+  }, fixture.env), (error) => error.code === 'CLEANUP_BLOCKED');
+  const reviewed = await retire({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    surface,
+    acceptManualSeatRemoval: true,
+    removeVerifyAttempts: 1,
+  }, fixture.env);
+  assert.equal(reviewed.state, 'worktreeRemoved');
+  assert.equal(reviewed.receipt.worktree.removed, true);
+  assert.equal(archiveCalls, 1);
+  assert.equal(fs.existsSync(lane.seat.path), false);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
 });
 
 test('Claude retire leaves a transient local cleanup failure retryable without replaying archive', async (t) => {
@@ -1528,20 +1905,29 @@ test('Claude reconciliation durably rebinds an exact owned worker after a verifi
     status: 'idle',
     state: 'done',
   })));
+  const callsBeforeReconcile = surface.calls.length;
 
   const result = await reconcile({
     repoRoot: fixture.repoRoot,
     laneId: lane.laneId,
     surface,
+    commandTimeoutMs: 2_000,
   }, fixture.env);
   assert.equal(result.ok, true);
   assert.equal(result.results[0].outcome, 'runtimeRebound');
   assert.equal(result.results[0].runtimeTransition, 'verified');
   const rebound = listLanes(fixture.repoRoot, fixture.env)[0];
-  assert.equal(rebound.runtime.cliVersion, '2.1.257');
+  assert.equal(rebound.runtime.cliVersion, '2.1.258');
   assert.equal(rebound.providerIdentity.runtimeEpochs.length, 1);
   assert.equal(rebound.providerIdentity.runtimeEpochs[0].runtime.cliVersion, '2.1.258');
   assert.equal(rebound.providerIdentity.executionEpochs.at(-1).pid, 202);
+  const calls = surface.calls.slice(callsBeforeReconcile).filter((call) => [
+    'preflight', 'agents', 'discoverExecution',
+  ].includes(call.method));
+  const timeouts = calls.map((call) => call.method === 'preflight'
+    ? call.options.commandTimeoutMs : call.options.timeoutMs);
+  assert.equal(timeouts.every((timeout) => Number.isInteger(timeout) && timeout > 0), true);
+  assert.deepEqual([...timeouts].sort((a, b) => b - a), timeouts);
 
   const observed = await status({
     repoRoot: fixture.repoRoot,

@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const test = require('node:test');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -16,7 +17,16 @@ const {
   safeDetails,
   safeString,
 } = require('../scripts/lane');
-const { pendingOperationForLane, registerLane } = require('../scripts/lib/state');
+const {
+  createParentContext, recordEvent, reserveDispatch,
+} = require('../scripts/lib/dispatch');
+const {
+  completeLaneOperation,
+  pendingOperationForLane,
+  registerLane,
+  reserveSpawn,
+  updateLane,
+} = require('../scripts/lib/state');
 const { verifySeat } = require('../scripts/lib/worktree');
 const { startMockAppServer } = require('./helpers/mock-app-server');
 const { runNodeScript } = require('./helpers/run-cli');
@@ -29,8 +39,9 @@ test('lane CLI rejects unknown operations, targets, and flags without provider m
   for (const flag of [
     '--target', '--lane', '--name', '--cwd', '--worktrees',
     '--harvested-output-sha256', '--private-archive', '--finish-retirements',
-    '--no-cleanup-worktree', '--url', '--claude-bin',
-    '--model',
+    '--no-cleanup-worktree', '--accept-manual-seat-removal', '--url', '--claude-bin',
+    '--parent-context-file', '--intent', '--model', '--effort', '--speed',
+    '--allow-protocol-only',
   ]) {
     assert.match(help.stdout, new RegExp(flag), flag);
   }
@@ -49,11 +60,175 @@ test('lane CLI rejects unknown operations, targets, and flags without provider m
   ], {}), /only for Claude targets/);
   await assert.rejects(() => main([
     'spawn', '--repo-root', '/tmp', '--target', 'codex', '--name', 'x', '--input', 'y',
-    '--model', 'claude-opus-5',
-  ], {}), /only for Claude targets/);
+    '--model', 'gpt-5.6-sol',
+  ], {}), /parent-context-file/);
   await assert.rejects(() => main([
     'reconcile', '--repo-root', '/tmp', '--target', 'codex', '--finish-retirements',
   ], {}), /only for Claude reconciliation/);
+  await assert.rejects(() => main([
+    'reconcile', '--repo-root', '/tmp', '--target', 'claude',
+    '--accept-manual-seat-removal',
+  ], {}), /not valid for reconcile/);
+});
+
+test('public capability output retains provider-neutral intent, effort, and speed names', () => {
+  const projected = publicSuccess({
+    intents: [{ id: 'balanced', intent: 'balanced', label: 'Balanced' }],
+    selectionGuide: {
+      efforts: [{ id: 'high', effort: 'high', useWhen: 'Difficult work.' }],
+      speeds: [{ id: 'standard', speed: 'standard', useWhen: 'Default.' }],
+    },
+  });
+  assert.equal(projected.intents[0].id, undefined);
+  assert.equal(projected.intents[0].intent, 'balanced');
+  assert.equal(projected.selectionGuide.efforts[0].effort, 'high');
+  assert.equal(projected.selectionGuide.speeds[0].speed, 'standard');
+});
+
+test('lane CLI can recover exact parent contexts without exposing private native references', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const created = await main([
+    'parent-init', '--host-provider', 'codex', '--host-app', 'codex-desktop',
+    '--name', 'Release operator', '--native-task-ref', 'private-native-task-id',
+  ], fixture.env);
+  const retried = await main([
+    'parent-init', '--host-provider', 'codex', '--host-app', 'codex-desktop',
+    '--name', 'Release operator', '--native-task-ref', 'private-native-task-id',
+  ], fixture.env);
+  assert.equal(retried.parentRef, created.parentRef);
+  const listed = await main(['parent-list'], fixture.env);
+  assert.equal(listed.parents.length, 1);
+  assert.equal(listed.parents[0].parentRef, created.parentRef);
+  assert.equal(listed.parents[0].contextFile, created.contextFile);
+  assert.equal(JSON.stringify(listed).includes('private-native-task-id'), false);
+});
+
+test('parent wait survives restart, redelivers until acknowledgement, and never skips old unacked events', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parent = await main([
+    'parent-init', '--host-provider', 'codex', '--host-app', 'codex-desktop',
+    '--name', 'Durable parent', '--native-task-ref', 'private-durable-parent',
+  ], fixture.env);
+  const context = createParentContext({
+    hostProvider: 'codex',
+    hostApp: 'codex-desktop',
+    displayName: 'Durable parent',
+    nativeTaskRef: 'private-durable-parent',
+  }, fixture.env);
+  const dispatch = reserveDispatch({
+    parentContext: context,
+    repoRoot: fixture.repoRoot,
+    laneId: '88888888-8888-4888-8888-888888888888',
+    targetProvider: 'claude',
+    backend: 'claude-code',
+    displayName: '::: durable child',
+    prompt: 'Return durably.',
+  }, fixture.env);
+  const event = recordEvent({
+    dispatchId: dispatch.dispatch.dispatchId,
+    type: 'child.turn-completed',
+    fingerprint: 'turn:one:completed',
+    data: { state: 'idle' },
+  }, fixture.env);
+
+  const children = publicSuccess(await main([
+    'children', '--parent-context-file', parent.contextFile,
+    '--repo-root', fixture.repoRoot,
+  ], fixture.env));
+  assert.equal(children.children[0].displayName, '::: durable child');
+
+  const first = await main([
+    'wait', '--parent-context-file', parent.contextFile, '--timeout-ms', '0',
+  ], fixture.env);
+  assert.equal(first.events[0].eventId, event.eventId);
+  const redelivered = await main([
+    'wait', '--parent-context-file', parent.contextFile,
+    '--after', String(event.sequence + 10), '--timeout-ms', '0',
+  ], fixture.env);
+  assert.equal(redelivered.events[0].eventId, event.eventId);
+
+  await main([
+    'ack', '--parent-context-file', parent.contextFile, '--event', event.eventId,
+  ], fixture.env);
+  await assert.rejects(() => main([
+    'wait', '--parent-context-file', parent.contextFile, '--timeout-ms', '0',
+  ], fixture.env), (error) => error.code === 'NO_EVENT');
+});
+
+test('parent wait observes later children after an earlier terminal child was acknowledged', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const context = createParentContext({
+    hostProvider: 'codex',
+    hostApp: 'codex-desktop',
+    displayName: 'Multi-child parent',
+    nativeTaskRef: 'private-multi-child-parent',
+  }, fixture.env);
+  const dispatches = [
+    ['11111111-1111-4111-8111-111111111111', '::: first failed child'],
+    ['22222222-2222-4222-8222-222222222222', '::: second failed child'],
+  ].map(([laneId, displayName]) => reserveDispatch({
+    parentContext: context,
+    repoRoot: fixture.repoRoot,
+    laneId,
+    targetProvider: 'codex',
+    backend: 'codex-app-server',
+    displayName,
+    prompt: 'Fail locally for observation.',
+  }, fixture.env));
+  for (const dispatch of dispatches) {
+    const laneId = dispatch.dispatch.child.laneId;
+    const operationId = crypto.randomUUID();
+    reserveSpawn(fixture.repoRoot, {
+      operation: {
+        operationId,
+        type: 'spawn',
+        laneId,
+        details: { dispatchId: dispatch.dispatch.dispatchId },
+      },
+      lane: {
+        laneId,
+        backend: 'codex-app-server',
+        target: 'codex',
+        displayName: dispatch.dispatch.child.displayName,
+        state: 'planned',
+        operationId,
+        runtime: {
+          endpoint: 'ws://127.0.0.1:8843/',
+          codexHome: '/tmp/codex-home',
+          platformFamily: 'unix',
+          platformOs: 'test',
+        },
+        seat: null,
+        lineage: dispatch.lineage,
+      },
+    }, fixture.env);
+    updateLane(fixture.repoRoot, laneId, { state: 'failed' }, fixture.env);
+    completeLaneOperation(
+      fixture.repoRoot,
+      laneId,
+      operationId,
+      { state: 'notDelivered' },
+      fixture.env,
+    );
+  }
+  const first = await main([
+    'wait', '--parent-context-file', context.file,
+    '--repo-root', fixture.repoRoot,
+    '--timeout-ms', '1000',
+  ], fixture.env);
+  assert.equal(first.events.length, 1);
+  assert.equal(first.events[0].dispatchId, dispatches[0].dispatch.dispatchId);
+  await main([
+    'ack', '--parent-context-file', context.file,
+    '--event', first.events[0].eventId,
+  ], fixture.env);
+  const second = await main([
+    'wait', '--parent-context-file', context.file,
+    '--repo-root', fixture.repoRoot,
+    '--timeout-ms', '1000',
+  ], fixture.env);
+  assert.equal(second.events.length, 1);
+  assert.equal(second.events[0].dispatchId, dispatches[1].dispatch.dispatchId);
 });
 
 test('lane CLI routes Codex recover input to exact boundary resume', async (t) => {
@@ -175,7 +350,26 @@ test('lane CLI maps exact unowned Claude reconciliation to NOT_OWNED and exit 2'
 
 test('lane CLI reports a malformed post-dispatch Codex spawn as mutation-unknown', async (t) => {
   const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'codex',
+    hostApp: 'codex-desktop',
+    displayName: 'Malformed receipt test',
+  }, fixture.env);
   const server = await startMockAppServer((request) => {
+    if (request.method === 'model/list') {
+      return { result: { data: [{
+        id: 'sol-id',
+        model: 'gpt-5.6-sol',
+        displayName: 'GPT-5.6 Sol',
+        description: 'Reliable agentic workhorse.',
+        hidden: false,
+        isDefault: true,
+        supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Low' }],
+        defaultReasoningEffort: 'low',
+        serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Premium fast speed' }],
+        defaultServiceTier: null,
+      }], nextCursor: null } };
+    }
     assert.equal(request.method, 'thread/start');
     return { result: { thread: {} } };
   });
@@ -189,6 +383,8 @@ test('lane CLI reports a malformed post-dispatch Codex spawn as mutation-unknown
     '--worktrees', fixture.worktreesRoot,
     '--name', '[test] malformed spawn receipt',
     '--input', 'test prompt',
+    '--parent-context-file', parentContext.file,
+    '--allow-protocol-only',
   ], { env: { TRANSMOGRIFY_STATE_DIR: fixture.stateDir } });
   assert.equal(result.code, 3);
   const error = JSON.parse(result.stderr);
@@ -302,6 +498,7 @@ test('lane CLI recursively redacts credential-like failure details', () => {
     results: [{ outcome: 'steerUnknown' }],
   }), 3);
   assert.equal(publicErrorMessage('SPAWN_UNCERTAIN'), 'provider spawn outcome is unknown');
+  assert.match(publicErrorMessage('NATIVE_VISIBILITY_REQUIRED'), /native-visibility receipt/);
   assert.equal(publicErrorMessage('UNKNOWN_CODE_WITH_secret-value'), 'operator operation failed');
 });
 

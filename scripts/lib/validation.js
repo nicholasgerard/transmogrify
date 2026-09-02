@@ -3,6 +3,8 @@
 const THREAD_STATUS_TYPES = new Set(['active', 'idle', 'systemError', 'notLoaded']);
 const THREAD_ACTIVE_FLAGS = new Set(['waitingOnApproval', 'waitingOnUserInput']);
 const MAX_CURSOR_BYTES = 4096;
+const OWNED_LANE_PREFIX = '::: ';
+const LEGACY_LANE_PREFIX = /^\[(?:claude|codex|maint)\]\s*/iu;
 
 function boundedCursor(value, label = 'pagination cursor') {
   if (value === undefined || value === null) return null;
@@ -14,10 +16,37 @@ function boundedCursor(value, label = 'pagination cursor') {
 }
 
 function laneNameError(value, label = 'lane name') {
-  if (typeof value !== 'string' || !value.trim() || value.startsWith('-') ||
+  if (typeof value !== 'string' || !value.trim() || value.trimStart().startsWith('-') ||
       /[\u0000-\u001f\u007f\u2028\u2029\uD800-\uDFFF]/u.test(value) ||
       Buffer.byteLength(value, 'utf8') > 256) {
     return `${label} must be non-empty bounded single-line text and cannot begin with -`;
+  }
+  return null;
+}
+
+function canonicalLaneName(value) {
+  if (typeof value !== 'string') return value;
+  let summary = value.trim();
+  while (summary) {
+    if (summary.startsWith(':::')) {
+      summary = summary.slice(3).trimStart();
+      continue;
+    }
+    const legacy = summary.match(LEGACY_LANE_PREFIX);
+    if (legacy) {
+      summary = summary.slice(legacy[0].length).trimStart();
+      continue;
+    }
+    break;
+  }
+  return summary ? `${OWNED_LANE_PREFIX}${summary}` : '';
+}
+
+function ownedLaneNameError(value, label = 'lane name') {
+  const problem = laneNameError(value, label);
+  if (problem) return problem;
+  if (!value.startsWith(OWNED_LANE_PREFIX) || canonicalLaneName(value) !== value) {
+    return `${label} must begin with ${JSON.stringify(OWNED_LANE_PREFIX)} and contain a summary`;
   }
   return null;
 }
@@ -40,6 +69,9 @@ module.exports = {
   THREAD_ACTIVE_FLAGS,
   THREAD_STATUS_TYPES,
   boundedCursor,
+  canonicalLaneName,
   laneNameError,
   normalizeThreadStatus,
+  OWNED_LANE_PREFIX,
+  ownedLaneNameError,
 };

@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { validateUnobservedProfile } = require('./execution-profile');
 const { sanitizedGitEnv } = require('./git-env');
 
 const SCHEMA_VERSION = 1;
@@ -250,7 +251,7 @@ const CLAUDE_RUNTIME_IDENTITY_KEYS = [
   'accountFingerprint',
 ];
 
-function validateClaudeRuntime(runtime, label = 'Claude runtime') {
+function validateClaudeRuntime(runtime, label = 'Claude runtime', options = {}) {
   if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) {
     throw new Error(`${label} must be an object`);
   }
@@ -264,9 +265,18 @@ function validateClaudeRuntime(runtime, label = 'Claude runtime') {
   for (const key of ['cliPath', 'configDir', 'projectsDirectory']) {
     if (!path.isAbsolute(runtime[key] || '')) throw new Error(`${label} ${key} must be absolute`);
   }
-  for (const key of ['configDevice', 'configInode', 'projectsDevice', 'projectsInode']) {
+  for (const key of ['configDevice', 'configInode']) {
     if (!Number.isInteger(runtime[key]) || runtime[key] < 0) {
       throw new Error(`${label} ${key} is invalid`);
+    }
+  }
+  const legacyProjectsIdentity = options.allowLegacyProjectsIdentity === true &&
+    runtime.projectsDevice === undefined && runtime.projectsInode === undefined;
+  if (!legacyProjectsIdentity) {
+    for (const key of ['projectsDevice', 'projectsInode']) {
+      if (!Number.isInteger(runtime[key]) || runtime[key] < 0) {
+        throw new Error(`${label} ${key} is invalid`);
+      }
     }
   }
 }
@@ -349,7 +359,13 @@ function validateClaudeProviderIdentity(lane) {
   if (!Array.isArray(runtimeEpochs)) {
     throw new Error(`lane ${lane.laneId} Claude runtime epochs must be an array`);
   }
-  if (runtimeEpochs.length > 0) validateClaudeRuntime(lane.runtime, `lane ${lane.laneId} initial Claude runtime`);
+  const allowLegacyProjectsIdentity = lane.state === 'worktreeRemoved';
+  const runtimeBound = lane.runtime !== null && lane.runtime !== undefined;
+  if (hasSession || identity.executionEpochs.length > 0 || runtimeEpochs.length > 0 || runtimeBound) {
+    validateClaudeRuntime(lane.runtime, `lane ${lane.laneId} initial Claude runtime`, {
+      allowLegacyProjectsIdentity,
+    });
+  }
   const transitionIds = new Set();
   let priorRuntime = lane.runtime;
   let priorExecutionOrdinal = 0;
@@ -370,7 +386,7 @@ function validateClaudeProviderIdentity(lane) {
         transition.fromCliSha256 !== priorRuntime?.cliSha256) {
       throw new Error(`${label} chain is invalid`);
     }
-    validateClaudeRuntime(transition.runtime, label);
+    validateClaudeRuntime(transition.runtime, label, { allowLegacyProjectsIdentity });
     if (!sameClaudeRuntimeIdentity(priorRuntime, transition.runtime) ||
         transition.runtime.cliSha256 === priorRuntime.cliSha256) {
       throw new Error(`${label} changes the immutable provider identity or repeats a build`);
@@ -499,6 +515,33 @@ function validateSeatIntent(lane) {
   }
 }
 
+function validateLineage(lane) {
+  if (lane.lineage === undefined) return;
+  const lineage = lane.lineage;
+  if (!lineage || typeof lineage !== 'object' || Array.isArray(lineage)) {
+    throw new Error(`lane ${lane.laneId} has invalid dispatch lineage`);
+  }
+  assertExactKeys(lineage, new Set([
+    'version', 'dispatchId', 'parentRef', 'installationId',
+  ]), `lane ${lane.laneId} dispatch lineage`);
+  if (lineage.version !== 1 || !UUID_PATTERN.test(lineage.dispatchId || '') ||
+      !UUID_PATTERN.test(lineage.parentRef || '') || !UUID_PATTERN.test(lineage.installationId || '')) {
+    throw new Error(`lane ${lane.laneId} has invalid dispatch lineage`);
+  }
+}
+
+function validateExecutionProfile(lane) {
+  if (lane.executionProfile === undefined) return;
+  try {
+    validateUnobservedProfile(lane.executionProfile);
+  } catch (error) {
+    throw new Error(`lane ${lane.laneId} has invalid execution profile: ${error.message}`);
+  }
+  if (lane.executionProfile.provider !== lane.target) {
+    throw new Error(`lane ${lane.laneId} execution profile provider does not match target`);
+  }
+}
+
 function validateProviderIdentities(registry) {
   const claims = new Map();
   const seatClaims = new Map();
@@ -510,6 +553,8 @@ function validateProviderIdentities(registry) {
     }
     validateLaneJournal(lane);
     validateSeatIntent(lane);
+    validateLineage(lane);
+    validateExecutionProfile(lane);
     const seatPath = lane.seat?.path || lane.seatIntent?.path;
     if (seatPath && lane.state !== 'worktreeRemoved') {
       if (seatClaims.has(seatPath)) {
@@ -605,12 +650,14 @@ function atomicWriteJson(file, value) {
   fsyncDirectory(directory);
 }
 
-function processBirth(pid) {
+function processBirth(pid, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 30_000;
   try {
     return execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { LC_ALL: 'C', LANG: 'C', PATH: '/usr/bin:/bin' },
+      timeout: timeoutMs,
     }).trim() || null;
   } catch {
     return null;
@@ -1054,6 +1101,8 @@ function reservationRecord(paths, registry, lane, options = {}) {
     updatedAt: now,
   };
   if (lane.seatIntent !== undefined) record.seatIntent = lane.seatIntent;
+  if (lane.lineage !== undefined) record.lineage = lane.lineage;
+  if (lane.executionProfile !== undefined) record.executionProfile = lane.executionProfile;
   if (options.pendingOperationId !== undefined) {
     record.pendingOperationId = options.pendingOperationId;
   }
@@ -1108,7 +1157,9 @@ function reserveSpawn(repoRoot, reservation, env = process.env) {
         existing.pendingOperationId === operation.operationId &&
         existing.backend === laneInput.backend && existing.displayName === laneInput.displayName &&
         existing.providerId === null && sameJson(existing.seat, laneInput.seat || null) &&
-        sameJson(existing.seatIntent, laneInput.seatIntent);
+        sameJson(existing.seatIntent, laneInput.seatIntent) &&
+        sameJson(existing.lineage, laneInput.lineage) &&
+        sameJson(existing.executionProfile, laneInput.executionProfile);
       if (!exactRetry) throw new Error(`lane id already exists: ${laneInput.laneId}`);
       return { operation, lane: existing };
     }
@@ -1307,6 +1358,8 @@ function registerLane(repoRoot, lane, env = process.env) {
       updatedAt: now,
     };
     if (lane.seatIntent !== undefined) record.seatIntent = lane.seatIntent;
+    if (lane.lineage !== undefined) record.lineage = lane.lineage;
+    if (lane.executionProfile !== undefined) record.executionProfile = lane.executionProfile;
     if (lane.providerIdentity !== undefined) record.providerIdentity = lane.providerIdentity;
     registry.lanes[laneId] = record;
     ensurePrivateStateDirectory(paths.operations);
@@ -1802,7 +1855,9 @@ function mutateLane(repoRoot, laneId, callback, env = process.env) {
         throw new Error(`cannot change immutable lane field ${protectedKey}`);
       }
     }
-    for (const protectedKey of ['seat', 'seatIntent', 'runtime', 'ownership', 'observedStops']) {
+    for (const protectedKey of [
+      'seat', 'seatIntent', 'runtime', 'ownership', 'observedStops', 'lineage', 'executionProfile',
+    ]) {
       if (mutation.patch[protectedKey] !== undefined &&
           !sameJson(mutation.patch[protectedKey], current[protectedKey])) {
         throw new Error(`cannot change immutable lane field ${protectedKey}`);
@@ -1829,7 +1884,9 @@ function updateLane(repoRoot, laneId, patch, env = process.env) {
         throw new Error(`cannot change immutable lane field ${protectedKey}`);
       }
     }
-    for (const protectedKey of ['seat', 'seatIntent', 'runtime', 'ownership', 'observedStops']) {
+    for (const protectedKey of [
+      'seat', 'seatIntent', 'runtime', 'ownership', 'observedStops', 'lineage', 'executionProfile',
+    ]) {
       if (patch[protectedKey] !== undefined && !sameJson(patch[protectedKey], current[protectedKey])) {
         throw new Error(`cannot change immutable lane field ${protectedKey}`);
       }

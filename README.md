@@ -3,12 +3,14 @@
 Transmogrify is an agent skill and a set of zero-framework Node tools for
 operating worktree-seated Codex and Claude Code lanes. It gives either Codex or
 Claude a provider-neutral lifecycle—spawn, steer, status, stop, recover,
-harvest, retire, and reconcile—while keeping each lane visible in the
-provider's native app.
+durable output harvest, retire, and reconcile—while preserving native app
+visibility when the provider's current host-integration receipt passes.
 
 The transport is deliberately provider-specific:
 
-- Codex lanes use one shared `codex app-server` WebSocket runtime.
+- Codex lanes use one shared loopback `codex app-server` WebSocket runtime.
+  OpenAI currently labels WebSocket transport experimental and unsupported for
+  production.
 - Claude lanes use public Claude Code background Remote Control sessions and
   `--cloud` follow-ups, exact transcript receipts, and a tightly pinned
   archival adapter.
@@ -21,9 +23,11 @@ target repository; existing operation details cannot be rewritten as phases
 advance. It never adopts a lane by name and never reconciles or removes an
 unowned session or worktree.
 
-The Codex WebSocket API and Claude archival endpoint are unsupported,
-version-pinned surfaces. Read [Security](SECURITY.md) before using Transmogrify on
-sensitive work.
+Codex documents app-server WebSocket transport as experimental and unsupported
+for production; Transmogrify pins the exact method and shape contract it has
+verified for this release. Claude's archival endpoint remains
+a private, version-pinned surface. Read [Security](SECURITY.md) before using
+Transmogrify on sensitive work.
 
 ## Why “Transmogrify”?
 
@@ -44,12 +48,19 @@ recovery, retirement, and cleanup semantics.
 
 | Orchestrator | Codex target | Claude Code target |
 | --- | --- | --- |
-| Codex | Native task tools when their full lifecycle contract is available; shared app-server adapter otherwise | Implemented through the Claude Code Remote Control adapter |
-| Claude Code | Implemented through the shared app-server adapter | Native sub-agents for internal delegation; Remote Control adapter for app-visible managed lanes |
+| Codex | Shared app-server protocol; live app attachment requires a current-launch visibility receipt | Claude Code Remote Control adapter |
+| Claude Code | Shared app-server protocol; live app attachment requires a current-launch visibility receipt | Claude Code Remote Control adapter |
 
-Both orchestrators can create Codex lanes that render in the Codex/ChatGPT
-desktop and mobile apps; the dated visibility and post-restart mobile-execution
-boundary are recorded in the
+Provider-native host tools can accelerate bounded internal delegation or exact
+waiting when they expose a suitable receipt. A Transmogrify-managed app-visible
+lane still goes through `lane.js` so its provenance, execution profile,
+lineage, events, retirement, and cleanup remain portable across hosts.
+
+On the recorded compatibility tuple, both orchestrators created Codex lanes
+that rendered in the Codex/ChatGPT desktop and mobile apps. A later Desktop
+restart demonstrated that a surviving standalone runtime can remain
+protocol-compatible without remaining the app's live control plane. The dated
+visibility and post-restart boundary are recorded in the
 [protocol contract](docs/PROTOCOL.md#codex-lane-lifecycle). The Claude adapter
 creates named local Claude Code Remote Control sessions. Desktop and mobile
 visibility, mobile-originated input, and native archive behavior are
@@ -103,7 +114,7 @@ npm ci --ignore-scripts
 ./install.sh
 ```
 
-The installer copies the complete skill and tools to both
+By default the installer copies the complete skill and tools to both
 `~/.claude/skills/transmogrify` and
 `~/.agents/skills/transmogrify`, Codex's documented personal skill location
 ([official OpenAI documentation](https://developers.openai.com/codex/skills)). Existing installations are
@@ -115,8 +126,8 @@ not be group/world writable; the installer refuses unsafe parents before
 staging or replacing a target.
 
 The supported distribution path is a Git checkout followed by `npm ci` and
-`install.sh`. The package is private and `npm pack --dry-run` is an inclusion
-audit, not a self-installing npm distribution artifact.
+`install.sh`. The package is not published to npm; `npm pack --dry-run` is an
+inclusion audit, not a self-installing distribution artifact.
 
 Open a new host session after first installation, then invoke the skill by its
 stable command:
@@ -154,6 +165,15 @@ initialize-only Codex handshake or Claude public preflight and agent listing.
 It prints aggregate owned and pending counts. It never starts, stops, restarts,
 steers, archives, removes, or adopts a provider session.
 
+For Codex, `ok:true` means the selected WebSocket runtime matches the pinned
+protocol contract. The separate `nativeVisibility` result remains unverified
+because an app-server handshake cannot prove that the current Desktop launch or
+paired mobile client is attached to that same process. Before a cross-host
+batch, use one disposable exact-owned lane to verify current app visibility.
+After a Desktop restart, pause new dispatches to a surviving independent
+runtime until that check passes; exact-owned recovery and retirement on that
+runtime remain available.
+
 The registry is private local control state. Transmogrify creates its
 directories with mode `0700` and JSON records with mode `0600`; existing state
 paths must retain those owner-only permissions.
@@ -182,7 +202,7 @@ including `HOME` and `CODEX_HOME`; it deliberately excludes ambient API keys,
 access tokens, proxy credentials, and `NODE_OPTIONS`. Use an existing Codex
 login stored under the selected home. On 2026-09-01, Codex CLI `0.151.0`
 reported `Logged in using ChatGPT` with only `HOME` and `PATH` present. An
-environment-only API-key login is outside the 0.1.0 launcher contract.
+environment-only API-key login is outside the 0.2.x launcher contract.
 
 The launcher establishes only the standalone app-server contract. Whether a
 runtime renders and executes in a particular Codex desktop/mobile build is a
@@ -190,6 +210,13 @@ separate host-integration receipt. When native visibility is required, keep the
 paired Desktop host running and exercise a disposable exact-owned acceptance
 lane against the selected runtime; the doctor handshake alone cannot prove
 Remote attachment. See the [protocol boundary](docs/PROTOCOL.md#codex-lane-lifecycle).
+
+`runtime-up.sh` creates or reuses a standalone protocol runtime; Desktop is not
+documented to adopt it. OpenAI separately documents Desktop-owned SSH projects
+that launch and manage an app-server on the remote host. Transmogrify will
+prefer that ownership direction for native Desktop/mobile operation only after
+the CLI-exposed, local-help-observed daemon/proxy path and safe second-client
+behavior pass the roadmap's live acceptance gate.
 
 ## Quick start
 
@@ -202,18 +229,37 @@ process-list boundary in [Security](SECURITY.md#input-and-output-handling).
 ```bash
 export REPO_ROOT=/absolute/path/to/repository
 export WORKTREES="$HOME/.local/share/transmogrify/worktrees/example-repository"
+export HOST_PROVIDER=codex       # or: claude
+export HOST_APP=codex-desktop    # or: claude-desktop
 install -d -m 700 "$WORKTREES"
 git -C "$REPO_ROOT" rev-parse --show-toplevel
 git -C "$REPO_ROOT" rev-parse --verify HEAD
+
+node "$SKILL_ROOT/scripts/lane.js" parent-init \
+  --host-provider "$HOST_PROVIDER" \
+  --host-app "$HOST_APP" \
+  --name 'Repository operator'
+
+# Copy contextFile from the command result.
+export PARENT_CONTEXT=/absolute/path/to/parent-context.json
 
 printf '%s\n' 'Inspect the failing tests and report the smallest safe fix.' |
   node "$SKILL_ROOT/scripts/lane.js" spawn \
     --repo-root "$REPO_ROOT" \
     --worktrees "$WORKTREES" \
     --target codex \
-    --name '[codex] tests: diagnose failure' \
+    --name 'tests: diagnose failure' \
+    --parent-context-file "$PARENT_CONTEXT" \
+    --intent balanced \
+    --allow-protocol-only \
     --input-file -
 ```
+
+`--allow-protocol-only` is an explicit admission that this new Codex lane has
+no current native-app receipt. It is required for Codex spawn in 0.2.x and the
+lane is recorded as protocol-only. Do not use it when the requested outcome
+requires Desktop/mobile visibility. Claude Code spawn does not use this flag;
+its pinned Remote Control adapter carries the native visibility receipt.
 
 Use `--target claude` to create a named Claude Code Remote Control lane. Omit
 `--cwd` to let the operator reserve and create a managed worktree under
@@ -230,11 +276,37 @@ current user with mode `0700`, and its nearest existing ancestor must not be
 group/world writable. Choose a new private root instead of changing permissions
 on a shared directory.
 
-Claude spawn also accepts `--model <alias-or-full-name>`. The exact requested
-selector is journaled before dispatch and forwarded only at initial session
-creation. Prefer a full model name when reproducibility matters; an alias such
-as `opus` can resolve differently over time. Recovery deliberately supplies no
-model override because Claude resumes the selection saved with that session.
+Both adapters accept provider-neutral `--intent`, plus explicit `--model`,
+`--effort`, and `--speed standard|fast` overrides. Fast is always explicit.
+Claude additionally accepts `--effort ultracode` as native shorthand for its
+typed Ultracode execution setting: resolved `xhigh` effort plus a request for
+dynamic-workflow planning on supported models. When workflows are unavailable
+for the current plan or configuration, Anthropic documents an `xhigh`-only
+fallback.
+Claude aliases such as `opus` are retained as requested input but compile to a
+versioned selector for spawn and recovery. Inspect the current matrix with
+`lane.js capabilities --target codex|claude`; the complete contract and model
+recommendations are in [Execution profiles](docs/EXECUTION-PROFILES.md).
+
+The first message is automatically prefixed with safe dispatch provenance, and
+the native title is canonicalized to `::: <summary>`. Keep the parent active
+until its children return:
+
+```bash
+node "$SKILL_ROOT/scripts/lane.js" wait \
+  --parent-context-file "$PARENT_CONTEXT" \
+  --repo-root "$REPO_ROOT" \
+  --timeout-ms 60000
+
+node "$SKILL_ROOT/scripts/lane.js" ack \
+  --parent-context-file "$PARENT_CONTEXT" \
+  --event EVENT_ID
+```
+
+Repeat the bounded wait while children remain. Events persist across restart
+and redeliver until acknowledged after handling. Completion wakes the parent;
+it never authorizes automatic output injection, archival, or cleanup. See
+[Dispatch and parent notification](docs/DISPATCH.md).
 
 The result contains an installation-scoped `laneId`. Use that identifier for
 every later operation:
@@ -250,6 +322,14 @@ node "$SKILL_ROOT/scripts/lane.js" status \
   --repo-root /absolute/path/to/repository \
   --lane LANE_ID
 ```
+
+Harvest is a workflow phase, not a provider-generic transcript command.
+Require the child to write a bounded `handback.md` or another project-defined
+artifact in its owned worktree. The parent reads that exact seat, reviews the
+Git diff and status, persists the needed result outside fragile chat history,
+and hashes the accepted artifact or handback. Pass that lowercase SHA-256 to
+`retire`. A provider-native task read can accelerate review, but it is not the
+portable harvest contract and never substitutes for repository evidence.
 
 Standalone Codex lanes use the fixed `workspace-write` sandbox and approval
 policy `never`; approval-required actions return to the host rather than
@@ -306,13 +386,17 @@ A complete packet, handback, digest, and retirement walkthrough is in
 
 | Operation | Targets | Notes |
 | --- | --- | --- |
-| `spawn` | Codex, Claude | Requires `--target`, `--name`, and input; Claude optionally accepts `--model` |
+| `parent-init` / `parent-list` | Host | Create or recover durable parent identity without exposing private native references |
+| `capabilities` | Codex, Claude | Show the verified model, effort, speed, execution-setting, and recommendation catalog |
+| `spawn` | Codex, Claude | Requires a parent context, target, name, and input; adds `::: ` and first-message provenance. Codex also requires `--allow-protocol-only` until a current native-visibility receipt is machine-verifiable. |
+| `children` | Host | Enumerate one parent's durable dispatches and unacknowledged event count |
+| `wait` / `ack` | Host | Observe durable at-least-once child events and acknowledge them after handling |
 | `steer` | Codex, Claude | Codex steers the newest active turn; Claude queues to the exact session safe point |
 | `status` | Codex, Claude | Reads and revalidates exact owned identity |
 | `interrupt` | Codex | Cancels only the newest exact active turn |
 | `stop` | Claude | Stops the whole exact background session |
 | `recover` | Codex, Claude | Codex observes/reconciles by default or resumes the same thread with input; Claude resumes the same recorded session |
-| `retire` | Codex, Claude | Requires a harvest digest; Claude also requires `--private-archive` and defers local removal unless a managed seat is safely removed first |
+| `retire` | Codex, Claude | Requires a harvest digest; Claude also requires `--private-archive` and defers local removal unless a managed seat is safely removed first; a manually removed blocked seat requires exact-lane `--accept-manual-seat-removal` |
 | `reconcile` | Codex, Claude | Repairs exact-owned pending state and eligible cleanup; never name-adopts or replays an unknown mutation |
 
 Every advertised tool accepts `--help`; use
@@ -322,6 +406,12 @@ Every advertised tool accepts `--help`; use
 the recorded harvest and explicit private archive gates. Use `--input-file -`
 for substantial steer and Codex recovery input.
 
+`CLEANUP_BLOCKED` never clears through fleet-wide reconciliation. Preserve the
+seat and stop, or review and remove that exact managed seat manually; only then
+rerun its exact `retire` command with `--accept-manual-seat-removal`. The retry
+proves the path is absent, Git no longer lists it, and the preserved branch is
+still at the harvested HEAD before local Claude-record removal can continue.
+
 ## Documentation
 
 - [SKILL.md](SKILL.md): executable operator policy loaded by Codex or Claude.
@@ -329,6 +419,10 @@ for substantial steer and Codex recovery input.
   failure classes, and dated receipts.
 - [Claude Code integration](docs/CLAUDE-CODE.md): public surface, measured local
   control path, pinned archival boundary, and acceptance status.
+- [Execution profiles](docs/EXECUTION-PROFILES.md): model, effort, speed,
+  execution-setting, recommendation, receipt, and recovery contract.
+- [Dispatch and parent notification](docs/DISPATCH.md): lineage, visible
+  provenance, durable child events, waiting, acknowledgement, and restart.
 - [Troubleshooting](docs/TROUBLESHOOTING.md): setup failures, runtime safety,
   upgrade/rollback, and cleanup recovery.
 - [Roadmap](ROADMAP.md): launch gate and forward priorities.
@@ -338,8 +432,9 @@ for substantial steer and Codex recovery input.
   requirements.
 - [Code of Conduct](CODE_OF_CONDUCT.md): community standards and private
   enforcement contact.
-- [Website](site/README.md): Astro source, static verification, privacy posture,
-  and inert Cloudflare deployment contract for `transmogrify.sh`.
+- [Website](https://github.com/nicholasgerard/transmogrify/blob/main/site/README.md):
+  Astro source, static verification, privacy posture, and the Cloudflare
+  deployment contract for `transmogrify.sh`.
 
 ## Support
 
@@ -354,7 +449,9 @@ to a public channel.
 
 ## Security model
 
-The Codex app-server socket is an unauthenticated local control plane. Bind it
+Transmogrify accepts only a root-path loopback WebSocket endpoint and does not
+configure app-server authentication for that local mode. Treat that accepted
+configuration as a local control plane. Bind it
 only to loopback and trust every local client before connecting sensitive work.
 The Claude lifecycle adapter refuses an unknown CLI build, account, session,
 worker, or execution identity. Its optional native-archive step additionally

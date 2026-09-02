@@ -137,7 +137,7 @@ async function probeCodex(options, dependencies) {
         clientInfo: {
           name: 'transmogrify-doctor',
           title: 'transmogrify doctor',
-          version: '0.1.0',
+          version: '0.2.0',
         },
       });
     const initialized = await client.connect();
@@ -159,8 +159,14 @@ async function probeCodex(options, dependencies) {
       requested: true,
       available: true,
       reusable,
-      reuse: reusable ? 'existing-runtime' : 'blocked-unverified-runtime',
+      reuse: reusable ? 'existing-compatible-protocol-runtime' : 'blocked-unverified-runtime',
       probe: 'initialize-handshake-only',
+      nativeVisibility: {
+        verified: false,
+        nativeDispatchReady: false,
+        evidence: 'not-measurable-by-app-server-handshake',
+        nextAction: 'run-disposable-exact-owned-app-visibility-check',
+      },
       pinned: {
         userAgentVersionLine: '0.151.x',
         verifiedDate: VERIFIED_DATE,
@@ -180,6 +186,12 @@ async function probeCodex(options, dependencies) {
       reusable: false,
       reuse: 'unavailable',
       probe: 'initialize-handshake-only',
+      nativeVisibility: {
+        verified: false,
+        nativeDispatchReady: false,
+        evidence: 'provider-unavailable',
+        nextAction: 'restore-compatible-protocol-runtime-before-visibility-check',
+      },
       pinned: {
         userAgentVersionLine: '0.151.x',
         verifiedDate: VERIFIED_DATE,

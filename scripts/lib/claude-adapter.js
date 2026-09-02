@@ -10,11 +10,26 @@ const {
   settleTerminalLaneOperationPointer, updateOperation, updatePendingLaneOperation, withLaneLease,
 } = require('./state');
 const {
-  assertSafeModelSelector, assertUniqueShortJobId, claudeSpawnArgs, createClaudeSurface,
+  assertSafeModelSelector, assertUniqueShortJobId, claudeResumeArgs, claudeSpawnArgs,
+  createClaudeSurface,
   MAX_STEER_BYTES, parseJobId, sha256,
 } = require('./claude-surface');
+const { markDispatchJournaled, recordEvent, reserveDispatch } = require('./dispatch');
 const {
-  captureHarvestReceipt, isPermanentCleanupError, materializeManagedSeat, planManagedSeat, removeManagedSeat,
+  ExecutionProfileError,
+  createClaudeCliCatalog,
+  requestFromProfile,
+  resolveClaudeExecutionProfile,
+  stableStringify,
+  validateUnobservedProfile,
+} = require('./execution-profile');
+const {
+  CLAUDE_GUIDANCE, CLAUDE_SELECTION_GUIDE, INTENT_DESCRIPTORS,
+} = require('./execution-guidance');
+const { canonicalLaneName, laneNameError, ownedLaneNameError } = require('./validation');
+const {
+  captureHarvestReceipt, isPermanentCleanupError, materializeManagedSeat, pathEntryExists,
+  planManagedSeat, removeManagedSeat,
   verifyLaneSeat, verifySeat,
 } = require('./worktree');
 
@@ -34,6 +49,18 @@ class ClaudeTransmogrifyError extends Error {
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function commandDeadline(options) {
+  return Number.isInteger(options.commandTimeoutMs)
+    ? Date.now() + options.commandTimeoutMs : null;
+}
+function remainingCommandMs(deadline, minimum = 1) {
+  if (deadline === null) return undefined;
+  const remaining = Math.floor(deadline - Date.now());
+  if (remaining < minimum) {
+    throw new ClaudeTransmogrifyError('TIMEOUT', 'Claude operation exceeded its command deadline');
+  }
+  return remaining;
+}
 function worktreesRoot(options, env) {
   return options.worktrees || env.WORKTREES || `${options.repoRoot}/.worktrees`;
 }
@@ -41,9 +68,16 @@ function publicRuntime(runtime) {
   const { cleanEnv: _cleanEnv, orgId: _orgId, ...persisted } = runtime;
   return persisted;
 }
-function sameRuntime(recorded, actual) {
+function sameRuntime(recorded, actual, options = {}) {
   const current = publicRuntime(actual);
-  return recorded && Object.keys(current).every((key) => recorded[key] === current[key]) &&
+  if (!recorded) return false;
+  const legacyProjectsIdentity = options.allowLegacyProjectsIdentity === true &&
+    recorded.projectsDevice === undefined &&
+    recorded.projectsInode === undefined;
+  const currentKeys = Object.keys(current).filter((key) =>
+    !legacyProjectsIdentity || !['projectsDevice', 'projectsInode'].includes(key)
+  );
+  return currentKeys.every((key) => recorded[key] === current[key]) &&
     Object.keys(recorded).every((key) => recorded[key] === current[key]);
 }
 function effectiveRuntime(lane) {
@@ -86,6 +120,121 @@ function preflight(options, env, surface) {
     throw new ClaudeTransmogrifyError(error.code || 'UNSUPPORTED_ENVIRONMENT', error.message, error.details);
   }
 }
+
+function executionRequest(options) {
+  return Object.fromEntries([
+    ['intent', options.intent],
+    ['model', options.model],
+    ['effort', options.effort],
+    ['speed', options.speed],
+  ].filter(([, value]) => value !== undefined));
+}
+
+function claudeCatalogSource(runtime) {
+  return {
+    kind: 'claude-cli+official-docs',
+    cliVersion: runtime.cliVersion,
+    cliSha256: runtime.cliSha256,
+    verifiedAt: '2026-09-02',
+    documentation: [
+      'https://code.claude.com/docs/en/cli-usage',
+      'https://code.claude.com/docs/en/model-config',
+      'https://code.claude.com/docs/en/fast-mode',
+      'https://code.claude.com/docs/en/workflows',
+      'https://code.claude.com/docs/en/settings-reference',
+      'https://platform.claude.com/docs/en/models/overview',
+    ],
+  };
+}
+
+function profileFailure(error) {
+  if (!(error instanceof ExecutionProfileError)) throw error;
+  throw new ClaudeTransmogrifyError('EXECUTION_PROFILE_UNSUPPORTED', error.message, {
+    profileCode: error.code,
+  });
+}
+
+function resolveSpawnProfile(options, runtime) {
+  try {
+    let supplied = null;
+    if (options.executionProfile !== undefined) {
+      supplied = validateUnobservedProfile(options.executionProfile);
+      if (supplied.provider !== 'claude') {
+        throw new ExecutionProfileError('INVALID_PROFILE', 'execution profile provider is not claude');
+      }
+    }
+    const resolved = resolveClaudeExecutionProfile({
+      request: supplied ? requestFromProfile(supplied) : executionRequest(options),
+      guidance: CLAUDE_GUIDANCE,
+      source: claudeCatalogSource(runtime),
+    });
+    if (supplied && stableStringify(supplied) !== stableStringify(resolved)) {
+      throw new ExecutionProfileError(
+        'STALE_PROFILE', 'supplied Claude execution profile does not match pinned capabilities',
+      );
+    }
+    return resolved;
+  } catch (error) { return profileFailure(error); }
+}
+
+function executionArgs(profile) {
+  if (!profile) return {};
+  const control = profile.resolved.speed.nativeControl;
+  if (control.kind !== 'fast-mode' || typeof control.value !== 'boolean') {
+    throw new ClaudeTransmogrifyError(
+      'EXECUTION_PROFILE_UNSUPPORTED',
+      'Claude execution profile has an unsupported speed control',
+    );
+  }
+  const setting = profile.resolved.setting ?? null;
+  let effort = profile.resolved.effort.level ?? undefined;
+  if (setting !== null) {
+    const settingControl = setting.nativeControl;
+    if (
+      setting.id !== 'ultracode'
+      || settingControl.kind !== 'claude-effort-flag'
+      || settingControl.value !== 'ultracode'
+      || effort !== 'xhigh'
+    ) {
+      throw new ClaudeTransmogrifyError(
+        'EXECUTION_PROFILE_UNSUPPORTED',
+        'Claude execution profile has an unsupported execution setting',
+      );
+    }
+    effort = settingControl.value;
+  }
+  return {
+    model: profile.resolved.model.selector ?? undefined,
+    effort,
+    fastMode: control.value,
+  };
+}
+
+function executionCapabilities(options = {}, env = process.env) {
+  const surface = surfaceFor(options);
+  const runtime = preflight(options, env, surface);
+  let catalog;
+  try {
+    catalog = createClaudeCliCatalog({
+      source: claudeCatalogSource(runtime),
+    });
+  } catch (error) { return profileFailure(error); }
+  return {
+    version: 1,
+    ok: true,
+    operation: 'capabilities',
+    target: 'claude',
+    intents: INTENT_DESCRIPTORS,
+    selectionGuide: CLAUDE_SELECTION_GUIDE,
+    availability: {
+      kind: 'documented-compatibility',
+      observed: false,
+      note: 'Account and organization availability is verified by Claude at launch.',
+    },
+    guidance: CLAUDE_GUIDANCE,
+    catalog,
+  };
+}
 function assertSeat(options, lane) {
   try { return verifyLaneSeat(options.repoRoot, lane.seat); } catch (error) {
     throw new ClaudeTransmogrifyError('SEAT_MISMATCH', error.message);
@@ -114,7 +263,9 @@ function runtimeForLane(options, lane, env, surface) {
     ...options,
     claudeBin: options.claudeBin || expected.cliPath,
   }, env, surface);
-  if (!sameRuntime(expected, runtime)) {
+  if (!sameRuntime(expected, runtime, {
+    allowLegacyProjectsIdentity: lane.state === 'worktreeRemoved',
+  })) {
     throw new ClaudeTransmogrifyError('RUNTIME_MISMATCH', 'Claude CLI/account/config identity changed');
   }
   return runtime;
@@ -148,9 +299,9 @@ function epochFromDiscovery(discovery, epochId = crypto.randomUUID()) {
 function phaseForAgent(agent) {
   const observedState = agent.status || agent.state || (agent.pid ? 'running' : 'stopped');
   const phase = agent.pid === null ? 'stopped' :
-    ['working', 'busy', 'running'].includes(observedState) ? 'working' :
-      ['idle', 'done', 'completed'].includes(observedState) ? 'idle' :
-        agent.waitingFor ? 'waiting' : 'unknown';
+    agent.waitingFor ? 'waiting' :
+      ['working', 'busy', 'running'].includes(observedState) ? 'working' :
+        ['idle', 'done', 'completed'].includes(observedState) ? 'idle' : 'unknown';
   return { phase };
 }
 function runningLaneState(agent) { return phaseForAgent(agent).phase === 'working' ? 'active' : 'idle'; }
@@ -172,11 +323,20 @@ function updateRunningLane(repoRoot, lane, agent, env, patch = {}) {
 async function pollAgents(surface, runtime, predicate, options = {}) {
   const attempts = options.attempts ?? 30;
   const delayMs = options.delayMs ?? 100;
+  const deadline = options.deadline ?? (Number.isInteger(options.timeoutMs)
+    ? Date.now() + options.timeoutMs : null);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const agents = await surface.agents(runtime);
+    if (deadline !== null && deadline - Date.now() < 100) return null;
+    const remaining = remainingCommandMs(deadline, 100);
+    const agents = await surface.agents(runtime, remaining === undefined
+      ? {} : { timeoutMs: remaining });
     const result = predicate(agents);
     if (result) return { agents, result };
-    if (attempt < attempts && delayMs) await sleep(delayMs);
+    if (attempt < attempts && delayMs) {
+      const boundedDelay = deadline === null
+        ? delayMs : Math.min(delayMs, Math.max(0, deadline - Date.now()));
+      if (boundedDelay > 0) await sleep(boundedDelay);
+    }
   }
   return null;
 }
@@ -231,7 +391,11 @@ function observedStop(repoRoot, lane, operation, env, receipt = {}) {
 async function presentLane(options, env, surface, runtime, lane) {
   const attemptedAt = new Date().toISOString();
   try {
-    const presentation = await surface.dispatchDeepLink(runtime, lane.providerIdentity.bridgeId);
+    const presentation = await surface.dispatchDeepLink(
+      runtime,
+      lane.providerIdentity.bridgeId,
+      { timeoutMs: options.commandTimeoutMs },
+    );
     const updated = updateLane(options.repoRoot, lane.laneId, {
       visibility: {
         surface: 'claudeDesktopRemoteControl', state: presentation.state, dispatchedAt: attemptedAt,
@@ -328,7 +492,8 @@ function removeDurableSpawnReceipts(repoRoot, lane, env) {
     fs.unlinkSync(expected);
   }
 }
-async function finalizeSpawn(options, env, surface, runtime, lane, operation, jobId, stdout) {
+async function finalizeSpawn(options, env, surface, runtime, lane, operation, jobId, stdout,
+  deadline = null) {
   const dispatchStartedAt = operation.details.dispatchStartedAt;
   const receiptStat = fs.lstatSync(lane.ownership.spawnIntent.stdoutPath);
   const dispatchFinishedAt = operation.details.dispatchFinishedAt || receiptStat.mtimeMs;
@@ -337,7 +502,7 @@ async function finalizeSpawn(options, env, surface, runtime, lane, operation, jo
   }
   const located = await pollAgents(surface, runtime, (agents) => candidateFromJob(
     agents, jobId, lane.ownership.spawnIntent, lane.seat, dispatchStartedAt, dispatchFinishedAt,
-  ), { attempts: options.discoveryAttempts, delayMs: options.discoveryDelayMs });
+  ), { attempts: options.discoveryAttempts, delayMs: options.discoveryDelayMs, deadline });
   if (!located) {
     throw new ClaudeTransmogrifyError('SPAWN_UNCERTAIN', 'spawned Claude job could not be attributed to one exact session');
   }
@@ -349,7 +514,7 @@ async function finalizeSpawn(options, env, surface, runtime, lane, operation, jo
   });
   const discovery = surface.discoverExecution(runtime, {
     sessionId: candidate.sessionId, jobId, name: lane.displayName, cwd: lane.seat.path,
-  }, candidate);
+  }, candidate, deadline === null ? {} : { timeoutMs: remainingCommandMs(deadline) });
   lane = bindClaudeSpawnObservation(options.repoRoot, lane.laneId, {
     sessionId: candidate.sessionId, jobId, bridgeId: discovery.bridgeId,
     creationReceipt: creationReceipt(candidate, jobId, discovery, stdout, runtime, transcript),
@@ -359,7 +524,10 @@ async function finalizeSpawn(options, env, surface, runtime, lane, operation, jo
   lane = updateRunningLane(options.repoRoot, lane, candidate, env, {
     lastVerifiedAt: new Date().toISOString(),
   });
-  const presented = await presentLane(options, env, surface, runtime, lane);
+  const presented = await presentLane(deadline === null ? options : {
+    ...options,
+    commandTimeoutMs: remainingCommandMs(deadline),
+  }, env, surface, runtime, lane);
   lane = presented.lane;
   removeDurableSpawnReceipts(options.repoRoot, lane, env);
   completePending(options.repoRoot, lane.laneId, operation, {
@@ -378,18 +546,47 @@ async function spawnLane(options, env = process.env) {
       typeof options.input !== 'string' || !options.input) {
     throw new ClaudeTransmogrifyError('USAGE_ERROR', 'spawn requires absolute repoRoot, name, and input');
   }
+  const nameProblem = laneNameError(options.name, 'Claude lane name');
+  if (nameProblem) throw new ClaudeTransmogrifyError('USAGE_ERROR', nameProblem);
+  options = { ...options, name: canonicalLaneName(options.name) };
+  const canonicalNameProblem = ownedLaneNameError(options.name, 'Claude lane name');
+  if (canonicalNameProblem) {
+    throw new ClaudeTransmogrifyError('USAGE_ERROR', canonicalNameProblem);
+  }
   if (options.model !== undefined) assertSafeModelSelector(options.model);
-  ensureRegistry(options.repoRoot, env);
   const surface = surfaceFor(options);
   const runtime = preflight(options, env, surface);
-  const laneId = crypto.randomUUID();
+  if (options.parentContext || options.executionProfile !== undefined) {
+    options = { ...options, executionProfile: resolveSpawnProfile(options, runtime) };
+  }
+  const resolvedExecution = executionArgs(options.executionProfile);
+  const laneId = options.laneId || crypto.randomUUID();
+  const dispatchEnvelope = options.parentContext ? reserveDispatch({
+    parentContext: options.parentContext,
+    repoRoot: options.repoRoot,
+    laneId,
+    targetProvider: 'claude',
+    backend: BACKEND,
+    displayName: options.name,
+    profile: options.executionProfile,
+    prompt: options.input,
+  }, env) : null;
+  if (dispatchEnvelope) {
+    options = {
+      ...options,
+      input: dispatchEnvelope.renderedPrompt,
+      dispatch: dispatchEnvelope.dispatch,
+      lineage: dispatchEnvelope.lineage,
+    };
+  }
+  ensureRegistry(options.repoRoot, env);
   const operationId = crypto.randomUUID();
   const preflightAgents = await surface.agents(runtime);
   const spawnNonce = crypto.randomUUID();
   const marker = `[transmogrify spawn ${spawnNonce}]`;
   const prompt = `${options.input}\n\n${marker}`;
   const argv = claudeSpawnArgs(options.name, prompt, {
-    model: options.model,
+    ...(options.executionProfile ? resolvedExecution : { model: options.model }),
   });
   const paths = projectPaths(options.repoRoot, env);
   const stdoutPath = path.join(paths.operations, `${operationId}.spawn.stdout`);
@@ -403,7 +600,7 @@ async function spawnLane(options, env = process.env) {
   const spawnIntent = {
     operationId, spawnNonce, displayName: options.name, promptSha256: sha256(options.input),
     promptMarkerSha256: sha256(marker),
-    modelSelector: options.model,
+    modelSelector: options.executionProfile?.resolved.model.selector ?? options.model,
     preflightSessionIds: preflightAgents
       .filter((agent) => typeof agent.sessionId === 'string')
       .map((agent) => agent.sessionId.toLowerCase()).sort(),
@@ -415,11 +612,19 @@ async function spawnLane(options, env = process.env) {
       details: {
         target: 'claude', name: options.name, promptSha256: sha256(options.input),
         promptMarkerSha256: sha256(marker), spawnNonce, stdoutPath, stderrPath,
-        modelSelector: options.model,
+        modelSelector: options.executionProfile?.resolved.model.selector ?? options.model,
+        ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
+        ...(dispatchEnvelope ? {
+          dispatchId: dispatchEnvelope.dispatch.dispatchId,
+          promptReceipts: dispatchEnvelope.receipts,
+        } : {}),
       },
     },
     lane: {
-      laneId, backend: BACKEND, displayName: options.name, state: 'planned', operationId,
+      laneId, backend: BACKEND, target: 'claude', displayName: options.name,
+      state: 'planned', operationId,
+      ...(options.lineage ? { lineage: options.lineage } : {}),
+      ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
       capabilities: capabilities(), runtime: publicRuntime(runtime), seat: externalSeat, seatIntent,
       providerIdentity: {
         version: 1, sessionId: null, jobId: null, bridgeId: null,
@@ -428,6 +633,7 @@ async function spawnLane(options, env = process.env) {
       spawnIntent,
     },
   }, env);
+  if (options.dispatch) markDispatchJournaled(options.dispatch.dispatchId, env);
   if (!lane.seat) {
     const seat = materializeManagedSeat(options.repoRoot, lane.seatIntent);
     lane = bindLaneSeat(options.repoRoot, lane.laneId, operation.operationId, seat, env);
@@ -478,6 +684,14 @@ async function spawnLane(options, env = process.env) {
   }
   try {
     const finalized = await finalizeSpawn(options, env, surface, runtime, lane, operation, jobId, launch.stdout);
+    if (options.dispatch) {
+      recordEvent({
+        dispatchId: options.dispatch.dispatchId,
+        type: 'child.spawned',
+        fingerprint: `spawn-complete:${operation.operationId}:${finalized.lane.providerId}`,
+        data: { state: 'spawned' },
+      }, env);
+    }
     if (options.onLaunch) options.onLaunch(finalized.lane);
     return laneResult('spawn', finalized.lane, {
       operationId: operation.operationId,
@@ -486,6 +700,9 @@ async function spawnLane(options, env = process.env) {
         bridgeIdSha256: sha256(finalized.lane.providerIdentity.bridgeId),
         presentation: finalized.presentation.state,
         requestedModelSelector: finalized.lane.ownership.spawnIntent.modelSelector || null,
+        ...(finalized.lane.executionProfile ? {
+          executionProfile: finalized.lane.executionProfile,
+        } : {}),
       },
     });
   } catch (error) {
@@ -504,6 +721,7 @@ async function spawnLane(options, env = process.env) {
 }
 
 async function status(options, env = process.env) {
+  const deadline = commandDeadline(options);
   let lane = ownedLane(options, env, false);
   if (RETIRED_STATES.has(lane.state) || RETIRING_STATES.has(lane.state)) {
     const phase = RETIRED_STATES.has(lane.state) ? 'retired' : 'retiring';
@@ -514,14 +732,21 @@ async function status(options, env = process.env) {
   }
   assertSeat(options, lane);
   const surface = surfaceFor(options);
-  const runtime = runtimeForLane(options, lane, env, surface);
-  const agents = await surface.agents(runtime);
+  const runtime = runtimeForLane({
+    ...options,
+    ...(deadline === null ? {} : { commandTimeoutMs: remainingCommandMs(deadline, 100) }),
+  }, lane, env, surface);
+  const agents = await surface.agents(runtime, deadline === null
+    ? { timeoutMs: options.commandTimeoutMs }
+    : { timeoutMs: remainingCommandMs(deadline, 100) });
   const agent = surface.exactOwnedAgent(agents, lane.providerIdentity, {
     name: lane.displayName, cwd: lane.seat.path,
   });
   let execution = null;
   if (agent.pid) {
-    execution = surface.executionReceipt(runtime, lane, agent);
+    execution = surface.executionReceipt(runtime, lane, agent, {
+      timeoutMs: deadline === null ? options.commandTimeoutMs : remainingCommandMs(deadline),
+    });
     ensureLatestEpoch(lane, execution);
     lane = updateRunningLane(options.repoRoot, lane, agent, env);
   } else {
@@ -543,9 +768,10 @@ async function status(options, env = process.env) {
   });
 }
 
-async function reconcileSteer(options, env, surface, runtime, lane, operation) {
+async function reconcileSteer(options, env, surface, runtime, lane, operation, deadline = null) {
   let receipt;
   try {
+    if (deadline !== null) remainingCommandMs(deadline);
     receipt = surface.verifyDeliveryTranscript(runtime, lane.providerId, {
       messageSha256: operation.details.messageSha256,
       deliveryToken: operation.details.deliveryToken,
@@ -696,13 +922,15 @@ async function steer(options, env = process.env) {
   }, env);
 }
 
-async function exactAgent(surface, runtime, lane) {
-  return surface.exactOwnedAgent(await surface.agents(runtime), lane.providerIdentity, {
+async function exactAgent(surface, runtime, lane, options = {}) {
+  return surface.exactOwnedAgent(await surface.agents(runtime, {
+    timeoutMs: options.commandTimeoutMs,
+  }), lane.providerIdentity, {
     name: lane.displayName, cwd: lane.seat.path,
   });
 }
 async function stopOwnedLane(options, env, surface, runtime, lane, operation, allowMutation = true) {
-  let agent = await exactAgent(surface, runtime, lane);
+  let agent = await exactAgent(surface, runtime, lane, options);
   if (agent.pid === null) {
     lane = observedStop(options.repoRoot, lane, operation, env, { alreadyStopped: true });
     return { lane, alreadyStopped: true };
@@ -828,7 +1056,7 @@ function correlatedRecoveryCopies(agents, lane, operation) {
       startedAt >= started - 5000 && startedAt <= notAfter;
   });
 }
-async function observeRecovery(options, env, surface, runtime, lane, operation) {
+async function observeRecovery(options, env, surface, runtime, lane, operation, deadline = null) {
   const located = await pollAgents(surface, runtime, (agents) => {
     const copies = correlatedRecoveryCopies(agents, lane, operation);
     if (copies.length) return { forked: copies.map((agent) => agent.sessionId) };
@@ -838,7 +1066,11 @@ async function observeRecovery(options, env, surface, runtime, lane, operation) 
       });
       return agent.pid ? { agent } : null;
     } catch { return null; }
-  }, { attempts: options.recoveryVerifyAttempts, delayMs: options.recoveryVerifyDelayMs });
+  }, {
+    attempts: options.recoveryVerifyAttempts,
+    delayMs: options.recoveryVerifyDelayMs,
+    deadline,
+  });
   if (!located) return null;
   if (located.result.forked) {
     throw new ClaudeTransmogrifyError(
@@ -849,7 +1081,9 @@ async function observeRecovery(options, env, surface, runtime, lane, operation) 
   const discovery = surface.discoverExecution(runtime, {
     sessionId: lane.providerId, jobId: lane.providerIdentity.jobId,
     name: lane.displayName, cwd: lane.seat.path,
-  }, located.result.agent);
+  }, located.result.agent, deadline === null ? {} : {
+    timeoutMs: remainingCommandMs(deadline),
+  });
   if (discovery.bridgeId !== lane.providerIdentity.bridgeId) {
     throw new ClaudeTransmogrifyError('RECOVERY_UNCERTAIN', 'Claude recovery returned a different Remote Control bridge');
   }
@@ -861,7 +1095,10 @@ async function observeRecovery(options, env, surface, runtime, lane, operation) 
   lane = updateRunningLane(options.repoRoot, lane, located.result.agent, env, {
     lastVerifiedAt: new Date().toISOString(),
   });
-  const presented = await presentLane(options, env, surface, runtime, lane);
+  const presented = await presentLane(deadline === null ? options : {
+    ...options,
+    commandTimeoutMs: remainingCommandMs(deadline),
+  }, env, surface, runtime, lane);
   lane = presented.lane;
   completePending(options.repoRoot, lane.laneId, operation, {
     state: 'complete',
@@ -917,7 +1154,7 @@ async function recover(options, env = process.env) {
     let operation = beginLaneOperation(options.repoRoot, lane.laneId, {
       type: 'recover', providerId: lane.providerId,
       details: {
-        target: 'claude', argvContract: 'resume-full-session-bg-no-extra-flags',
+        target: 'claude', argvContract: 'resume-full-session-bg-pinned-execution-profile',
         baselineSessionIds: before
           .filter((agent) => typeof agent.sessionId === 'string')
           .map((agent) => agent.sessionId.toLowerCase()).sort(),
@@ -930,7 +1167,10 @@ async function recover(options, env = process.env) {
       state: 'dispatching',
     }, env);
     try {
-      const dispatched = await surface.run(runtime, ['--resume', lane.providerId, '--bg'], {
+      const dispatched = await surface.run(runtime, claudeResumeArgs(
+        lane.providerId,
+        executionArgs(lane.executionProfile),
+      ), {
         cwd: lane.seat.path, timeoutMs: options.commandTimeoutMs,
       });
       operation = updatePending(options.repoRoot, lane.laneId, operation, {
@@ -1068,9 +1308,31 @@ async function retire(options, env = process.env) {
   if (lane.state === 'worktreeRemoved' && !existingRetirement) {
     return laneResult('retire', lane, { receipt: { retired: true, alreadyRetired: true } });
   }
+  if (options.acceptManualSeatRemoval === true &&
+      existingRetirement?.details?.cleanupBlocked !== true) {
+    throw new ClaudeTransmogrifyError(
+      'USAGE_ERROR',
+      '--accept-manual-seat-removal requires an exact pending CLEANUP_BLOCKED retirement',
+    );
+  }
+  const initialSeatEntryPresent = lane.seat?.managed === true &&
+    pathEntryExists(lane.seat.path);
+  const initialManualRemovalAcknowledged = options.acceptManualSeatRemoval === true ||
+    existingRetirement?.details?.manualSeatRemoval?.acknowledged === true;
+  if (existingRetirement?.details?.cleanupBlocked === true &&
+      (initialSeatEntryPresent || !initialManualRemovalAcknowledged)) {
+    throw new ClaudeTransmogrifyError(
+      'CLEANUP_BLOCKED',
+      'Claude managed worktree has a permanent cleanup block and requires exact manual-removal acknowledgement',
+      { providerRetired: true, laneId: lane.laneId },
+    );
+  }
   const recoveringAbsentManagedSeat = lane.seat?.managed === true &&
     existingRetirement?.type === 'retire' && RETIRED_STATES.has(lane.state) &&
-    !fs.existsSync(lane.seat.path);
+    !initialSeatEntryPresent &&
+    (existingRetirement.details.cleanupBlocked !== true ||
+      options.acceptManualSeatRemoval === true ||
+      existingRetirement.details.manualSeatRemoval?.acknowledged === true);
   if (!recoveringAbsentManagedSeat) assertSeat(options, lane);
   const surface = surfaceFor(options);
   return withLaneLease(options.repoRoot, lane.laneId, async () => {
@@ -1104,12 +1366,29 @@ async function retire(options, env = process.env) {
     if (!harvestReceipt || !SHA256_PATTERN.test(harvestReceipt.outputSha256 || '')) {
       throw new ClaudeTransmogrifyError('HARVEST_REQUIRED', 'pending Claude retirement has no valid harvest receipt');
     }
-    if (pending.details.cleanupBlocked === true) {
+    const blockedSeatAbsent = pending.details.cleanupBlocked === true &&
+      lane.seat?.managed === true && !pathEntryExists(lane.seat.path);
+    const manuallyRemovedBlockedSeat = blockedSeatAbsent &&
+      (options.acceptManualSeatRemoval === true ||
+        pending.details.manualSeatRemoval?.acknowledged === true);
+    if (pending.details.cleanupBlocked === true && !manuallyRemovedBlockedSeat) {
       throw new ClaudeTransmogrifyError(
         'CLEANUP_BLOCKED',
         'Claude managed worktree has a permanent cleanup block and requires manual review',
         { providerRetired: true, laneId: lane.laneId },
       );
+    }
+    if (blockedSeatAbsent && pending.details.manualSeatRemoval?.acknowledged !== true) {
+      pending = updatePending(options.repoRoot, lane.laneId, pending, {
+        state: pending.state,
+        details: {
+          ...pending.details,
+          manualSeatRemoval: {
+            acknowledged: true,
+            observedAbsentAt: new Date().toISOString(),
+          },
+        },
+      }, env);
     }
     let runtime = null;
     let privateApi = null;
@@ -1267,7 +1546,7 @@ async function retire(options, env = process.env) {
         state: 'worktreeRemoved', details: { ...pending.details, cleanup },
       }, env);
     }
-    if (fs.existsSync(lane.seat.path)) {
+    if (pathEntryExists(lane.seat.path)) {
       throw new ClaudeTransmogrifyError(
         'CLEANUP_BLOCKED', 'Claude local record removal requires the managed worktree to be absent',
         { providerRetired: true, laneId: lane.laneId },
@@ -1386,7 +1665,8 @@ async function retire(options, env = process.env) {
   }, env);
 }
 
-async function reconcilePendingSpawn(options, env, surface, runtime, lane, operation) {
+async function reconcilePendingSpawn(options, env, surface, runtime, lane, operation,
+  deadline = null) {
   assertSpawnSelection(lane, operation);
   if (!lane.seat && lane.seatIntent) {
     const seat = materializeManagedSeat(options.repoRoot, lane.seatIntent);
@@ -1400,14 +1680,21 @@ async function reconcilePendingSpawn(options, env, surface, runtime, lane, opera
     return { lane, outcome: 'spawnNotDelivered' };
   }
   if (lane.providerId) {
-    const agent = await exactAgent(surface, runtime, lane);
+    const agent = await exactAgent(surface, runtime, lane, deadline === null ? {} : {
+      commandTimeoutMs: remainingCommandMs(deadline, 100),
+    });
     if (agent.pid === null) lane = observedStop(options.repoRoot, lane, operation, env);
     else {
-      const execution = surface.executionReceipt(runtime, lane, agent);
+      const execution = surface.executionReceipt(runtime, lane, agent, deadline === null ? {} : {
+        timeoutMs: remainingCommandMs(deadline),
+      });
       ensureLatestEpoch(lane, execution);
       lane = updateRunningLane(options.repoRoot, lane, agent, env);
     }
-    const presented = await presentLane(options, env, surface, runtime, lane);
+    const presented = await presentLane(deadline === null ? options : {
+      ...options,
+      commandTimeoutMs: remainingCommandMs(deadline),
+    }, env, surface, runtime, lane);
     removeDurableSpawnReceipts(options.repoRoot, lane, env);
     completePending(options.repoRoot, lane.laneId, operation, {
       state: 'complete', details: { ...operation.details, presentation: presented.presentation.state },
@@ -1417,8 +1704,8 @@ async function reconcilePendingSpawn(options, env, surface, runtime, lane, opera
   const receipt = readDurableSpawnReceipt(options.repoRoot, lane, env);
   if (!receipt) {
     if (['planned', 'seatReady'].includes(operation.state)) {
-      completePending(options.repoRoot, lane.laneId, operation, { state: 'notDelivered' }, env);
       lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
+      completePending(options.repoRoot, lane.laneId, operation, { state: 'notDelivered' }, env);
       return { lane, outcome: 'spawnNotDelivered' };
     }
     return { lane, outcome: 'spawnUnknown' };
@@ -1431,20 +1718,23 @@ async function reconcilePendingSpawn(options, env, surface, runtime, lane, opera
     { state: operation.state, details: { ...operation.details, dispatchFinishedAt: receipt.modifiedAt } }, env,
   );
   const finalized = await finalizeSpawn(
-    options, env, surface, runtime, lane, normalized, jobId, receipt.stdout,
+    options, env, surface, runtime, lane, normalized, jobId, receipt.stdout, deadline,
   );
   return {
     lane: finalized.lane, outcome: 'spawnBoundFromDurableReceipt',
     presentation: finalized.presentation.state,
   };
 }
-async function reconcilePendingStop(options, env, surface, runtime, lane, operation) {
-  const result = await stopOwnedLane(options, env, surface, runtime, lane, operation, false);
+async function reconcilePendingStop(options, env, surface, runtime, lane, operation, deadline = null) {
+  const result = await stopOwnedLane(deadline === null ? options : {
+    ...options,
+    commandTimeoutMs: remainingCommandMs(deadline, 100),
+  }, env, surface, runtime, lane, operation, false);
   if (result.pending) return { lane, outcome: 'stopPending' };
   completePending(options.repoRoot, lane.laneId, operation, { state: 'complete' }, env);
   return { lane: result.lane, outcome: 'stoppedObserved' };
 }
-async function bindRuntimeTransition(options, env, surface, runtime, initial) {
+async function bindRuntimeTransition(options, env, surface, runtime, initial, deadline = null) {
   let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
   const previousRuntime = effectiveRuntime(lane);
   if (!sameRuntimeIdentity(previousRuntime, publicRuntime(runtime))) {
@@ -1454,7 +1744,9 @@ async function bindRuntimeTransition(options, env, surface, runtime, initial) {
     );
   }
   assertSeat(options, lane);
-  const agents = await surface.agents(runtime);
+  const agents = await surface.agents(runtime, deadline === null ? {} : {
+    timeoutMs: remainingCommandMs(deadline, 100),
+  });
   const agent = surface.exactOwnedAgent(agents, lane.providerIdentity, {
     name: lane.displayName, cwd: lane.seat.path,
   });
@@ -1467,7 +1759,9 @@ async function bindRuntimeTransition(options, env, surface, runtime, initial) {
   const discovery = surface.discoverExecution(runtime, {
     sessionId: lane.providerId, jobId: lane.providerIdentity.jobId,
     name: lane.displayName, cwd: lane.seat.path,
-  }, agent);
+  }, agent, deadline === null ? {} : {
+    timeoutMs: remainingCommandMs(deadline),
+  });
   if (discovery.bridgeId !== lane.providerIdentity.bridgeId) {
     throw new ClaudeTransmogrifyError('OWNERSHIP_MISMATCH', 'Claude runtime transition found a different bridge id');
   }
@@ -1484,10 +1778,12 @@ async function bindRuntimeTransition(options, env, surface, runtime, initial) {
   lane = updateRunningLane(options.repoRoot, lane, agent, env, { lastVerifiedAt: observedAt });
   return lane;
 }
-async function reconcileBoundLane(options, env, surface, runtime, initial) {
+async function reconcileBoundLane(options, env, surface, runtime, initial, deadline = null) {
   let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
   assertSeat(options, lane);
-  const agents = await surface.agents(runtime);
+  const agents = await surface.agents(runtime, deadline === null ? {} : {
+    timeoutMs: remainingCommandMs(deadline, 100),
+  });
   const agent = surface.exactOwnedAgent(agents, lane.providerIdentity, {
     name: lane.displayName, cwd: lane.seat.path,
   });
@@ -1498,7 +1794,9 @@ async function reconcileBoundLane(options, env, surface, runtime, initial) {
   const discovery = surface.discoverExecution(runtime, {
     sessionId: lane.providerId, jobId: lane.providerIdentity.jobId,
     name: lane.displayName, cwd: lane.seat.path,
-  }, agent);
+  }, agent, deadline === null ? {} : {
+    timeoutMs: remainingCommandMs(deadline),
+  });
   if (discovery.bridgeId !== lane.providerIdentity.bridgeId) {
     throw new ClaudeTransmogrifyError('OWNERSHIP_MISMATCH', 'Claude reconciliation found a different bridge id');
   }
@@ -1511,7 +1809,10 @@ async function reconcileBoundLane(options, env, surface, runtime, initial) {
     lastVerifiedAt: new Date().toISOString(),
   });
   if (lane.visibility?.state !== 'deepLinkDispatched') {
-    const presented = await presentLane(options, env, surface, runtime, lane);
+    const presented = await presentLane(deadline === null ? options : {
+      ...options,
+      commandTimeoutMs: remainingCommandMs(deadline),
+    }, env, surface, runtime, lane);
     lane = presented.lane;
     repaired.push('presentation');
   }
@@ -1545,22 +1846,66 @@ async function reconcile(options, env = process.env) {
   if (lanes.length === 0) {
     return { version: 1, ok: true, operation: 'reconcile', adapter: BACKEND, results: [] };
   }
+  const deadline = commandDeadline(options);
   const surface = surfaceFor(options);
+  const operations = new Map(listOperations(options.repoRoot, env)
+    .map((operation) => [operation.operationId, operation]));
   let runtime = null;
   const results = [];
   for (const initial of lanes) {
     try {
-      const settledTerminal = await withLaneLease(options.repoRoot, initial.laneId, async () =>
-        settleTerminalLaneOperationPointer(options.repoRoot, initial.laneId, env), env);
-      if (settledTerminal) {
-        const lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
-        results.push({
+      const terminalRepair = await withLaneLease(options.repoRoot, initial.laneId, async () => {
+        let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
+        const pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+        const recorded = pending || operations.get(lane.operationId);
+        const repaired = [];
+        if (pending?.type === 'spawn' && ['planned', 'seatReady'].includes(pending.state) &&
+            ['planned', 'failed'].includes(lane.state) && !lane.providerId) {
+          // No provider request precedes the later dispatching state. Make the
+          // lane terminal before clearing the operation pointer so either
+          // crash boundary remains locally repairable without spawn replay.
+          if (lane.state === 'planned') {
+            lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
+            repaired.push('unstartedSpawnState');
+          }
+          completePending(options.repoRoot, lane.laneId, pending, {
+            state: 'notDelivered',
+            details: {
+              ...pending.details,
+              notDeliveredObservedAt: new Date().toISOString(),
+            },
+          }, env);
+          repaired.push('unstartedSpawnOperation');
+        }
+        if (recorded?.type === 'spawn' && ['failed', 'notDelivered'].includes(recorded.state) &&
+            lane.state === 'planned' && !lane.providerId) {
+          lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
+          repaired.push('failedSpawnState');
+        }
+        const settled = settleTerminalLaneOperationPointer(
+          options.repoRoot,
+          lane.laneId,
+          env,
+        );
+        if (settled) repaired.push('terminalOperationPointer');
+        const failedSpawnTerminal = recorded?.type === 'spawn' &&
+          ['failed', 'notDelivered'].includes(recorded.state) &&
+          lane.state === 'failed' && !lane.providerId;
+        if (!settled && repaired.length === 0 && !failedSpawnTerminal) return null;
+        lane = requireOwnedLane(options.repoRoot, lane.laneId, env);
+        return {
           laneId: lane.laneId,
           providerId: lane.providerId || null,
           state: lane.state,
-          outcome: 'terminalOperationPointerCleared',
-          delivery: settledTerminal.state === 'complete' ? 'confirmed' : 'notDelivered',
-        });
+          outcome: repaired.some((entry) => entry.startsWith('unstartedSpawn'))
+            ? 'spawnNotDelivered' : 'terminalOperationPointerCleared',
+          delivery: (settled?.state || recorded?.state) === 'complete'
+            ? 'confirmed' : 'notDelivered',
+          repaired,
+        };
+      }, env);
+      if (terminalRepair) {
+        results.push(terminalRepair);
         continue;
       }
       const outerPending = pendingOperationForLane(options.repoRoot, initial.laneId, env);
@@ -1581,7 +1926,14 @@ async function reconcile(options, env = process.env) {
         }
         continue;
       }
-      if (!runtime) runtime = preflight(options, env, surface);
+      if (!runtime) {
+        runtime = preflight({
+          ...options,
+          ...(deadline === null ? {} : {
+            commandTimeoutMs: remainingCommandMs(deadline, 100),
+          }),
+        }, env, surface);
+      }
       const expectedRuntime = effectiveRuntime(initial);
       const needsRuntimeTransition = !sameRuntime(expectedRuntime, runtime);
       if (needsRuntimeTransition && !sameRuntimeIdentity(expectedRuntime, publicRuntime(runtime))) {
@@ -1607,12 +1959,14 @@ async function reconcile(options, env = process.env) {
       const result = await withLaneLease(options.repoRoot, initial.laneId, async () => {
         let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
         if (!sameRuntime(effectiveRuntime(lane), runtime)) {
-          lane = await bindRuntimeTransition(options, env, surface, runtime, lane);
+          lane = await bindRuntimeTransition(options, env, surface, runtime, lane, deadline);
           runtimeRebound = true;
         }
         const operation = pendingOperationForLane(options.repoRoot, lane.laneId, env);
         if (operation?.type === 'spawn') {
-          const repaired = await reconcilePendingSpawn(options, env, surface, runtime, lane, operation);
+          const repaired = await reconcilePendingSpawn(
+            options, env, surface, runtime, lane, operation, deadline,
+          );
           return {
             laneId: repaired.lane.laneId, providerId: repaired.lane.providerId,
             state: repaired.lane.state, outcome: repaired.outcome,
@@ -1620,7 +1974,9 @@ async function reconcile(options, env = process.env) {
           };
         }
         if (operation?.type === 'steer') {
-          const observed = await reconcileSteer(options, env, surface, runtime, lane, operation);
+          const observed = await reconcileSteer(
+            options, env, surface, runtime, lane, operation, deadline,
+          );
           return {
             laneId: lane.laneId, providerId: lane.providerId,
             state: observed.lane.state,
@@ -1628,14 +1984,18 @@ async function reconcile(options, env = process.env) {
           };
         }
         if (operation?.type === 'stop') {
-          const stopped = await reconcilePendingStop(options, env, surface, runtime, lane, operation);
+          const stopped = await reconcilePendingStop(
+            options, env, surface, runtime, lane, operation, deadline,
+          );
           return {
             laneId: stopped.lane.laneId, providerId: stopped.lane.providerId,
             state: stopped.lane.state, outcome: stopped.outcome,
           };
         }
         if (operation?.type === 'recover') {
-          const recovered = await observeRecovery(options, env, surface, runtime, lane, operation);
+          const recovered = await observeRecovery(
+            options, env, surface, runtime, lane, operation, deadline,
+          );
           return {
             laneId: lane.laneId, providerId: lane.providerId,
             state: recovered ? recovered.lane.state : lane.state,
@@ -1651,7 +2011,7 @@ async function reconcile(options, env = process.env) {
             state: lane.state, outcome: 'alreadyRetired',
           };
         }
-        return reconcileBoundLane(options, env, surface, runtime, lane);
+        return reconcileBoundLane(options, env, surface, runtime, lane, deadline);
       }, env);
       results.push(runtimeRebound ? {
         ...result,
@@ -1688,5 +2048,5 @@ async function reconcile(options, env = process.env) {
 
 module.exports = {
   BACKEND, ClaudeTransmogrifyError, capabilities, reconcile, recover, retire,
-  spawn: spawnLane, status, steer, stop,
+  executionCapabilities, spawn: spawnLane, status, steer, stop,
 };

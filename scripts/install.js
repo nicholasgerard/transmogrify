@@ -18,6 +18,7 @@ unrelated occupied targets are refused.`;
 const REQUIRED_FILES = [
   'SKILL.md',
   'SECURITY.md',
+  'CODE_OF_CONDUCT.md',
   'CHANGELOG.md',
   'LICENSE',
   'package.json',

@@ -6,10 +6,9 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFile, execFileSync, spawn } = require('node:child_process');
 const { processBirth } = require('./state');
-const { laneNameError } = require('./validation');
+const { ownedLaneNameError } = require('./validation');
 
 const VERIFIED_CLI_BUILDS = new Map([
-  ['2.1.257', '64590d7d9d9c189d33fb3dfa58c5408eaf2a10fe556bd84155d95efaab46b60e'],
   ['2.1.258', 'b63136194160791c27cfa7b0403060d85eb0752991625fde8c09f9acacb17c78'],
 ]);
 const PINNED_CLI_VERSION = '2.1.258';
@@ -69,7 +68,7 @@ function canonicalCseId(bridgeId) {
 }
 
 function assertSafeLaneValue(value, label = 'Claude lane name') {
-  const problem = laneNameError(value, label);
+  const problem = ownedLaneNameError(value, label);
   if (problem) {
     throw new ClaudeSurfaceError(
       'USAGE_ERROR',
@@ -89,6 +88,28 @@ function assertSafeModelSelector(value) {
   return value;
 }
 
+function appendExecutionArgs(args, options = {}) {
+  if (options.model !== undefined && options.model !== null) {
+    args.push('--model', assertSafeModelSelector(options.model));
+  }
+  if (options.effort !== undefined && options.effort !== null) {
+    if (!['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'].includes(options.effort)) {
+      throw new ClaudeSurfaceError(
+        'USAGE_ERROR',
+        'Claude effort is not supported as a model level or execution setting',
+      );
+    }
+    args.push('--effort', options.effort);
+  }
+  if (options.fastMode !== undefined) {
+    if (typeof options.fastMode !== 'boolean') {
+      throw new ClaudeSurfaceError('USAGE_ERROR', 'Claude fast mode must be boolean');
+    }
+    args.push('--settings', JSON.stringify({ fastMode: options.fastMode }));
+  }
+  return args;
+}
+
 function claudeSpawnArgs(name, prompt, options = {}) {
   assertSafeLaneValue(name);
   if (typeof prompt !== 'string' || !prompt || prompt.startsWith('-') ||
@@ -98,12 +119,19 @@ function claudeSpawnArgs(name, prompt, options = {}) {
       `Claude spawn prompt must be non-empty, cannot begin with -, and cannot exceed ${MAX_SPAWN_BYTES} bytes`,
     );
   }
-  const args = ['--bg', '--name', name, '--remote-control', name];
-  if (options.model !== undefined) {
-    args.push('--model', assertSafeModelSelector(options.model));
-  }
+  const args = appendExecutionArgs(
+    ['--bg', '--name', name, '--remote-control', name],
+    options,
+  );
   args.push(prompt);
   return args;
+}
+
+function claudeResumeArgs(sessionId, options = {}) {
+  if (typeof sessionId !== 'string' || !UUID_PATTERN.test(sessionId)) {
+    throw new ClaudeSurfaceError('USAGE_ERROR', 'Claude resume session id must be a UUID');
+  }
+  return appendExecutionArgs(['--resume', sessionId.toLowerCase(), '--bg'], options);
 }
 
 function sha256(value) {
@@ -320,8 +348,27 @@ function createClaudeSurface(dependencies = {}) {
     platform: dependencies.platform || process.platform,
     processBirth: dependencies.processBirth || processBirth,
     sha256File: dependencies.sha256File || sha256File,
+    socketReceipt: dependencies.socketReceipt || null,
     spawn: dependencies.spawn || spawn,
   };
+
+  function assertRuntimeCliIdentity(runtime) {
+    if (!runtime || typeof runtime.cliPath !== 'string' || !path.isAbsolute(runtime.cliPath) ||
+        typeof runtime.cliSha256 !== 'string') {
+      throw new ClaudeSurfaceError('RUNTIME_MISMATCH', 'Claude runtime CLI identity is incomplete');
+    }
+    let resolved;
+    try { resolved = fs.realpathSync(runtime.cliPath); } catch {
+      throw new ClaudeSurfaceError('RUNTIME_MISMATCH', 'Claude runtime CLI is no longer available');
+    }
+    if (resolved !== runtime.cliPath) {
+      throw new ClaudeSurfaceError('RUNTIME_MISMATCH', 'Claude runtime CLI path changed after preflight');
+    }
+    const stat = assertSafeRegularFile(resolved, 'Claude CLI');
+    if ((stat.mode & 0o111) === 0 || deps.sha256File(resolved) !== runtime.cliSha256) {
+      throw new ClaudeSurfaceError('RUNTIME_MISMATCH', 'Claude runtime CLI changed after preflight');
+    }
+  }
 
   function preflight(options = {}, env = process.env) {
     if (deps.platform !== 'darwin' || deps.arch !== 'arm64') {
@@ -334,6 +381,12 @@ function createClaudeSurface(dependencies = {}) {
       throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'custom CLAUDE_CONFIG_DIR is outside the measured adapter');
     }
     const cleanEnv = sanitizedClaudeEnv(env);
+    const timeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000) {
+      throw new ClaudeSurfaceError('USAGE_ERROR', 'invalid Claude preflight timeout');
+    }
+    const deadline = Date.now() + timeoutMs;
+    const remainingMs = () => Math.max(1, deadline - Date.now());
     const cliPath = resolveCliPath(options, env, deps);
     const cliSha256 = deps.sha256File(cliPath);
     const version = parseVersion(deps.execFileSync(cliPath, ['--version'], {
@@ -341,7 +394,7 @@ function createClaudeSurface(dependencies = {}) {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanEnv,
       maxBuffer: MAX_CAPTURE_BYTES,
-      timeout: DEFAULT_COMMAND_TIMEOUT_MS,
+      timeout: remainingMs(),
     }));
     if (!isVerifiedCliBuild(version, cliSha256)) {
       throw new ClaudeSurfaceError(
@@ -354,8 +407,11 @@ function createClaudeSurface(dependencies = {}) {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanEnv,
       maxBuffer: MAX_CAPTURE_BYTES,
-      timeout: DEFAULT_COMMAND_TIMEOUT_MS,
+      timeout: remainingMs(),
     }));
+    if (deps.sha256File(cliPath) !== cliSha256) {
+      throw new ClaudeSurfaceError('RUNTIME_MISMATCH', 'Claude CLI changed during preflight');
+    }
     const requestedProjects = path.resolve(auth.projectsDirectory);
     const projectsDirectory = fs.realpathSync(requestedProjects);
     const requestedConfig = path.dirname(requestedProjects);
@@ -388,14 +444,21 @@ function createClaudeSurface(dependencies = {}) {
     };
   }
 
-  async function agents(runtime) {
+  async function agents(runtime, options = {}) {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000) {
+      throw new ClaudeSurfaceError('USAGE_ERROR', 'invalid Claude agent-list timeout');
+    }
+    assertRuntimeCliIdentity(runtime);
     const result = await deps.execFile(runtime.cliPath, ['agents', '--json', '--all'], {
       env: runtime.cleanEnv,
+      timeout: timeoutMs,
     });
     return parseAgents(result.stdout);
   }
 
   async function run(runtime, args, options = {}) {
+    assertRuntimeCliIdentity(runtime);
     return deps.execFile(runtime.cliPath, args, {
       cwd: options.cwd,
       env: runtime.cleanEnv,
@@ -417,6 +480,7 @@ function createClaudeSurface(dependencies = {}) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000) {
       throw new ClaudeSurfaceError('USAGE_ERROR', 'invalid Claude follow-up timeout');
     }
+    assertRuntimeCliIdentity(runtime);
     return new Promise((resolve, reject) => {
       const child = deps.spawn(runtime.cliPath, [
         '-p', '--cloud', exactBridgeId, '--output-format', 'json',
@@ -513,6 +577,7 @@ function createClaudeSurface(dependencies = {}) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000) {
       throw new ClaudeSurfaceError('USAGE_ERROR', 'invalid Claude launch timeout');
     }
+    assertRuntimeCliIdentity(runtime);
     const stdoutFd = fs.openSync(stdoutPath, 'wx', 0o600);
     let stderrFd;
     let child;
@@ -590,13 +655,21 @@ function createClaudeSurface(dependencies = {}) {
     return metadata;
   }
 
-  function verifyWorkerExecutable(runtime, pid) {
+  function remainingReceiptMs(deadline) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new ClaudeSurfaceError('TIMEOUT', 'Claude worker verification exceeded its deadline');
+    }
+    return Math.max(1, remaining);
+  }
+
+  function verifyWorkerExecutable(runtime, pid, deadline) {
     const output = deps.execFileSync('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: runtime.cleanEnv,
       maxBuffer: MAX_CAPTURE_BYTES,
-      timeout: DEFAULT_COMMAND_TIMEOUT_MS,
+      timeout: remainingReceiptMs(deadline),
     });
     const matches = [];
     for (const line of output.split('\n')) {
@@ -639,7 +712,7 @@ function createClaudeSurface(dependencies = {}) {
     };
   }
 
-  function executionReceipt(runtime, lane, agent) {
+  function executionReceipt(runtime, lane, agent, options = {}) {
     if (!agent.pid) throw new ClaudeSurfaceError('INVALID_STATE', 'Claude session has no running worker');
     const metadata = readWorkerMetadata(runtime, agent.pid);
     const identity = lane.providerIdentity;
@@ -649,10 +722,10 @@ function createClaudeSurface(dependencies = {}) {
         fs.realpathSync(metadata.cwd) !== fs.realpathSync(lane.seat.path)) {
       throw new ClaudeSurfaceError('OWNERSHIP_MISMATCH', 'Claude worker metadata does not match the owned lane');
     }
-    return finishExecutionReceipt(runtime, agent, metadata);
+    return finishExecutionReceipt(runtime, agent, metadata, options);
   }
 
-  function discoverExecution(runtime, expected, agent) {
+  function discoverExecution(runtime, expected, agent, options = {}) {
     if (!agent.pid) throw new ClaudeSurfaceError('INVALID_STATE', 'Claude session has no running worker');
     const metadata = readWorkerMetadata(runtime, agent.pid);
     if (metadata.sessionId !== expected.sessionId ||
@@ -661,15 +734,22 @@ function createClaudeSurface(dependencies = {}) {
         fs.realpathSync(metadata.cwd) !== fs.realpathSync(expected.cwd)) {
       throw new ClaudeSurfaceError('OWNERSHIP_MISMATCH', 'Claude worker creation metadata does not match spawn intent');
     }
-    return finishExecutionReceipt(runtime, agent, metadata);
+    return finishExecutionReceipt(runtime, agent, metadata, options);
   }
 
-  function finishExecutionReceipt(runtime, agent, metadata) {
-    const birth = deps.processBirth(agent.pid);
+  function finishExecutionReceipt(runtime, agent, metadata, options = {}) {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
+      throw new ClaudeSurfaceError('USAGE_ERROR', 'invalid Claude worker verification timeout');
+    }
+    const deadline = Date.now() + timeoutMs;
+    const birth = deps.processBirth(agent.pid, { timeoutMs: remainingReceiptMs(deadline) });
     if (!birth) throw new ClaudeSurfaceError('OWNERSHIP_MISMATCH', 'cannot establish Claude worker process identity');
-    const worker = verifyWorkerExecutable(runtime, agent.pid);
-    const socket = socketReceipt(metadata.messagingSocketPath);
-    if (deps.processBirth(agent.pid) !== birth) {
+    const worker = verifyWorkerExecutable(runtime, agent.pid, deadline);
+    const socket = deps.socketReceipt
+      ? deps.socketReceipt(metadata.messagingSocketPath)
+      : socketReceipt(metadata.messagingSocketPath);
+    if (deps.processBirth(agent.pid, { timeoutMs: remainingReceiptMs(deadline) }) !== birth) {
       throw new ClaudeSurfaceError('OWNERSHIP_MISMATCH', 'Claude worker identity changed during verification');
     }
     return {
@@ -913,9 +993,12 @@ function createClaudeSurface(dependencies = {}) {
     }
   }
 
-  async function dispatchDeepLink(runtime, bridgeId) {
+  async function dispatchDeepLink(runtime, bridgeId, options = {}) {
     canonicalCseId(bridgeId);
-    await deps.execFile(deps.openCommand, [`claude://code/${bridgeId}`], { env: runtime.cleanEnv });
+    await deps.execFile(deps.openCommand, [`claude://code/${bridgeId}`], {
+      env: runtime.cleanEnv,
+      timeout: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+    });
     return { state: 'deepLinkDispatched' };
   }
 
@@ -950,6 +1033,7 @@ module.exports = {
   assertSafeModelSelector,
   assertUniqueShortJobId,
   canonicalCseId,
+  claudeResumeArgs,
   claudeSpawnArgs,
   createClaudeSurface,
   exactOwnedAgent,

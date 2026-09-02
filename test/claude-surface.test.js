@@ -14,6 +14,7 @@ const {
   assertSafeModelSelector,
   assertUniqueShortJobId,
   canonicalCseId,
+  claudeResumeArgs,
   claudeSpawnArgs,
   createClaudeSurface,
   exactOwnedAgent,
@@ -118,21 +119,43 @@ test('Claude bridge and lane helpers reject hostile values and canonicalize sess
     assert.equal(BRIDGE_PATTERN.test(invalid), false, invalid);
     assert.throws(() => canonicalCseId(invalid), /invalid Claude bridge id/);
   }
-  assert.equal(assertSafeLaneValue('[maint] safe'), '[maint] safe');
-  assert.deepEqual(claudeSpawnArgs('safe', 'do work'), [
-    '--bg', '--name', 'safe', '--remote-control', 'safe', 'do work',
+  assert.equal(assertSafeLaneValue('::: safe'), '::: safe');
+  assert.deepEqual(claudeSpawnArgs('::: safe', 'do work'), [
+    '--bg', '--name', '::: safe', '--remote-control', '::: safe', 'do work',
   ]);
-  assert.deepEqual(claudeSpawnArgs('safe', 'do work', { model: 'claude-opus-5' }), [
-    '--bg', '--name', 'safe', '--remote-control', 'safe',
+  assert.deepEqual(claudeSpawnArgs('::: safe', 'do work', { model: 'claude-opus-5' }), [
+    '--bg', '--name', '::: safe', '--remote-control', '::: safe',
     '--model', 'claude-opus-5', 'do work',
   ]);
+  assert.deepEqual(claudeSpawnArgs('::: safe', 'do work', {
+    model: 'claude-opus-5', effort: 'max', fastMode: true,
+  }), [
+    '--bg', '--name', '::: safe', '--remote-control', '::: safe',
+    '--model', 'claude-opus-5', '--effort', 'max',
+    '--settings', '{"fastMode":true}', 'do work',
+  ]);
+  assert.deepEqual(claudeResumeArgs(SESSION_ID, {
+    model: 'claude-sonnet-5', effort: 'medium', fastMode: false,
+  }), [
+    '--resume', SESSION_ID, '--bg', '--model', 'claude-sonnet-5',
+    '--effort', 'medium', '--settings', '{"fastMode":false}',
+  ]);
+  assert.deepEqual(claudeResumeArgs(SESSION_ID, {
+    model: 'claude-opus-5', effort: 'ultracode', fastMode: false,
+  }), [
+    '--resume', SESSION_ID, '--bg', '--model', 'claude-opus-5',
+    '--effort', 'ultracode', '--settings', '{"fastMode":false}',
+  ]);
+  assert.throws(() => claudeSpawnArgs('::: safe', 'do work', { effort: 'ultra' }),
+    /effort is not supported/);
   for (const invalid of ['', '--opus', 'opus 5', 'opus[1m]', `x${'y'.repeat(128)}`]) {
     assert.throws(() => assertSafeModelSelector(invalid), /model must be/);
   }
   for (const hostile of ['--option', 'line\nbreak', 'nul\0byte', '']) {
-    assert.throws(() => assertSafeLaneValue(hostile), /single-line text/);
+    assert.throws(() => assertSafeLaneValue(hostile), /single-line text|must begin with/);
   }
-  assert.throws(() => claudeSpawnArgs('safe', '--danger'), /cannot begin with -/);
+  assert.throws(() => claudeSpawnArgs('safe', 'do work'), /must begin with/);
+  assert.throws(() => claudeSpawnArgs('::: safe', '--danger'), /cannot begin with -/);
 });
 
 test('Claude auth parsing and child environment exclude ambient Claude credentials and session state', () => {
@@ -222,6 +245,66 @@ test('Claude preflight pins platform, CLI hash/version, default config, and acco
   );
 });
 
+test('Claude worker verification shares one shrinking subprocess deadline', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-deadline-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cli = path.join(root, 'claude');
+  const configDir = path.join(root, 'config');
+  const sessionsDir = path.join(configDir, 'sessions');
+  const socketPath = `/tmp/cc-socks/43210.sock`;
+  fs.writeFileSync(cli, '#!/bin/sh\n', { mode: 0o700 });
+  fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+  const pid = 43210;
+  fs.writeFileSync(path.join(sessionsDir, `${pid}.json`), JSON.stringify({
+    pid,
+    sessionId: SESSION_ID,
+    jobId: '11111111',
+    bridgeSessionId: 'session_testBridge',
+    name: '::: deadline lane',
+    cwd: root,
+    messagingSocketPath: socketPath,
+    version: PINNED_CLI_VERSION,
+  }), { mode: 0o600 });
+  const subprocessTimeouts = [];
+  const surface = createClaudeSurface({
+    sha256File: () => PINNED_CLI_SHA256,
+    processBirth(_pid, options) {
+      subprocessTimeouts.push(options.timeoutMs);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      return 'birth';
+    },
+    execFileSync(executable, _args, options) {
+      assert.equal(executable, '/usr/sbin/lsof');
+      subprocessTimeouts.push(options.timeout);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      return `n${cli}\n`;
+    },
+    socketReceipt(requested) {
+      assert.equal(requested, socketPath);
+      return { path: requested, device: 1, inode: 2, uid: 501, mode: 0o600 };
+    },
+  });
+  const receipt = surface.executionReceipt({
+    configDir,
+    cliSha256: PINNED_CLI_SHA256,
+    cliVersion: PINNED_CLI_VERSION,
+    cleanEnv: { PATH: '/usr/bin:/bin' },
+  }, {
+    displayName: '::: deadline lane',
+    seat: { path: root },
+    providerIdentity: {
+      sessionId: SESSION_ID,
+      jobId: '11111111',
+      bridgeId: 'session_testBridge',
+    },
+  }, { pid }, { timeoutMs: 100 });
+  assert.equal(receipt.processBirth, 'birth');
+  assert.equal(subprocessTimeouts.length, 3);
+  assert.ok(subprocessTimeouts[0] <= 100);
+  assert.ok(subprocessTimeouts[1] < subprocessTimeouts[0]);
+  assert.ok(subprocessTimeouts[2] < subprocessTimeouts[1]);
+});
+
 test('Claude public follow-up uses stdin and validates the exact machine-readable bridge acknowledgment', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-followup-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -242,7 +325,8 @@ test('Claude public follow-up uses stdin and validates the exact machine-readabl
   ].join('\n'), { mode: 0o700 });
   const surface = createClaudeSurface();
   const receipt = await surface.sendRemoteFollowup({
-    cliPath: cli,
+    cliPath: fs.realpathSync(cli),
+    cliSha256: sha256(fs.readFileSync(cli)),
     cleanEnv: { PATH: process.env.PATH || '/usr/bin:/bin' },
   }, 'session_testBridge', 'directed follow-up', { cwd: root, timeoutMs: 5000 });
   assert.equal(receipt.queued, true);
@@ -269,7 +353,8 @@ test('Claude public follow-up fails closed for non-exact acknowledgments and pro
     const cli = path.join(root, name);
     fs.writeFileSync(cli, `#!${process.execPath}\n'use strict';\n${body}\n`, { mode: 0o700 });
     await assert.rejects(() => surface.sendRemoteFollowup({
-      cliPath: cli,
+      cliPath: fs.realpathSync(cli),
+      cliSha256: sha256(fs.readFileSync(cli)),
       cleanEnv: { PATH: process.env.PATH || '/usr/bin:/bin' },
     }, 'session_testBridge', 'directed follow-up', { cwd: root, timeoutMs: 5000 }),
     (error) => error.code === 'DELIVERY_UNCERTAIN', name);
@@ -278,16 +363,36 @@ test('Claude public follow-up fails closed for non-exact acknowledgments and pro
   const hanging = path.join(root, 'hanging');
   fs.writeFileSync(hanging, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o700 });
   await assert.rejects(() => surface.sendRemoteFollowup({
-    cliPath: hanging,
+    cliPath: fs.realpathSync(hanging),
+    cliSha256: sha256(fs.readFileSync(hanging)),
     cleanEnv: { PATH: process.env.PATH || '/usr/bin:/bin' },
   }, 'session_testBridge', 'directed follow-up', { cwd: root, timeoutMs: 150 }),
   (error) => error.code === 'DELIVERY_UNCERTAIN');
 
   await assert.rejects(() => surface.sendRemoteFollowup({
     cliPath: path.join(root, 'missing'),
+    cliSha256: '0'.repeat(64),
     cleanEnv: { PATH: process.env.PATH || '/usr/bin:/bin' },
   }, 'session_testBridge', 'directed follow-up', { cwd: root, timeoutMs: 5000 }),
-  (error) => error.code === 'NOT_DELIVERED');
+  (error) => error.code === 'RUNTIME_MISMATCH');
+});
+
+test('Claude public mutation rechecks the exact CLI content immediately before spawn', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-cli-race-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cli = path.join(root, 'claude');
+  fs.writeFileSync(cli, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const cliSha256 = sha256(fs.readFileSync(cli));
+  fs.writeFileSync(cli, '#!/bin/sh\nexit 7\n', { mode: 0o700 });
+  let spawned = false;
+  const surface = createClaudeSurface({ spawn() { spawned = true; } });
+  await assert.rejects(() => surface.sendRemoteFollowup({
+    cliPath: fs.realpathSync(cli),
+    cliSha256,
+    cleanEnv: { PATH: process.env.PATH || '/usr/bin:/bin' },
+  }, 'session_testBridge', 'directed follow-up', { cwd: root, timeoutMs: 5000 }),
+  (error) => error.code === 'RUNTIME_MISMATCH');
+  assert.equal(spawned, false);
 });
 
 test('Claude public follow-up rejects invalid text before starting a process', async () => {

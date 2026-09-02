@@ -427,13 +427,23 @@ function verifyHarvestedSeatForCleanup(repoRoot, recorded, harvestReceipt) {
   return seat;
 }
 
+function pathEntryExists(targetPath) {
+  try {
+    fs.lstatSync(targetPath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 function removeManagedSeat(repoRoot, laneId, harvestReceipt, env = process.env) {
   return mutateLane(repoRoot, laneId, (lane) => {
     if (!['archivedVerified', 'cleanupEligible'].includes(lane.state)) {
       throw unsafeCleanup('managed worktree cleanup requires verified provider retirement');
     }
     if (lane.seat?.managed !== true) throw unsafeCleanup('lane seat is not operator-managed');
-    if (!fs.existsSync(lane.seat.path)) {
+    if (!pathEntryExists(lane.seat.path)) {
       if (!harvestReceipt || harvestReceipt.version !== 1 ||
           harvestReceipt.seat?.branchRef !== lane.seat.branchRef ||
           !/^[0-9a-f]{40,64}$/.test(harvestReceipt.seat?.head || '')) {
@@ -459,7 +469,7 @@ function removeManagedSeat(repoRoot, laneId, harvestReceipt, env = process.env) 
     const seat = verifyHarvestedSeatForCleanup(repoRoot, lane.seat, harvestReceipt);
     const project = resolveProject(repoRoot);
     git(project.root, ['worktree', 'remove', '--', seat.path]);
-    if (fs.existsSync(seat.path)) {
+    if (pathEntryExists(seat.path)) {
       throw unsafeCleanup(`Git reported success but managed worktree still exists: ${seat.path}`);
     }
     const remaining = parseWorktreeList(git(project.root, ['worktree', 'list', '--porcelain', '-z']));
@@ -487,6 +497,7 @@ module.exports = {
   createManagedSeat,
   isPermanentCleanupError,
   materializeManagedSeat,
+  pathEntryExists,
   parseWorktreeList,
   planManagedSeat,
   requireIgnoredManagedRoot,

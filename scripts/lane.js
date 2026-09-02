@@ -6,15 +6,39 @@ const path = require('node:path');
 const { parseArgs, TextDecoder } = require('node:util');
 const codex = require('./lib/codex-adapter');
 const claude = require('./lib/claude-adapter');
-const { requireOwnedLane } = require('./lib/state');
+const {
+  acknowledgeEvent,
+  countEvents,
+  createParentContext,
+  digest,
+  listDispatches,
+  listEvents,
+  listParentContexts,
+  loadParentContext,
+  recordEvent,
+  recordObservation,
+} = require('./lib/dispatch');
+const {
+  listOperations, pendingOperationForLane, requireOwnedLane, resolveProject,
+  settleTerminalLaneOperationPointer, withLaneLease,
+} = require('./lib/state');
 
 const MAX_INPUT_BYTES = 64 * 1024;
-const HELP = `usage: lane.js <operation> --repo-root <absolute-path> [options]
+const HELP = `usage: lane.js <operation> [options]
 
 operations:
-  spawn      --target codex|claude --name <name> (--input <text> | --input-file <absolute|->)
+  parent-init --host-provider <slug> --host-app <slug> --name <parent task>
+              [--native-task-ref <private-ref>]
+  parent-list
+  capabilities --target codex|claude
+  spawn      --target codex|claude --name <summary> (--input <text> | --input-file <absolute|->)
+             --parent-context-file <absolute>
              [--cwd <absolute>] [--worktrees <absolute> (or WORKTREES)]
-             [--model <claude-model>]
+             [--intent <intent>] [--model <provider-model>] [--effort <level>]
+             [--speed standard|fast] [--allow-protocol-only]
+  children   --parent-context-file <absolute>
+  wait       --parent-context-file <absolute> [--after <sequence>] [--timeout-ms <0..60000>]
+  ack        --parent-context-file <absolute> --event <event-id>
   steer      --lane <lane-id> (--input <text> | --input-file <absolute|->)
   status     --lane <lane-id>
   interrupt  --lane <lane-id>                         Codex only
@@ -23,6 +47,7 @@ operations:
              Codex input starts one boundary turn; Claude recovery accepts no input
   retire     --lane <lane-id> --harvested-output-sha256 <sha256>
              [--private-archive] [--no-cleanup-worktree]
+             [--accept-manual-seat-removal]
   reconcile  --target codex|claude [--lane <lane-id>]
              [--finish-retirements] [--private-archive] [--no-cleanup-worktree]
 
@@ -30,11 +55,19 @@ provider options:
   --url <loopback-ws-url>       Codex only (or TRANSMOGRIFY_URL)
   --claude-bin <absolute-path>  Claude only (or CLAUDE_BIN)
 
---private-archive and --finish-retirements are Claude-only. --repo-root may be
-supplied through REPO_ROOT. Run the installed SKILL.md workflow before using
-mutating operations.`;
+--private-archive and --finish-retirements are Claude-only. Repository-bound
+operations accept --repo-root or REPO_ROOT; parent-init, parent-list,
+capabilities, and ack do not require it. Run the installed SKILL.md workflow
+before using mutating operations. Spawn canonicalizes native task names to
+::: <summary>.`;
 const OPERATIONS = new Set([
+  'parent-init',
+  'parent-list',
+  'capabilities',
   'spawn',
+  'children',
+  'wait',
+  'ack',
   'steer',
   'status',
   'interrupt',
@@ -44,10 +77,21 @@ const OPERATIONS = new Set([
   'reconcile',
 ]);
 const OPERATION_OPTIONS = {
+  'parent-init': new Set([
+    'host-provider', 'host-app', 'name', 'native-task-ref',
+  ]),
+  'parent-list': new Set(),
+  capabilities: new Set(['target', 'url', 'claude-bin']),
   spawn: new Set([
     'repo-root', 'target', 'name', 'input', 'input-file', 'cwd', 'worktrees',
-    'url', 'claude-bin', 'model',
+    'url', 'claude-bin', 'parent-context-file', 'intent', 'model', 'effort', 'speed',
+    'allow-protocol-only',
   ]),
+  children: new Set(['repo-root', 'parent-context-file']),
+  wait: new Set([
+    'repo-root', 'parent-context-file', 'after', 'timeout-ms', 'url', 'claude-bin',
+  ]),
+  ack: new Set(['parent-context-file', 'event']),
   steer: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin']),
   status: new Set(['repo-root', 'lane', 'url', 'claude-bin']),
   interrupt: new Set(['repo-root', 'lane', 'url']),
@@ -55,7 +99,7 @@ const OPERATION_OPTIONS = {
   recover: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin']),
   retire: new Set([
     'repo-root', 'lane', 'url', 'claude-bin', 'private-archive',
-    'no-cleanup-worktree', 'harvested-output-sha256',
+    'no-cleanup-worktree', 'accept-manual-seat-removal', 'harvested-output-sha256',
   ]),
   reconcile: new Set([
     'repo-root', 'target', 'lane', 'url', 'claude-bin', 'private-archive',
@@ -90,13 +134,17 @@ const SAFE_REFUSALS = new Set([
   'CLEANUP_BLOCKED',
   'CLEANUP_RETRYABLE',
   'EXECUTION_EPOCH_UNBOUND',
+  'EXECUTION_PROFILE_UNSUPPORTED',
   'HARVEST_MISMATCH',
   'HARVEST_REQUIRED',
   'INVALID_STATE',
   'LANE_RETIRED',
   'NOT_DELIVERED',
   'NO_ACTIVE_TURN',
+  'NO_EVENT',
   'NOT_OWNED',
+  'LOCAL_STATE_LIMIT',
+  'NATIVE_VISIBILITY_REQUIRED',
   'OPERATION_PENDING',
   'OWNERSHIP_MISMATCH',
   'PENDING_OPERATION',
@@ -119,6 +167,7 @@ const PUBLIC_ERROR_MESSAGES = new Map([
   ['COMPLETION_UNKNOWN', 'lane launch is verified; completion observation is unknown'],
   ['DELIVERY_UNCERTAIN', 'provider delivery outcome is unknown'],
   ['EXECUTION_EPOCH_UNBOUND', 'live provider execution no longer matches the owned receipt'],
+  ['EXECUTION_PROFILE_UNSUPPORTED', 'the requested model, effort, or speed is unsupported'],
   ['FORKED_COPY', 'recovery may have created a separate provider session; no copy was touched'],
   ['HARVEST_MISMATCH', 'the supplied harvest receipt does not match the durable retirement receipt'],
   ['HARVEST_REQUIRED', 'retirement requires a durable harvested-output receipt'],
@@ -129,6 +178,10 @@ const PUBLIC_ERROR_MESSAGES = new Map([
   ['NOT_DELIVERED', 'the provider mutation was not delivered'],
   ['NOT_OWNED', 'the requested lane is not owned by this operator installation'],
   ['NO_ACTIVE_TURN', 'the owned Codex lane has no active turn'],
+  ['NO_EVENT', 'no child event was observed before the bounded timeout'],
+  ['LOCAL_STATE_LIMIT', 'the private operator state exceeded a bounded record limit'],
+  ['NATIVE_VISIBILITY_REQUIRED', 'Codex spawn requires a native-visibility receipt or explicit protocol-only authorization'],
+  ['OBSERVATION_FAILED', 'one or more exact child lanes could not be observed safely'],
   ['OWNERSHIP_MISMATCH', 'live provider identity does not match the owned receipt'],
   ['OPERATION_PENDING', 'the owned lane has an unresolved operation'],
   ['PENDING_OPERATION', 'the owned lane has an unresolved operation'],
@@ -280,6 +333,8 @@ const PRIVATE_RESULT_KEYS = new Set([
   'pids',
   'providerId',
   'providerIdentity',
+  'repoRoot',
+  'gitCommonDir',
   'recoveredTurnId',
   'runtime',
   'sessionId',
@@ -291,6 +346,339 @@ const PRIVATE_RESULT_KEYS = new Set([
   'url',
   'userAgent',
 ]);
+
+function boundedInteger(value, label, minimum, maximum, fallback) {
+  if (value === undefined) return fallback;
+  if (!/^\d+$/.test(value)) usage(`${label} must be an integer`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    usage(`${label} must be between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+function dispatchSummary(dispatch, lane = null) {
+  return {
+    dispatchId: dispatch.dispatchId,
+    laneId: dispatch.child.laneId,
+    target: dispatch.child.targetProvider,
+    displayName: dispatch.child.displayName,
+    state: lane?.state || dispatch.state,
+    createdAt: dispatch.createdAt,
+    requestedProfile: dispatch.requestedProfile,
+    resolvedProfile: dispatch.resolvedProfile,
+    observedProfile: dispatch.observedProfile,
+  };
+}
+
+function laneForDispatch(dispatch, env) {
+  let lane;
+  try { lane = requireOwnedLane(dispatch.child.repoRoot, dispatch.child.laneId, env); } catch (error) {
+    if (/^NOT_OWNED:/.test(error.message)) return null;
+    throw error;
+  }
+  const expectedBackend = dispatch.child.targetProvider === 'codex'
+    ? 'codex-app-server'
+    : dispatch.child.targetProvider === 'claude' ? 'claude-code' : null;
+  if (!lane.lineage || lane.lineage.dispatchId !== dispatch.dispatchId ||
+      lane.lineage.parentRef !== dispatch.parentRef ||
+      lane.lineage.installationId !== dispatch.installationId ||
+      lane.backend !== dispatch.child.backend || lane.backend !== expectedBackend ||
+      lane.target !== dispatch.child.targetProvider ||
+      lane.displayName !== dispatch.child.displayName) {
+    const error = new Error('dispatch lineage does not match the exact owned lane');
+    error.code = 'NOT_OWNED';
+    throw error;
+  }
+  return lane;
+}
+
+function completedSpawnOperation(dispatch, lane, env) {
+  if (!lane?.providerId) return null;
+  const matches = listOperations(dispatch.child.repoRoot, env).filter((operation) =>
+    operation.type === 'spawn' && operation.state === 'complete' &&
+    operation.laneId === lane.laneId && operation.providerId === lane.providerId &&
+    operation.details?.dispatchId === dispatch.dispatchId
+  );
+  if (matches.length > 1) {
+    const error = new Error('multiple completed spawn receipts match one dispatch');
+    error.code = 'INVALID_LOCAL_STATE';
+    throw error;
+  }
+  return matches[0] || null;
+}
+
+function terminalUnstartedSpawnOperation(dispatch, lane, env) {
+  if (lane?.providerId) return null;
+  const matches = listOperations(dispatch.child.repoRoot, env).filter((operation) =>
+    operation.type === 'spawn' && ['failed', 'notDelivered'].includes(operation.state) &&
+    operation.laneId === lane.laneId && operation.details?.dispatchId === dispatch.dispatchId
+  );
+  if (matches.length > 1) {
+    const error = new Error('multiple terminal spawn receipts match one dispatch');
+    error.code = 'INVALID_LOCAL_STATE';
+    throw error;
+  }
+  return matches[0] || null;
+}
+
+function localEventForLane(dispatch, lane, env) {
+  if (!lane) return null;
+  const spawnOperation = completedSpawnOperation(dispatch, lane, env);
+  if (spawnOperation) {
+    recordEvent({
+      dispatchId: dispatch.dispatchId,
+      type: 'child.spawned',
+      fingerprint: `spawn-complete:${spawnOperation.operationId}:${lane.providerId}`,
+      data: { state: 'spawned' },
+    }, env);
+  }
+  const unstartedSpawn = terminalUnstartedSpawnOperation(dispatch, lane, env);
+  if (unstartedSpawn) {
+    return recordObservation({
+      dispatchId: dispatch.dispatchId,
+      phase: 'failed',
+      providerFingerprint: `spawn-terminal:${unstartedSpawn.operationId}:${unstartedSpawn.state}`,
+      eventType: 'child.failed',
+      data: { state: 'failed' },
+    }, env).event;
+  }
+  const pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
+  if (pending?.type === 'retire') {
+    if (pending.state === 'providerRetiredCleanupBlocked') {
+      return recordObservation({
+        dispatchId: dispatch.dispatchId,
+        phase: 'cleanup-blocked',
+        providerFingerprint: `retire:${pending.operationId}:${pending.state}`,
+        eventType: 'child.cleanup-blocked',
+        data: { state: 'cleanup-blocked' },
+      }, env).event;
+    }
+    if (['providerRetiredCleanupDeferred', 'cleanupDeferred', 'localRemovalUnknown']
+      .includes(pending.state)) {
+      return recordObservation({
+        dispatchId: dispatch.dispatchId,
+        phase: 'needs-attention',
+        providerFingerprint: `retire:${pending.operationId}:${pending.state}`,
+        eventType: 'child.needs-attention',
+        data: { state: 'needs-attention' },
+      }, env).event;
+    }
+    if (['providerRetired', 'remoteArchived', 'worktreeRemoved',
+      'localRemovalDispatching', 'localRemovalDispatched', 'localRemoved']
+      .includes(pending.state)) {
+      return recordObservation({
+        dispatchId: dispatch.dispatchId,
+        phase: 'needs-attention',
+        providerFingerprint: `retire:${pending.operationId}:${pending.state}`,
+        eventType: 'child.needs-attention',
+        data: { state: 'needs-attention' },
+      }, env).event;
+    }
+  }
+  const terminal = new Map([
+    ['deliveryUnknown', ['delivery-unknown', 'child.delivery-unknown']],
+    ['archiveUnknown', ['delivery-unknown', 'child.delivery-unknown']],
+  ]).get(lane.state);
+  if (!terminal && !pending && ['archivedVerified', 'logicallyRetired', 'worktreeRemoved']
+    .includes(lane.state)) {
+    return recordObservation({
+      dispatchId: dispatch.dispatchId,
+      phase: 'retired',
+      providerFingerprint: `retired:${lane.state}:${lane.updatedAt}`,
+      eventType: 'child.retired',
+      data: { state: 'retired' },
+    }, env).event;
+  }
+  if (!terminal) return null;
+  const [phase, eventType] = terminal;
+  return recordObservation({
+    dispatchId: dispatch.dispatchId,
+    phase,
+    providerFingerprint: `${lane.state}:${lane.turnId || 'none'}:${lane.updatedAt}`,
+    eventType,
+    data: { state: phase },
+  }, env).event;
+}
+
+async function reconcilePendingSpawnDispatch(dispatch, lane, values, env, timeoutMs) {
+  const pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
+  if (pending?.type !== 'spawn') return lane;
+  const options = {
+    repoRoot: dispatch.child.repoRoot,
+    laneId: lane.laneId,
+    url: values.url || lane.runtime?.endpoint,
+    claudeBin: values['claude-bin'],
+    timeoutMs,
+    commandTimeoutMs: timeoutMs,
+  };
+  if (lane.backend === 'codex-app-server') await codex.recover(options, env);
+  else await claude.reconcile(options, env);
+  return requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
+}
+
+async function observeDispatch(dispatch, values, env, deadline, remainingChildren) {
+  let lane = laneForDispatch(dispatch, env);
+  if (!lane) {
+    const ageMs = Date.now() - Date.parse(dispatch.createdAt);
+    if (Number.isFinite(ageMs) && ageMs >= 30_000) {
+      const eventType = dispatch.state === 'reserved'
+        ? 'child.needs-attention' : 'child.delivery-unknown';
+      const observation = recordObservation({
+        dispatchId: dispatch.dispatchId,
+        phase: dispatch.state === 'reserved' ? 'needs-attention' : 'delivery-unknown',
+        providerFingerprint: `missing-lane:${dispatch.state}:${dispatch.createdAt}`,
+        eventType,
+        data: { state: dispatch.state === 'reserved' ? 'needs-attention' : 'delivery-unknown' },
+      }, env);
+      return { lane: null, event: observation.event };
+    }
+    return { lane: null, event: null };
+  }
+  const terminalPending = pendingOperationForLane(
+    dispatch.child.repoRoot,
+    lane.laneId,
+    env,
+  );
+  const locallySettleable = terminalPending &&
+    ['complete', 'failed', 'notDelivered'].includes(terminalPending.state) &&
+    (terminalPending.type !== 'spawn' ||
+      (terminalPending.state === 'complete' && Boolean(lane.providerId)));
+  if (locallySettleable) {
+    await withLaneLease(dispatch.child.repoRoot, lane.laneId, async () => {
+      settleTerminalLaneOperationPointer(dispatch.child.repoRoot, lane.laneId, env);
+    }, env);
+    lane = laneForDispatch(dispatch, env);
+  }
+  let localEvent = localEventForLane(dispatch, lane, env);
+  if (localEvent) return { lane, event: localEvent };
+  let pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
+  if (pending?.type === 'spawn') {
+    const spawnRemainingMs = deadline - Date.now();
+    if (spawnRemainingMs < 100) return { lane, event: null };
+    const spawnBudget = Math.max(
+      100,
+      Math.floor(spawnRemainingMs / Math.max(1, remainingChildren * 4)),
+    );
+    lane = await reconcilePendingSpawnDispatch(dispatch, lane, values, env, spawnBudget);
+    localEvent = localEventForLane(dispatch, lane, env);
+    if (localEvent) return { lane, event: localEvent };
+    pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
+    if (pending?.type === 'spawn') return { lane, event: null };
+  }
+  if (['deliveryUnknown', 'archiveUnknown'].includes(lane.state) ||
+      (!pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env) &&
+       ['archivedVerified', 'logicallyRetired', 'worktreeRemoved'].includes(lane.state))) {
+    return { lane, event: localEvent };
+  }
+  const remainingMs = deadline - Date.now();
+  if (remainingMs < 100) return { lane, event: null };
+  const requestBudget = Math.max(100, Math.floor(remainingMs / Math.max(1, remainingChildren * 4)));
+  if (!lane.providerId) return { lane, event: null };
+  const options = {
+    repoRoot: dispatch.child.repoRoot,
+    laneId: lane.laneId,
+    url: values.url || lane.runtime?.endpoint,
+    claudeBin: values['claude-bin'],
+    timeoutMs: requestBudget,
+    commandTimeoutMs: requestBudget,
+  };
+  const result = lane.backend === 'codex-app-server'
+    ? await codex.status(options, env)
+    : await claude.status(options, env);
+  lane = requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
+  let phase = result.phase;
+  let eventType = null;
+  let providerFingerprint;
+  const data = { state: lane.state };
+  if (lane.backend === 'codex-app-server') {
+    const turn = result.turn;
+    providerFingerprint = `turn:${turn?.id || 'none'}:${turn?.status || phase}`;
+    phase = phase === 'executing' ? 'working' : phase;
+    if (turn && ['completed', 'interrupted', 'failed'].includes(turn.status)) {
+      eventType = turn.status === 'failed' ? 'child.failed' : 'child.turn-completed';
+      phase = turn.status === 'failed' ? 'failed' : 'idle';
+      data.status = turn.status;
+    } else if (phase === 'idle') {
+      eventType = 'child.idle-observed';
+    }
+  } else {
+    const epoch = lane.providerIdentity?.executionEpochs?.at(-1);
+    providerFingerprint = `epoch:${epoch?.epochId || 'none'}:${phase}`;
+    if (phase === 'waiting') eventType = 'child.needs-attention';
+    else if (phase === 'idle') eventType = 'child.idle-observed';
+    else if (phase === 'stopped') eventType = 'child.stopped';
+    else if (phase === 'failed') eventType = 'child.failed';
+  }
+  const observation = recordObservation({
+    dispatchId: dispatch.dispatchId,
+    phase,
+    providerFingerprint,
+    eventType,
+    data: eventType ? {
+      state: phase,
+      ...(data.status ? { status: data.status } : {}),
+    } : {},
+  }, env);
+  return { lane, event: observation.event };
+}
+
+async function observeParentChildren(context, values, env, deadline) {
+  const dispatches = listDispatches(context, env)
+    .filter((dispatch) => !values['repo-root'] || dispatch.child.repoRoot === values['repo-root']);
+  const errors = [];
+  for (let index = 0; index < dispatches.length; index += 1) {
+    if (Date.now() >= deadline) break;
+    const dispatch = dispatches[index];
+    try {
+      const observed = await observeDispatch(
+        dispatch, values, env, deadline, dispatches.length - index,
+      );
+      if (observed.event) break;
+    } catch (error) {
+      errors.push({ dispatchId: dispatch.dispatchId, code: error.code || 'OBSERVATION_FAILED' });
+    }
+  }
+  return { dispatches, errors };
+}
+
+async function waitForParentEvent(context, values, env) {
+  const timeoutMs = boundedInteger(values['timeout-ms'], '--timeout-ms', 0, 60_000, 60_000);
+  const after = boundedInteger(values.after, '--after', 0, Number.MAX_SAFE_INTEGER, 0);
+  const deadline = Date.now() + timeoutMs;
+  const project = values['repo-root'] ? resolveProject(values['repo-root']) : null;
+  const observationValues = project ? { ...values, 'repo-root': project.root } : values;
+  const projectKey = project ? digest(project.commonDir) : undefined;
+  const eventOptions = { after, projectKey };
+  while (true) {
+    let events = listEvents(context, eventOptions, env);
+    if (events.length > 0) return { version: 1, ok: true, operation: 'wait', events };
+    if (Date.now() >= deadline) {
+      const error = new Error('bounded child wait expired without an event');
+      error.code = 'NO_EVENT';
+      error.details = { attempted: 0 };
+      throw error;
+    }
+    const observed = await observeParentChildren(context, observationValues, env, deadline);
+    events = listEvents(context, eventOptions, env);
+    if (events.length > 0) {
+      return { version: 1, ok: true, operation: 'wait', events, observerErrors: observed.errors };
+    }
+    if (observed.errors.length > 0) {
+      const error = new Error('one or more exact child observations failed');
+      error.code = 'OBSERVATION_FAILED';
+      error.details = { attempted: observed.dispatches.length };
+      throw error;
+    }
+    if (Date.now() >= deadline) {
+      const error = new Error('bounded child wait expired without an event');
+      error.code = 'NO_EVENT';
+      error.details = { attempted: observed.dispatches.length };
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+  }
+}
 
 function publicSuccess(value) {
   if (value === null || value === undefined) return value;
@@ -380,6 +768,13 @@ async function main(argv, env = process.env) {
       lane: { type: 'string' },
       target: { type: 'string' },
       name: { type: 'string' },
+      'host-provider': { type: 'string' },
+      'host-app': { type: 'string' },
+      'native-task-ref': { type: 'string' },
+      'parent-context-file': { type: 'string' },
+      event: { type: 'string' },
+      after: { type: 'string' },
+      'timeout-ms': { type: 'string' },
       input: { type: 'string' },
       'input-file': { type: 'string' },
       cwd: { type: 'string' },
@@ -387,7 +782,12 @@ async function main(argv, env = process.env) {
       url: { type: 'string' },
       'claude-bin': { type: 'string' },
       model: { type: 'string' },
+      intent: { type: 'string' },
+      effort: { type: 'string' },
+      speed: { type: 'string' },
+      'allow-protocol-only': { type: 'boolean' },
       'private-archive': { type: 'boolean' },
+      'accept-manual-seat-removal': { type: 'boolean' },
       'finish-retirements': { type: 'boolean' },
       'no-cleanup-worktree': { type: 'boolean' },
       'harvested-output-sha256': { type: 'string' },
@@ -402,6 +802,102 @@ async function main(argv, env = process.env) {
     operation,
     new Set(parsed.tokens.filter((token) => token.kind === 'option').map((token) => token.name)),
   );
+  if (operation === 'parent-init') {
+    if (!values['host-provider'] || !values['host-app'] || !values.name) {
+      usage('parent-init requires --host-provider, --host-app, and --name');
+    }
+    const created = createParentContext({
+      hostProvider: values['host-provider'],
+      hostApp: values['host-app'],
+      displayName: values.name,
+      nativeTaskRef: values['native-task-ref'],
+    }, env);
+    return {
+      version: 1,
+      ok: true,
+      operation: 'parent-init',
+      parentRef: created.parent.parentRef,
+      contextFile: created.file,
+      hostProvider: created.parent.hostProvider,
+      hostApp: created.parent.hostApp,
+      displayName: created.parent.displayName,
+    };
+  }
+  if (operation === 'parent-list') {
+    const parents = listParentContexts(env).map((context) => ({
+      parentRef: context.parent.parentRef,
+      contextFile: context.file,
+      hostProvider: context.parent.hostProvider,
+      hostApp: context.parent.hostApp,
+      displayName: context.parent.displayName,
+      createdAt: context.parent.createdAt,
+      children: listDispatches(context, env).length,
+      unacknowledgedEvents: countEvents(context, {}, env),
+    }));
+    return { version: 1, ok: true, operation: 'parent-list', parents };
+  }
+  if (operation === 'capabilities') {
+    if (!['codex', 'claude'].includes(values.target)) {
+      usage('capabilities requires --target codex|claude');
+    }
+    if (values.target === 'codex' && values['claude-bin'] !== undefined) {
+      usage('--claude-bin is valid only for Claude capabilities');
+    }
+    if (values.target === 'claude' && values.url !== undefined) {
+      usage('--url is valid only for Codex capabilities');
+    }
+    const adapter = values.target === 'codex' ? codex : claude;
+    if (typeof adapter.executionCapabilities !== 'function') {
+      usage(`${values.target} execution capabilities are unavailable`);
+    }
+    return adapter.executionCapabilities({ url: values.url, claudeBin: values['claude-bin'] }, env);
+  }
+  if (operation === 'spawn' && !['codex', 'claude'].includes(values.target)) {
+    usage('spawn requires --target codex|claude');
+  }
+  if (operation === 'spawn' && values.target === 'codex' && values['claude-bin'] !== undefined) {
+    usage('--claude-bin is valid only for Claude targets');
+  }
+  if (operation === 'spawn' && values.target === 'claude' && values.url !== undefined) {
+    usage('--url is valid only for Codex targets');
+  }
+  if (operation === 'spawn' && values.target === 'claude' && values['allow-protocol-only'] !== undefined) {
+    usage('--allow-protocol-only is valid only for Codex targets');
+  }
+  const needsParent = ['spawn', 'children', 'wait', 'ack'].includes(operation);
+  const parentContext = needsParent
+    ? loadParentContext(values['parent-context-file'], env)
+    : null;
+  if (operation === 'children') {
+    const repoFilter = values['repo-root'];
+    if (repoFilter !== undefined && !path.isAbsolute(repoFilter)) usage('--repo-root must be absolute');
+    const project = repoFilter ? resolveProject(repoFilter) : null;
+    const children = listDispatches(parentContext, env)
+      .filter((dispatch) => !project || dispatch.child.repoRoot === project.root)
+      .map((dispatch) => dispatchSummary(dispatch, laneForDispatch(dispatch, env)));
+    const projectKey = project ? digest(project.commonDir) : undefined;
+    const unacknowledgedEvents = countEvents(parentContext, { projectKey }, env);
+    return {
+      version: 1,
+      ok: true,
+      operation: 'children',
+      parentRef: parentContext.parent.parentRef,
+      children,
+      unacknowledgedEvents,
+    };
+  }
+  if (operation === 'wait') return waitForParentEvent(parentContext, values, env);
+  if (operation === 'ack') {
+    if (!values.event) usage('ack requires --event');
+    const acknowledgement = acknowledgeEvent(parentContext, values.event, env);
+    return {
+      version: 1,
+      ok: true,
+      operation: 'ack',
+      eventId: acknowledgement.eventId,
+      acknowledgedAt: acknowledgement.acknowledgedAt,
+    };
+  }
   const repoRoot = values['repo-root'] || env.REPO_ROOT;
   if (!repoRoot || !path.isAbsolute(repoRoot)) usage('--repo-root (or REPO_ROOT) must be absolute');
   const input = readInput(values);
@@ -416,23 +912,19 @@ async function main(argv, env = process.env) {
     url: values.url,
     claudeBin: values['claude-bin'],
     model: values.model,
+    intent: values.intent,
+    effort: values.effort,
+    speed: values.speed,
+    allowProtocolOnly: values['allow-protocol-only'] === true,
+    parentContext,
     privateArchive: values['private-archive'],
+    acceptManualSeatRemoval: values['accept-manual-seat-removal'],
     finishRetirements: values['finish-retirements'],
     cleanupWorktree: !values['no-cleanup-worktree'],
     harvestedOutputSha256: values['harvested-output-sha256'],
   };
 
   if (operation === 'spawn') {
-    if (!['codex', 'claude'].includes(values.target)) usage('spawn requires --target codex|claude');
-    if (values.target === 'codex' && values['claude-bin'] !== undefined) {
-      usage('--claude-bin is valid only for Claude targets');
-    }
-    if (values.target === 'codex' && values.model !== undefined) {
-      usage('--model is currently valid only for Claude targets');
-    }
-    if (values.target === 'claude' && values.url !== undefined) {
-      usage('--url is valid only for Codex targets');
-    }
     return values.target === 'codex' ? codex.spawn(options, env) : claude.spawn(options, env);
   }
   if (operation === 'reconcile') {
@@ -458,6 +950,9 @@ async function main(argv, env = process.env) {
   if (values['claude-bin'] !== undefined && adapter !== claude) usage('--claude-bin is valid only for Claude lanes');
   if (values['private-archive'] !== undefined && adapter !== claude) {
     usage('--private-archive is valid only for Claude retirement');
+  }
+  if (values['accept-manual-seat-removal'] !== undefined && adapter !== claude) {
+    usage('--accept-manual-seat-removal is valid only for Claude retirement');
   }
   if (operation === 'interrupt') {
     if (adapter !== codex) usage('interrupt is supported only for Codex turn cancellation');

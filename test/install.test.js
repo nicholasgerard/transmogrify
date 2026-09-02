@@ -66,6 +66,7 @@ test('installer stages complete fresh installs for Claude and Codex', async (t) 
     assert.equal(fs.existsSync(path.join(target, 'SKILL.md')), true);
     assert.equal(fs.existsSync(path.join(target, '.transmogrify-install.json')), true);
     assert.equal(fs.existsSync(path.join(target, 'LICENSE')), true);
+    assert.equal(fs.existsSync(path.join(target, 'CODE_OF_CONDUCT.md')), true);
     assert.equal(fs.existsSync(path.join(target, 'scripts', 'runtime-probe.js')), true);
     const installedRequire = require('node:module').createRequire(path.join(target, 'package.json'));
     assert.equal(typeof installedRequire('ws').WebSocket, 'function');

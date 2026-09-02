@@ -18,7 +18,7 @@ export REPO_ROOT=/absolute/path/to/repository
 export WORKTREES=/absolute/path/outside-the-repository/transmogrify-worktrees
 export MAILBOX_DIR="$HOME/.local/state/transmogrify/mailboxes/example"
 export RUNTIME_URL=ws://127.0.0.1:8843
-export THREAD_NAME_FORMAT='[<provider>] <id>: <summary>'
+export THREAD_NAME_FORMAT='::: <summary>'
 
 test -f "$SKILL_ROOT/SKILL.md"
 test "$(git -C "$REPO_ROOT" rev-parse --show-toplevel)" = "$REPO_ROOT"
@@ -67,7 +67,28 @@ node "$SKILL_ROOT/scripts/doctor.js" \
 Doctor may create the installation's empty ownership registry. It does not
 start, stop, steer, archive, remove, or adopt a provider session.
 
-## 3. Spawn and retain the lane ID
+## 3. Create the parent context
+
+Create one durable parent identity before dispatch. Use the actual host provider,
+app surface, and visible parent task name; the private native task reference is
+optional and is never copied into a child prompt.
+
+```bash
+PARENT_JSON=$(node "$SKILL_ROOT/scripts/lane.js" parent-init \
+  --host-provider codex \
+  --host-app codex-desktop \
+  --name 'Example repository operator')
+printf '%s\n' "$PARENT_JSON"
+PARENT_CONTEXT=$(printf '%s' "$PARENT_JSON" | node -e \
+  "const fs=require('node:fs');process.stdout.write(JSON.parse(fs.readFileSync(0,'utf8')).contextFile)")
+test -f "$PARENT_CONTEXT"
+```
+
+After a restart, use `parent-list` to recover the same context instead of
+creating a replacement. Run `children` and `wait --timeout-ms 0` before making
+another dispatch so an older unacknowledged result cannot be forgotten.
+
+## 4. Spawn and retain the lane ID
 
 The following Codex example writes the public JSON receipt to the terminal and
 extracts its installation-scoped `laneId` without exposing provider IDs:
@@ -82,7 +103,10 @@ SPAWN_JSON=$(
       --worktrees "$WORKTREES" \
       --url "$RUNTIME_URL" \
       --target codex \
-      --name '[codex] example: packet execution' \
+      --name 'example: packet execution' \
+      --parent-context-file "$PARENT_CONTEXT" \
+      --intent balanced \
+      --allow-protocol-only \
       --input-file -
 )
 printf '%s\n' "$SPAWN_JSON"
@@ -91,7 +115,10 @@ LANE_ID=$(printf '%s' "$SPAWN_JSON" | node -e \
 test -n "$LANE_ID"
 ```
 
-For Claude, change the target and name and omit the Codex-only `--url` option:
+The Codex example is deliberately protocol-only; it makes no Desktop/mobile
+visibility claim. For Claude, change the target and name, omit the Codex-only
+`--url` and `--allow-protocol-only` options, and use the pinned Remote Control
+adapter:
 
 ```bash
 SPAWN_JSON=$(
@@ -100,7 +127,9 @@ SPAWN_JSON=$(
       --repo-root "$REPO_ROOT" \
       --worktrees "$WORKTREES" \
       --target claude \
-      --name '[claude] example: packet execution' \
+      --name 'example: packet execution' \
+      --parent-context-file "$PARENT_CONTEXT" \
+      --intent balanced \
       --input-file -
 )
 printf '%s\n' "$SPAWN_JSON"
@@ -109,10 +138,34 @@ LANE_ID=$(printf '%s' "$SPAWN_JSON" | node -e \
 test -n "$LANE_ID"
 ```
 
-Store `LANE_ID` with the host packet and mailbox record. Never recover ownership
-from a display name.
+Store `LANE_ID` and the returned `dispatchId` with the host packet and mailbox
+record. Never recover ownership from a display name. The native title is
+canonicalized to `::: example: packet execution`; the first provider message
+starts with the safe dispatch provenance block before `KICKOFF`.
 
-## 4. Direct and observe exact work
+## 5. Listen, acknowledge, direct, and observe exact work
+
+Spawn produces a durable `child.spawned` event. Handle it, acknowledge it by
+exact event ID, and keep returning to this bounded loop while children remain:
+
+```bash
+EVENT_JSON=$(node "$SKILL_ROOT/scripts/lane.js" wait \
+  --parent-context-file "$PARENT_CONTEXT" \
+  --repo-root "$REPO_ROOT" \
+  --timeout-ms 60000)
+printf '%s\n' "$EVENT_JSON"
+EVENT_ID=$(printf '%s' "$EVENT_JSON" | node -e \
+  "const fs=require('node:fs'),j=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(j.events[0].eventId)")
+
+# Acknowledge only after the parent handled this exact event.
+node "$SKILL_ROOT/scripts/lane.js" ack \
+  --parent-context-file "$PARENT_CONTEXT" \
+  --event "$EVENT_ID"
+```
+
+Unacknowledged events are redelivered across timeout, compaction, and process
+restart. An idle/completed event is a prompt to inspect and harvest the child;
+it is not permission to archive or delete the lane.
 
 The templates include packet amendment 1 and its matching `directive 001`.
 After replacing their placeholders, send only the short directive reference.
@@ -158,7 +211,7 @@ node "$SKILL_ROOT/scripts/lane.js" reconcile \
 Use `--target claude` and omit `--url` for a Claude lane. Reconciliation never
 blindly replays an operation whose delivery may have occurred.
 
-## 5. Harvest, hash, and retire
+## 6. Harvest, hash, and retire
 
 Review the final lane output and committed repository state. Persist the exact
 reviewed result in `handback.md`, replacing the template fields. Confirm the
@@ -225,6 +278,23 @@ node "$SKILL_ROOT/scripts/lane.js" reconcile \
   --lane "$LANE_ID" \
   --finish-retirements \
   --private-archive
+```
+
+Finish the lifecycle by handling and acknowledging the durable retirement
+event. Do this even after a parent restart; the same unacknowledged event will
+be returned until its exact ID is acknowledged:
+
+```bash
+EVENT_JSON=$(node "$SKILL_ROOT/scripts/lane.js" wait \
+  --parent-context-file "$PARENT_CONTEXT" \
+  --repo-root "$REPO_ROOT" \
+  --timeout-ms 60000)
+printf '%s\n' "$EVENT_JSON"
+EVENT_ID=$(printf '%s' "$EVENT_JSON" | node -e \
+  "const fs=require('node:fs'),j=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(j.events[0].eventId)")
+node "$SKILL_ROOT/scripts/lane.js" ack \
+  --parent-context-file "$PARENT_CONTEXT" \
+  --event "$EVENT_ID"
 ```
 
 The templates are [packet.md](packet.md), [mailbox.md](mailbox.md), and

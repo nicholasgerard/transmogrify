@@ -319,7 +319,7 @@ async function pollStatuses() {
       clientInfo: {
         name: 'transmogrify-lane-status-listen',
         title: 'Transmogrify lane status listener',
-        version: '0.1.0',
+        version: '0.2.0',
       },
     });
     client.on('thread/status/changed', (params) => observeStatus(params?.threadId, params?.status, 'notification'));

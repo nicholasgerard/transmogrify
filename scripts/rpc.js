@@ -173,7 +173,7 @@ if (OWNED_CONTENT_METHODS.has(method)) {
   const client = new AppServerClient({
     url,
     timeoutMs,
-    clientInfo: { name: 'transmogrify-rpc', title: 'transmogrify rpc', version: '0.1.0' },
+    clientInfo: { name: 'transmogrify-rpc', title: 'transmogrify rpc', version: '0.2.0' },
   });
   client.on('notification', ({ method: notificationMethod }) => {
     void notificationMethod;

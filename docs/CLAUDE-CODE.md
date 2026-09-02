@@ -44,7 +44,6 @@ Live verification on 2026-09-01 and 2026-09-02 used:
 | Platform | Darwin arm64 |
 | Current Claude Code CLI | `2.1.258` |
 | Current CLI SHA-256 | `b63136194160791c27cfa7b0403060d85eb0752991625fde8c09f9acacb17c78` |
-| Compatible prior CLI | `2.1.257` |
 | Prior CLI SHA-256 | `64590d7d9d9c189d33fb3dfa58c5408eaf2a10fe556bd84155d95efaab46b60e` |
 | Claude Desktop | `1.40609.1` |
 | Desktop bundle ID | `com.anthropic.claudefordesktop` |
@@ -85,19 +84,32 @@ The adapter launches the public CLI with exact argument positions equivalent to:
 claude --bg --name <name> --remote-control <name> [--model <selector>] <prompt-with-unique-marker>
 ```
 
+Both name arguments receive the same canonical `::: <summary>` value. The
+marker makes owned rows visually consistent with Codex, but never substitutes
+for the recorded session, job, bridge, runtime, and seat identity.
+
 CLI `2.1.258` exposes the initial prompt as the documented positional argument,
 so it can be visible briefly to same-user process inspection. Follow-up steering
 does not share this limitation because the adapter writes that content to the
 public `--cloud` command through stdin.
 
-The optional model selector follows Anthropic's documented startup
-`--model <alias|name>` surface. Transmogrify validates the exact requested
-selector before provider access and journals it before provider mutation. It
-reports that request without claiming an alias's resolved version; callers use
-a full model name when they need a fixed selection. Anthropic documents that
-resumed sessions retain the model saved in their transcript, so recovery sends
-no model flag. See
+Model, effort, and speed follow Anthropic's documented `--model`, `--effort`,
+and `--settings` surfaces. Transmogrify resolves every request before provider
+access and journals the requested and resolved values separately. Supported
+aliases are retained in the requested receipt but compile to a versioned model
+selector. Standard and Fast compile to explicit `fastMode:false` and
+`fastMode:true` settings; Fast is accepted only for the models in the pinned
+compatibility catalog. Recovery reapplies that exact versioned selector,
+effort, and setting, so an old lane cannot silently move with a rolling alias
+or inherit a changed host speed preference. See
+[Execution profiles](EXECUTION-PROFILES.md) and Anthropic's
 [Model configuration](https://code.claude.com/docs/en/model-config).
+
+Transmogrify does not substitute another model or speed after resolution.
+Anthropic can still apply its documented provider-native fallback for safety,
+availability, or Fast rate limits. Claude does not currently return an
+effective model, effort, and speed receipt through this surface, so those
+fields remain unobserved rather than being inferred from a successful launch.
 
 It does not accept a provider session as owned from CLI output alone. Before
 returning success it correlates:
@@ -170,10 +182,10 @@ Stop uses `claude stop <short-job-id>` and verifies the exact row is stopped.
 Its semantic is whole-session stop; turn-only cancel is unsupported.
 
 Recovery uses the documented resume and background flags with the full recorded
-UUID:
+UUID, plus the lane's immutable resolved execution controls:
 
 ```text
-claude --resume <full-session-uuid> --bg
+claude --resume <full-session-uuid> --bg --model <versioned-selector> [--effort <level>] --settings <explicit-fast-mode>
 ```
 
 The adapter rejects a correlated same-name/same-seat copy, ignores unrelated
@@ -247,6 +259,10 @@ A transient local Git or filesystem failure after verified archive returns
 `CLEANUP_RETRYABLE` and preserves the pending retirement for exact-owned retry
 without another archive request. Dirt, changed HEAD, or identity drift returns
 the permanent automation refusal `CLEANUP_BLOCKED`.
+Preserving the seat leaves that refusal intact. If the owner manually removes
+the exact managed seat after review, the exact retirement must be rerun with
+`--accept-manual-seat-removal`; target-wide reconciliation cannot infer owner
+acknowledgement from an absent path.
 
 Private archive errors are phase-aware. An authentication or trust failure
 before the archive POST proves that archive was not dispatched, while retaining

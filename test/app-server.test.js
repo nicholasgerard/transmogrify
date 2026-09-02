@@ -23,6 +23,23 @@ test('app-server client initializes before sending requests and always supplies 
   ]);
 });
 
+test('app-server connect gives initialize only the transport deadline remainder', async (t) => {
+  const server = await startMockAppServer();
+  t.after(() => server.close());
+  const client = new AppServerClient({ url: server.url, timeoutMs: 2_000 });
+  t.after(() => client.close());
+  const call = client.call.bind(client);
+  let initializeTimeoutMs;
+  client.call = (method, params, timeoutMs) => {
+    if (method === 'initialize') initializeTimeoutMs = timeoutMs;
+    return call(method, params, timeoutMs);
+  };
+
+  await client.connect();
+  assert.equal(Number.isInteger(initializeTimeoutMs), true);
+  assert.equal(initializeTimeoutMs > 0 && initializeTimeoutMs <= 2_000, true);
+});
+
 test('app-server client fails closed on a non-Codex initialize response', async (t) => {
   const server = await startMockAppServer(undefined, {
     initializeResult: { userAgent: 'different-service/1.0' },

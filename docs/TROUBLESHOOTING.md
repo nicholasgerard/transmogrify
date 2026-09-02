@@ -155,6 +155,34 @@ owner authorizes this Transmogrify installation to own the new detached process.
 The launcher refuses non-loopback endpoints and never cleans up a process it
 did not launch and identify exactly.
 
+An initialize handshake proves protocol compatibility, not native-app
+attachment. `doctor.js` therefore reports Codex `nativeVisibility.verified` as
+false and names the required disposable app-visibility check. If Desktop was
+restarted or updated while an independent app-server survived, the two may be
+different processes even though the old endpoint still responds. Pause new
+cross-host Codex dispatches, preserve and reconcile only exact-owned existing
+lanes on their recorded runtime, and do not claim live Desktop/mobile control
+until a newly created disposable owned lane visibly streams in the current app.
+Never repair this condition by restarting a shared runtime or by adopting rows
+from either process.
+
+The prospective supported remedy is a Desktop-owned SSH runtime joined through
+Codex's CLI-exposed `app-server daemon`/`app-server proxy` surface. Those
+commands are observed in local CLI help but are not documented in the official
+app-server reference. Do not use that route yet: Desktop's exact launcher
+behavior, control socket, and safe multi-client semantics still require the
+roadmap's disposable live acceptance test. A private Desktop IPC or app-tools
+socket is not an alternative.
+
+Legacy `[Claude]` titles identify a stale skill context, not ownership. When
+they appear together with no live spinner or a “controlled from another app”
+banner, freeze new Codex spawns and directives. Reinstall the current skill,
+open `SKILL.md` again from disk in the long-running parent, and verify its
+version and `::: <summary>` naming contract. Continue harvesting and retiring
+only that parent's exact registry-owned lanes through their recorded runtime.
+Do not rename, adopt, or replay existing rows, and do not resume new Codex
+dispatches until a current-launch visibility check passes.
+
 Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 `PATH`, `TRANSMOGRIFY_URL` or `TRANSMOGRIFY_PORT` for the loopback endpoint, and
 `TRANSMOGRIFY_LOG` for an absolute owned-runtime log path. A command-line
@@ -163,7 +191,7 @@ Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 The detached child receives a bounded allowlist containing ordinary process,
 locale, home, temp, and certificate-path settings. Ambient API keys, access
 tokens, proxy credentials, `NODE_OPTIONS`, and unrelated secrets are excluded.
-The 0.1.0 launcher therefore expects an existing Codex login available under
+The 0.2.x launcher therefore expects an existing Codex login available under
 its `HOME`/`CODEX_HOME`. An API-key-only or authenticated-proxy environment
 requires a future explicit credential channel; never add the secret to the
 launcher log or command line.
@@ -184,7 +212,7 @@ for every task.
 
 If a pre-restart exact-owned task remains visible on mobile but returns a server
 error while a fresh disposable post-restart task works, do not keep pressing
-Retry and do not restart or replace a shared app-server. The 0.1.0 compatibility
+Retry and do not restart or replace a shared app-server. The 0.2.x compatibility
 receipt documents this as a host-integration reattachment seam; native Desktop
 rehydration did not repair the affected task. Continue only through a control
 channel whose exact receipts still verify, preserve the lane and worktree, and
@@ -267,6 +295,12 @@ Ignored files are included in the dirt census and remain preserved.
 Review and harvest the preserved worktree manually. Do not edit the ownership
 registry to make it appear eligible, and do not run `claude rm` against an
 external or deferred seat: the pinned CLI may delete the session's worktree.
+If the owner keeps the seat, stop and leave the refusal intact. If the owner
+manually removes that exact managed seat, rerun only its exact retirement with
+`--accept-manual-seat-removal`. The retry refuses any surviving filesystem
+entry, including a dangling symlink, and verifies that Git no longer lists the
+path and the preserved branch remains at the harvested HEAD. Fleet-wide
+reconciliation cannot acknowledge a manual removal.
 
 ## Getting help
 

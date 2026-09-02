@@ -54,6 +54,24 @@ function claudeSpawnIntent(operationId, displayName, suffix) {
   };
 }
 
+function claudeRuntimeReceipt() {
+  return {
+    protocolGeneration: 1,
+    platform: 'darwin',
+    arch: 'arm64',
+    cliPath: '/tmp/claude-test',
+    cliVersion: '2.1.258',
+    cliSha256: 'c'.repeat(64),
+    configDir: '/tmp/claude-config',
+    configDevice: 1,
+    configInode: 2,
+    projectsDirectory: '/tmp/claude-config/projects',
+    projectsDevice: 1,
+    projectsInode: 3,
+    accountFingerprint: 'd'.repeat(64),
+  };
+}
+
 test('registry is outside the repository and binds to canonical Git identity', (t) => {
   const fixture = createStateFixture(t);
   const { paths, registry } = ensureRegistry(fixture.repoRoot, fixture.env);
@@ -633,6 +651,93 @@ test('Claude provider identity binds exact handles once and records immutable ep
   ), /NOT_OWNED/);
 });
 
+test('terminal Claude receipts preserve legacy project-directory identity shape', (t) => {
+  const fixture = createStateFixture(t);
+  const initialRuntime = {
+    protocolGeneration: 1,
+    platform: 'darwin',
+    arch: 'arm64',
+    cliPath: '/tmp/claude-2.1.257',
+    cliVersion: '2.1.257',
+    cliSha256: 'c'.repeat(64),
+    configDir: '/tmp/claude-config',
+    configDevice: 1,
+    configInode: 2,
+    projectsDirectory: '/tmp/claude-config/projects',
+    projectsDevice: 1,
+    projectsInode: 3,
+    accountFingerprint: 'd'.repeat(64),
+  };
+  const nextRuntime = {
+    ...initialRuntime,
+    cliPath: '/tmp/claude-2.1.258',
+    cliVersion: '2.1.258',
+    cliSha256: 'e'.repeat(64),
+  };
+  const sessionId = '12121212-1212-4212-8212-121212121212';
+  const operationId = '78787878-7878-4787-8787-787878787878';
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'claude-code',
+    providerId: sessionId,
+    displayName: '::: legacy terminal receipt',
+    state: 'worktreeRemoved',
+    operationId,
+    runtime: initialRuntime,
+  }, fixture.env);
+
+  const registryPath = projectPaths(fixture.repoRoot, fixture.env).registry;
+  const raw = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  raw.lanes[lane.laneId].providerIdentity = {
+      version: 1,
+      sessionId,
+      jobId: '12121212',
+      bridgeId: 'session_legacyTerminal',
+      executionEpochs: [{
+        epochId: '34343434-3434-4434-8434-343434343434',
+        ordinal: 1,
+        pid: 123,
+        processBirth: 'Tue Sep  1 15:00:00 2026',
+        socket: {
+          path: '/tmp/transmogrify-owned/legacy.sock',
+          device: 1,
+          inode: 2,
+          uid: 501,
+          mode: 0o600,
+        },
+        observedAt: '2026-09-01T19:00:00.000Z',
+      }],
+      runtimeEpochs: [{
+        transitionId: '56565656-5656-4565-8565-565656565656',
+        ordinal: 1,
+        fromCliSha256: initialRuntime.cliSha256,
+        runtime: nextRuntime,
+        worker: { path: nextRuntime.cliPath, sha256: nextRuntime.cliSha256 },
+        executionEpochOrdinal: 1,
+        observedAt: '2026-09-01T19:01:00.000Z',
+      }],
+    };
+  raw.lanes[lane.laneId].ownership.spawnIntent =
+    claudeSpawnIntent(operationId, lane.displayName, '9');
+  for (const runtime of [
+    raw.lanes[lane.laneId].runtime,
+    raw.lanes[lane.laneId].providerIdentity.runtimeEpochs[0].runtime,
+  ]) {
+    delete runtime.projectsDevice;
+    delete runtime.projectsInode;
+  }
+  fs.writeFileSync(registryPath, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+  assert.equal(readRegistry(fixture.repoRoot, fixture.env).registry.lanes[lane.laneId].state,
+    'worktreeRemoved');
+
+  raw.lanes[lane.laneId].state = 'active';
+  fs.writeFileSync(registryPath, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /projectsDevice is invalid/);
+
+  raw.lanes[lane.laneId].providerIdentity.runtimeEpochs = [];
+  fs.writeFileSync(registryPath, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+  assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /projectsDevice is invalid/);
+});
+
 test('Claude spawn intent validates a recorded model selector and preserves legacy omission', (t) => {
   const fixture = createStateFixture(t);
   const displayName = '[test] Claude model selector';
@@ -702,6 +807,7 @@ test('Claude spawn observation atomically binds all stable handles, receipts, an
       backend: 'claude-code',
       displayName,
       operationId,
+      runtime: claudeRuntimeReceipt(),
       providerIdentity: {
         version: 1,
         sessionId: null,
@@ -773,6 +879,7 @@ test('Claude provider handle collisions and corrupt identities fail closed', (t)
       backend: 'claude-code',
       displayName: `[test] ${laneId}`,
       operationId: operation.operationId,
+      runtime: claudeRuntimeReceipt(),
       providerIdentity: identity,
       spawnIntent: claudeSpawnIntent(operation.operationId, `[test] ${laneId}`, laneId === 'claude-a' ? 'a' : 'b'),
     }, fixture.env);
@@ -822,6 +929,7 @@ test('Claude identity reservation requires exact backend, intent, receipts, and 
     backend: 'claude-code',
     displayName: '[test] valid lifecycle',
     operationId: operation.operationId,
+    runtime: claudeRuntimeReceipt(),
     providerIdentity: identity,
     spawnIntent: claudeSpawnIntent(operation.operationId, '[test] valid lifecycle', 'd'),
   }, fixture.env);

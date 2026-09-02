@@ -22,6 +22,21 @@ const {
 } = require('./state');
 const { AppServerClient, validateUrl } = require('./app-server');
 const {
+  markDispatchJournaled, recordEvent, recordObservation, reserveDispatch, setObservedProfile,
+} = require('./dispatch');
+const {
+  ExecutionProfileError,
+  catalogFromCodexModelList,
+  requestFromProfile,
+  resolveCodexExecutionProfile,
+  stableStringify,
+  validateUnobservedProfile,
+  withObservedExecution,
+} = require('./execution-profile');
+const {
+  CODEX_GUIDANCE, CODEX_SELECTION_GUIDE, INTENT_DESCRIPTORS,
+} = require('./execution-guidance');
+const {
   captureHarvestReceipt,
   isPermanentCleanupError,
   materializeManagedSeat,
@@ -30,7 +45,9 @@ const {
   verifyLaneSeat,
   verifySeat,
 } = require('./worktree');
-const { boundedCursor, laneNameError, normalizeThreadStatus } = require('./validation');
+const {
+  boundedCursor, canonicalLaneName, laneNameError, normalizeThreadStatus, ownedLaneNameError,
+} = require('./validation');
 
 const SOURCE_KINDS = [
   'cli',
@@ -79,6 +96,7 @@ function laneResult(operation, lane, extra = {}) {
     adapter: lane.backend,
     state: lane.state,
     capabilities: lane.capabilities,
+    visibility: lane.visibility,
     ...extra,
   };
 }
@@ -164,7 +182,7 @@ async function withClient(options, callback, env = process.env) {
     clientInfo: {
       name: 'transmogrify',
       title: 'transmogrify',
-      version: '0.1.0',
+      version: '0.2.0',
     },
     serverRequestHandler: options.serverRequestHandler,
   });
@@ -179,6 +197,119 @@ async function withClient(options, callback, env = process.env) {
   }
 }
 
+async function readModelCatalog(client) {
+  const data = [];
+  const seenCursors = new Set();
+  let cursor = null;
+  for (let page = 0; page < MAX_PAGINATION_PAGES; page += 1) {
+    const response = await client.call('model/list', {
+      cursor,
+      includeHidden: true,
+      limit: 100,
+    });
+    if (!response || !Array.isArray(response.data)) {
+      throw new TransmogrifyError('PROTOCOL_ERROR', 'model/list response did not include data');
+    }
+    data.push(...response.data);
+    if (data.length > MAX_PAGINATION_ROWS) {
+      throw new TransmogrifyError('PROTOCOL_ERROR', 'model/list exceeded the bounded catalog size');
+    }
+    if (response.nextCursor === null || response.nextCursor === undefined) {
+      return { data, nextCursor: null };
+    }
+    if (typeof response.nextCursor !== 'string' || !response.nextCursor ||
+        seenCursors.has(response.nextCursor)) {
+      throw new TransmogrifyError('PROTOCOL_ERROR', 'model/list returned an invalid pagination cursor');
+    }
+    seenCursors.add(response.nextCursor);
+    cursor = response.nextCursor;
+  }
+  throw new TransmogrifyError('PROTOCOL_ERROR', 'model/list exceeded the bounded page count');
+}
+
+function executionRequest(options) {
+  return Object.fromEntries([
+    ['intent', options.intent],
+    ['model', options.model],
+    ['effort', options.effort],
+    ['speed', options.speed],
+  ].filter(([, value]) => value !== undefined));
+}
+
+function profileFailure(error) {
+  if (!(error instanceof ExecutionProfileError)) throw error;
+  throw new TransmogrifyError('EXECUTION_PROFILE_UNSUPPORTED', error.message, {
+    profileCode: error.code,
+  });
+}
+
+async function resolveSpawnProfile(options, env) {
+  let supplied = null;
+  if (options.executionProfile !== undefined) {
+    try {
+      supplied = validateUnobservedProfile(options.executionProfile);
+      if (supplied.provider !== 'codex') {
+        throw new ExecutionProfileError('INVALID_PROFILE', 'execution profile provider is not codex');
+      }
+    } catch (error) { return profileFailure(error); }
+  }
+  return withClient(options, async (client, initialized) => {
+    const modelList = await readModelCatalog(client);
+    const catalogSha256 = crypto.createHash('sha256')
+      .update(stableStringify(modelList)).digest('hex');
+    try {
+      const resolved = resolveCodexExecutionProfile({
+        request: supplied ? requestFromProfile(supplied) : executionRequest(options),
+        modelList,
+        guidance: CODEX_GUIDANCE,
+        source: {
+          kind: 'app-server:model/list',
+          userAgent: initialized.userAgent,
+          catalogSha256,
+          verifiedAt: '2026-09-02',
+        },
+      });
+      if (supplied && stableStringify(supplied) !== stableStringify(resolved)) {
+        throw new ExecutionProfileError(
+          'STALE_PROFILE', 'supplied Codex execution profile does not match current capabilities',
+        );
+      }
+      return resolved;
+    } catch (error) { return profileFailure(error); }
+  }, env);
+}
+
+async function executionCapabilities(options = {}, env = process.env) {
+  return withClient(options, async (client, initialized) => {
+    const modelList = await readModelCatalog(client);
+    let catalog;
+    try {
+      catalog = catalogFromCodexModelList(modelList, {
+        source: {
+          kind: 'app-server:model/list',
+          userAgent: initialized.userAgent,
+          verifiedAt: '2026-09-02',
+        },
+      });
+    } catch (error) { return profileFailure(error); }
+    return {
+      version: 1,
+      ok: true,
+      operation: 'capabilities',
+      target: 'codex',
+      intents: INTENT_DESCRIPTORS,
+      selectionGuide: CODEX_SELECTION_GUIDE,
+      availability: {
+        kind: 'runtime-advertised',
+        observed: true,
+        note: 'Selectable models and native tiers come from the fully paginated live model/list response.',
+      },
+      guidance: CODEX_GUIDANCE,
+      catalog,
+    };
+  }, env);
+}
+
 async function spawn(options, env = process.env) {
   if (!options.repoRoot || !path.isAbsolute(options.repoRoot) ||
       typeof options.input !== 'string' || !options.input) {
@@ -186,11 +317,43 @@ async function spawn(options, env = process.env) {
   }
   const nameProblem = laneNameError(options.name, 'Codex lane name');
   if (nameProblem) throw new TransmogrifyError('USAGE_ERROR', nameProblem);
+  options = { ...options, name: canonicalLaneName(options.name) };
+  const canonicalNameProblem = ownedLaneNameError(options.name, 'Codex lane name');
+  if (canonicalNameProblem) {
+    throw new TransmogrifyError('USAGE_ERROR', canonicalNameProblem);
+  }
   const receiptVerification = turnReceiptVerificationBounds(options);
-  ensureRegistry(options.repoRoot, env);
+  if (options.allowProtocolOnly !== true) {
+    throw new TransmogrifyError(
+      'NATIVE_VISIBILITY_REQUIRED',
+      'Codex spawn requires an app-visibility receipt; use --allow-protocol-only only for an explicitly non-native lane',
+    );
+  }
+  if (options.parentContext || options.executionProfile !== undefined) {
+    options = { ...options, executionProfile: await resolveSpawnProfile(options, env) };
+  }
   const laneId = options.laneId || crypto.randomUUID();
   const operationId = crypto.randomUUID();
   const endpoint = validateUrl(runtimeUrl(options, env));
+  const dispatchEnvelope = options.parentContext ? reserveDispatch({
+    parentContext: options.parentContext,
+    repoRoot: options.repoRoot,
+    laneId,
+    targetProvider: 'codex',
+    backend: 'codex-app-server',
+    displayName: options.name,
+    profile: options.executionProfile,
+    prompt: options.input,
+  }, env) : null;
+  if (dispatchEnvelope) {
+    options = {
+      ...options,
+      input: dispatchEnvelope.renderedPrompt,
+      dispatch: dispatchEnvelope.dispatch,
+      lineage: dispatchEnvelope.lineage,
+    };
+  }
+  ensureRegistry(options.repoRoot, env);
   let lane;
   let seat;
   let operation;
@@ -212,6 +375,11 @@ async function spawn(options, env = process.env) {
       target: 'codex',
       name: options.name,
       inputSha256: crypto.createHash('sha256').update(options.input).digest('hex'),
+      ...(dispatchEnvelope ? {
+        dispatchId: dispatchEnvelope.dispatch.dispatchId,
+        promptReceipts: dispatchEnvelope.receipts,
+      } : {}),
+      ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
       ...(seat ? { seat } : {}),
     };
     ({ operation, lane } = reserveSpawn(options.repoRoot, {
@@ -228,6 +396,8 @@ async function spawn(options, env = process.env) {
         displayName: options.name,
         state: 'planned',
         operationId,
+        ...(options.lineage ? { lineage: options.lineage } : {}),
+        ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
         seat,
         ...(seatIntent ? { seatIntent } : {}),
         runtime: { endpoint },
@@ -240,10 +410,11 @@ async function spawn(options, env = process.env) {
         },
         visibility: {
           surface: 'codex',
-          state: 'providerNativeUnverified',
+          state: 'protocolOnlyByOwnerOverride',
         },
       },
     }, env));
+    if (options.dispatch) markDispatchJournaled(options.dispatch.dispatchId, env);
     if (seatIntent) {
       seat = materializeManagedSeat(options.repoRoot, seatIntent);
       lane = bindLaneSeat(options.repoRoot, laneId, operationId, seat, env);
@@ -251,6 +422,18 @@ async function spawn(options, env = process.env) {
     }
     return await withClient(options, async (client, initialized) => {
       if (options.onNotification) client.on('notification', options.onNotification);
+      if (options.executionProfile) {
+        const currentModelList = await readModelCatalog(client);
+        const currentCatalogSha256 = crypto.createHash('sha256')
+          .update(stableStringify(currentModelList)).digest('hex');
+        if (currentCatalogSha256 !== options.executionProfile.resolved.catalogSource.catalogSha256 ||
+            initialized.userAgent !== options.executionProfile.resolved.catalogSource.userAgent) {
+          throw new TransmogrifyError(
+            'EXECUTION_PROFILE_UNSUPPORTED',
+            'Codex model capabilities changed between resolution and launch',
+          );
+        }
+      }
       operation = updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
         state: 'providerRequestDispatched',
         details: {
@@ -259,10 +442,22 @@ async function spawn(options, env = process.env) {
         },
       }, env);
       providerRequestDispatched = true;
+      const resolvedModel = options.executionProfile?.resolved.model.selector;
+      const resolvedEffort = options.executionProfile?.resolved.effort.level;
+      const resolvedControl = options.executionProfile?.resolved.speed.nativeControl;
+      if (resolvedControl && (resolvedControl.kind !== 'service-tier' ||
+          !['default', 'priority'].includes(resolvedControl.value))) {
+        throw new TransmogrifyError(
+          'EXECUTION_PROFILE_UNSUPPORTED', 'Codex profile has an invalid service-tier control',
+        );
+      }
+      const resolvedTier = resolvedControl?.value;
       const started = await client.call('thread/start', {
         cwd: seat.path,
         approvalPolicy: options.approvalPolicy || 'never',
         sandbox: options.sandbox || 'workspace-write',
+        ...(resolvedModel ? { model: resolvedModel } : {}),
+        ...(resolvedTier ? { serviceTier: resolvedTier } : {}),
       });
       const threadId = started?.thread?.id;
       if (!threadId) {
@@ -294,6 +489,13 @@ async function spawn(options, env = process.env) {
 
       try {
         assertProviderSeat(lane, started.thread, started.cwd, 'thread/start', true);
+        if (resolvedTier && started.serviceTier !== null && started.serviceTier !== undefined &&
+            started.serviceTier !== resolvedTier) {
+          throw new TransmogrifyError(
+            'EXECUTION_PROFILE_UNSUPPORTED',
+            'thread/start reported a service tier that contradicts the resolved profile',
+          );
+        }
       } catch (error) {
         updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
           state: 'partial',
@@ -306,7 +508,7 @@ async function spawn(options, env = process.env) {
         lane = updateLane(options.repoRoot, laneId, { state: 'deliveryUnknown' }, env);
         throw new TransmogrifyError(
           'PARTIAL_SUCCESS',
-          'thread was created but its provider cwd postcondition failed',
+          'thread was created but a provider postcondition failed',
           {
             laneId,
             providerId: threadId,
@@ -314,6 +516,24 @@ async function spawn(options, env = process.env) {
             causeCode: error.code || 'PROTOCOL_ERROR',
           },
         );
+      }
+
+      let observedExecutionProfile = null;
+      if (options.executionProfile) {
+        const observedTier = ['default', 'priority'].includes(started.serviceTier)
+          ? started.serviceTier : null;
+        observedExecutionProfile = withObservedExecution(options.executionProfile, {
+          model: typeof started.model === 'string' ? started.model : null,
+          effort: null,
+          speed: observedTier === 'priority' ? 'fast' : observedTier === 'default' ? 'standard' : null,
+          nativeControl: observedTier === null ? null : {
+            kind: 'service-tier', value: observedTier,
+          },
+          receipt: { method: 'thread/start', userAgent: initialized.userAgent },
+        });
+        if (options.dispatch) {
+          setObservedProfile(options.dispatch.dispatchId, observedExecutionProfile.observed, env);
+        }
       }
 
       const completion = options.waitForCompletion
@@ -340,6 +560,10 @@ async function spawn(options, env = process.env) {
         cwd: seat.path,
         input: [{ type: 'text', text: options.input }],
         clientUserMessageId: operationId,
+        ...(resolvedModel ? { model: resolvedModel } : {}),
+        ...(resolvedEffort ? { effort: resolvedEffort } : {}),
+        ...(resolvedTier ? { serviceTier: resolvedTier } : {}),
+        ...(resolvedTier ? { serviceTierForTurn: resolvedTier } : {}),
       }, options.turnStartTimeoutMs ?? 30000);
       const turn = turnStarted?.turn;
       const inputReceiptSource = await verifiedUserMessageTurnReceipt(
@@ -404,6 +628,14 @@ async function spawn(options, env = process.env) {
       }, env);
       completeLaneOperation(options.repoRoot, laneId, operationId, { state: 'complete' }, env);
       spawnVerified = true;
+      if (options.dispatch) {
+        recordEvent({
+          dispatchId: options.dispatch.dispatchId,
+          type: 'child.spawned',
+          fingerprint: `spawn-complete:${operationId}:${threadId}`,
+          data: { state: 'spawned' },
+        }, env);
+      }
       const launched = laneResult('spawn', lane, {
         receipt: {
           providerId: threadId,
@@ -412,6 +644,7 @@ async function spawn(options, env = process.env) {
           userAgent: initialized.userAgent,
           acknowledgedBy: 'response',
           inputReceiptSource,
+          ...(observedExecutionProfile ? { executionProfile: observedExecutionProfile } : {}),
         },
       });
       if (options.onLaunch) {
@@ -445,6 +678,16 @@ async function spawn(options, env = process.env) {
         providerState: { type: completed.turn.status === 'failed' ? 'systemError' : 'idle' },
         lastVerifiedAt: new Date().toISOString(),
       }, env);
+      if (options.dispatch) {
+        recordObservation({
+          dispatchId: options.dispatch.dispatchId,
+          phase: completed.turn.status === 'failed' ? 'failed' : 'idle',
+          providerFingerprint: `turn:${completed.turn.id}:${completed.turn.status}`,
+          eventType: completed.turn.status === 'failed'
+            ? 'child.failed' : 'child.turn-completed',
+          data: { state: lane.state, status: completed.turn.status },
+        }, env);
+      }
       return laneResult('spawn', lane, {
         operationId: operation.operationId,
         receipt: {
@@ -946,6 +1189,16 @@ async function resume(options, env = process.env) {
   return withLaneLease(options.repoRoot, laneId, async () => {
     lane = ownedLane({ ...options, laneId }, env, 'mutate');
     assertSeatIdentity(options, lane, env);
+    const resolvedModel = lane.executionProfile?.resolved.model.selector;
+    const resolvedEffort = lane.executionProfile?.resolved.effort.level;
+    const resolvedControl = lane.executionProfile?.resolved.speed.nativeControl;
+    if (resolvedControl && (resolvedControl.kind !== 'service-tier' ||
+        !['default', 'priority'].includes(resolvedControl.value))) {
+      throw new TransmogrifyError(
+        'EXECUTION_PROFILE_UNSUPPORTED', 'Codex profile has an invalid service-tier control',
+      );
+    }
+    const resolvedTier = resolvedControl?.value;
     let operation = pendingOperationForLane(options.repoRoot, laneId, env);
     if (operation) {
       assertPendingMutation(operation, 'resume', lane, { messageSha256: digest });
@@ -1041,11 +1294,20 @@ async function resume(options, env = process.env) {
             threadId: lane.providerId,
             cwd: lane.seat.path,
             excludeTurns: true,
+            ...(resolvedModel ? { model: resolvedModel } : {}),
+            ...(resolvedTier ? { serviceTier: resolvedTier } : {}),
           });
           if (resumed?.thread?.id !== lane.providerId) {
             throw new TransmogrifyError('PROTOCOL_ERROR', 'thread/resume response did not match lane provider id');
           }
           assertProviderSeat(lane, resumed.thread, resumed.cwd, 'thread/resume', true);
+          if (resolvedTier && resumed.serviceTier !== null && resumed.serviceTier !== undefined &&
+              resumed.serviceTier !== resolvedTier) {
+            throw new TransmogrifyError(
+              'EXECUTION_PROFILE_UNSUPPORTED',
+              'thread/resume reported a service tier that contradicts the resolved profile',
+            );
+          }
         } catch (error) {
           updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
             state: 'unknownResume',
@@ -1081,6 +1343,10 @@ async function resume(options, env = process.env) {
           cwd: lane.seat.path,
           input: [{ type: 'text', text: options.message }],
           clientUserMessageId: operation.operationId,
+          ...(resolvedModel ? { model: resolvedModel } : {}),
+          ...(resolvedEffort ? { effort: resolvedEffort } : {}),
+          ...(resolvedTier ? { serviceTier: resolvedTier } : {}),
+          ...(resolvedTier ? { serviceTierForTurn: resolvedTier } : {}),
         }, options.turnStartTimeoutMs ?? 30000);
         const turn = started?.turn;
         const inputReceiptSource = await verifiedUserMessageTurnReceipt(
@@ -1445,7 +1711,72 @@ async function retire(options, env = process.env) {
   }, env);
 }
 
+async function repairLocalRecoveryState(options, initial, operations, env) {
+  return withLaneLease(options.repoRoot, initial.laneId, async () => {
+    let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
+    const pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+    const recorded = pending || operations.get(lane.operationId);
+    const repaired = [];
+    if (pending?.type === 'spawn' && ['planned', 'seatReady'].includes(pending.state) &&
+        ['planned', 'failed'].includes(lane.state) && !lane.providerId) {
+      if (lane.state === 'planned') {
+        lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
+        repaired.push('unstartedSpawnState');
+      }
+      completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+        state: 'notDelivered',
+        details: {
+          ...pending.details,
+          notDeliveredObservedAt: new Date().toISOString(),
+        },
+      }, env);
+      repaired.push('unstartedSpawnOperation');
+    }
+    if (recorded?.type === 'spawn' && ['failed', 'notDelivered'].includes(recorded.state) &&
+        lane.state === 'planned' && !lane.providerId) {
+      lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
+      repaired.push('failedSpawnState');
+    }
+    const settled = settleTerminalLaneOperationPointer(options.repoRoot, lane.laneId, env);
+    if (settled) repaired.push('terminalOperationPointer');
+    const failedSpawnTerminal = recorded?.type === 'spawn' &&
+      ['failed', 'notDelivered'].includes(recorded.state) &&
+      lane.state === 'failed' && !lane.providerId;
+    if (settled || repaired.length > 0 || failedSpawnTerminal) {
+      lane = requireOwnedLane(options.repoRoot, lane.laneId, env);
+      const terminalState = settled?.state || recorded?.state;
+      return {
+        laneId: lane.laneId,
+        providerId: lane.providerId || null,
+        state: lane.state,
+        delivery: terminalState === 'complete' ? 'confirmed' : 'notDelivered',
+        repaired,
+      };
+    }
+    if (lane.state === 'worktreeRemoved') {
+      return {
+        laneId: lane.laneId,
+        providerId: lane.providerId,
+        state: lane.state,
+        delivery: 'confirmed',
+        repaired: [],
+      };
+    }
+    return null;
+  }, env);
+}
+
+function remainingRecoveryMs(deadline) {
+  const remaining = Math.floor(deadline - Date.now());
+  if (remaining < 1) {
+    throw new TransmogrifyError('TIMEOUT', 'Codex recovery exceeded its aggregate deadline');
+  }
+  return remaining;
+}
+
 async function recover(options, env = process.env) {
+  const recoveryDeadline = Number.isInteger(options.timeoutMs)
+    ? Date.now() + options.timeoutMs : null;
   const endpoint = validateUrl(runtimeUrl(options, env));
   let lanes;
   if (options.laneId) {
@@ -1471,63 +1802,49 @@ async function recover(options, env = process.env) {
     );
   }
   const operations = new Map(listOperations(options.repoRoot, env).map((entry) => [entry.operationId, entry]));
-  return withClient(options, async (client, initialized) => {
-    const recovered = [];
-    for (const initial of lanes) {
-      if (initial.runtime?.endpoint !== endpoint) {
-        recovered.push({
-          laneId: initial.laneId,
-          providerId: initial.providerId,
-          skipped: 'differentRuntime',
-        });
-        continue;
-      }
+  const localResults = [];
+  const providerLanes = [];
+  for (const initial of lanes) {
+    if (initial.runtime?.endpoint !== endpoint) {
+      localResults.push({
+        laneId: initial.laneId,
+        providerId: initial.providerId,
+        skipped: 'differentRuntime',
+      });
+      continue;
+    }
+    const repaired = await repairLocalRecoveryState(options, initial, operations, env);
+    if (repaired) localResults.push(repaired);
+    else providerLanes.push(initial);
+  }
+  if (providerLanes.length === 0) {
+    return {
+      version: 1,
+      ok: localResults.every((entry) => !entry.error && !entry.skipped &&
+        entry.delivery !== 'unknown'),
+      operation: 'recover',
+      adapter: 'codex-app-server',
+      recovered: localResults,
+      receipt: { providerConnection: 'notRequired' },
+    };
+  }
+  return withClient(recoveryDeadline === null ? options : {
+    ...options,
+    timeoutMs: remainingRecoveryMs(recoveryDeadline),
+  }, async (client, initialized) => {
+    if (recoveryDeadline !== null) {
+      const call = client.call.bind(client);
+      client.call = (method, params = {}) => call(
+        method,
+        params,
+        remainingRecoveryMs(recoveryDeadline),
+      );
+    }
+    const recovered = [...localResults];
+    for (const initial of providerLanes) {
       try {
         const result = await withLaneLease(options.repoRoot, initial.laneId, async () => {
           let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
-          const recordedOperation = pendingOperationForLane(
-            options.repoRoot,
-            lane.laneId,
-            env,
-          ) || operations.get(lane.operationId);
-          const terminalRepairs = [];
-          if (recordedOperation?.type === 'spawn' && recordedOperation.state === 'failed' &&
-              lane.state === 'planned' && !lane.providerId) {
-            // Normalize the lane before clearing a terminal pointer. If this write
-            // succeeds and pointer settlement crashes, the next recovery only has
-            // to clear the pointer; if the pointer was already cleared, the
-            // immutable spawn operation still makes this repair idempotent.
-            lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
-            terminalRepairs.push('failedSpawnState');
-          }
-          const settledTerminal = settleTerminalLaneOperationPointer(
-            options.repoRoot,
-            lane.laneId,
-            env,
-          );
-          if (settledTerminal) terminalRepairs.push('terminalOperationPointer');
-          const failedSpawnTerminal = recordedOperation?.type === 'spawn' &&
-            recordedOperation.state === 'failed' && lane.state === 'failed' && !lane.providerId;
-          if (settledTerminal || terminalRepairs.length > 0 || failedSpawnTerminal) {
-            lane = requireOwnedLane(options.repoRoot, lane.laneId, env);
-            const terminalState = settledTerminal?.state || recordedOperation?.state;
-            return {
-              laneId: lane.laneId,
-              providerId: lane.providerId || null,
-              state: lane.state,
-              delivery: terminalState === 'complete' ? 'confirmed' : 'notDelivered',
-              repaired: terminalRepairs,
-            };
-          }
-          if (lane.state === 'worktreeRemoved') {
-            return {
-              laneId: lane.laneId,
-              providerId: lane.providerId,
-              state: lane.state,
-              delivery: 'confirmed',
-              repaired: [],
-            };
-          }
           let pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
           let operation = pending || operations.get(lane.operationId);
           if (!lane.seat && lane.seatIntent && operation?.type === 'spawn') {
@@ -1868,6 +2185,7 @@ async function recover(options, env = process.env) {
 
 module.exports = {
   TransmogrifyError,
+  executionCapabilities,
   interrupt,
   recover,
   resume,

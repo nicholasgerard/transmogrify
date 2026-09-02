@@ -106,8 +106,14 @@ test('doctor reuses only read-only provider surfaces and emits aggregate ownersh
     ownedLanes: 1,
     pendingOperations: 1,
   });
-  assert.equal(result.providers.codex.reuse, 'existing-runtime');
+  assert.equal(result.providers.codex.reuse, 'existing-compatible-protocol-runtime');
   assert.equal(result.providers.codex.reusable, true);
+  assert.deepEqual(result.providers.codex.nativeVisibility, {
+    verified: false,
+    nativeDispatchReady: false,
+    evidence: 'not-measurable-by-app-server-handshake',
+    nextAction: 'run-disposable-exact-owned-app-visibility-check',
+  });
   assert.deepEqual(result.providers.codex.observed, {
     userAgentFamily: 'codex_cli_rs',
     version: '0.151.0',
