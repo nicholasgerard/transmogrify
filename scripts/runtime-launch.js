@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 
+// Codex app-server runtime launcher. It reuses a verified loopback-only listener
+// when one exists and otherwise starts a detached child with a sanitized
+// environment and a private append-only log. The only process it may signal is a
+// child it launched itself, identified by pid plus measured process birth: it
+// never terminates a listener it merely observed, and it never falls back to a
+// PID-only SIGKILL.
+
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -8,6 +15,8 @@ const { execFile, spawn } = require('node:child_process');
 const { processBirth } = require('./lib/state');
 const { validateUrl } = require('./lib/app-server');
 
+// Launch polling bounds and the allowlisted environment a detached runtime
+// inherits. Nothing outside that set crosses into the child.
 const DEFAULT_ATTEMPTS = 40;
 const DEFAULT_POLL_MS = 250;
 const PROBE_TIMEOUT_MS = 1500;
@@ -34,6 +43,7 @@ const RUNTIME_ENV_KEYS = new Set([
   'XDG_STATE_HOME',
 ]);
 
+// Launcher failure. USAGE_ERROR exits 2; every other code exits 1.
 class RuntimeLaunchError extends Error {
   constructor(message, code = 'RUNTIME_LAUNCH_FAILED') {
     super(message);
@@ -41,6 +51,9 @@ class RuntimeLaunchError extends Error {
   }
 }
 
+// Split a validated loopback URL into the client URL, the listen host and port,
+// and the numeric port. Credentials, a path, a query, a fragment, or a missing
+// port are USAGE_ERROR.
 function normalizeListenUrl(rawUrl) {
   const canonical = validateUrl(rawUrl);
   const parsed = new URL(canonical);
@@ -58,6 +71,9 @@ function normalizeListenUrl(rawUrl) {
   };
 }
 
+// Parse lsof listener records for one port. A wildcard or non-loopback bind is
+// UNSAFE_LISTENER and refuses reuse, so a runtime reachable off-host is never
+// adopted as this installation's control plane.
 function parseLsofListeners(raw, port) {
   const listeners = [];
   let current = null;
@@ -91,6 +107,8 @@ function parseLsofListeners(raw, port) {
   return listeners;
 }
 
+// Bounded child execution that treats exit 1 as data, because lsof uses it for
+// an empty result. Every other failure is a launch error.
 function execFileResult(executable, args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(executable, args, {
@@ -113,6 +131,8 @@ function execFileResult(executable, args, options = {}) {
 // cannot substitute a listener report.
 const SYSTEM_TOOL_PATH = '/usr/sbin:/usr/bin:/bin:/sbin';
 
+// The loopback listeners on a port, or an empty list. Empty output with exit 1
+// means nothing is listening there.
 async function inspectListeners(port, dependencies = {}) {
   const run = dependencies.execFileResult || execFileResult;
   const result = await run('lsof', [
@@ -122,6 +142,8 @@ async function inspectListeners(port, dependencies = {}) {
   return parseLsofListeners(result.stdout, port);
 }
 
+// Run the read-only probe against the endpoint. True only when it completed a
+// verified Codex app-server handshake.
 async function probeRuntime(probePath, clientUrl, dependencies = {}) {
   const run = dependencies.execFileResult || execFileResult;
   const result = await run(process.execPath, [
@@ -130,6 +152,8 @@ async function probeRuntime(probePath, clientUrl, dependencies = {}) {
   return result.code === 0;
 }
 
+// True when a recorded pid is live and its measured birth still matches, so a
+// recycled pid can never be mistaken for the launched runtime.
 function processMatches(record, birth = processBirth) {
   if (!record || !Number.isInteger(record.pid) || record.pid < 1 || !record.processBirth) return false;
   try { process.kill(record.pid, 0); } catch { return false; }
@@ -140,6 +164,8 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+// The only environment a detached runtime inherits: allowlisted variables with
+// NUL-bearing values dropped.
 function sanitizedRuntimeEnv(env = process.env) {
   const clean = {};
   for (const [key, value] of Object.entries(env)) {
@@ -149,6 +175,8 @@ function sanitizedRuntimeEnv(env = process.env) {
   return clean;
 }
 
+// Create the log directory 0700 after proving the path is normalized, absolute,
+// symlink-free, and rooted in an owner-controlled ancestor.
 function prepareRuntimeLogDirectory(directory) {
   if (path.resolve(directory) !== directory) {
     throw new RuntimeLaunchError('runtime log path must be normalized and absolute', 'USAGE_ERROR');
@@ -174,6 +202,9 @@ function prepareRuntimeLogDirectory(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 }
 
+// Open the runtime log append-only at 0600 through O_NOFOLLOW and re-stat the
+// descriptor, so the child's output can never be redirected through a symlink
+// into another file.
 function openRuntimeLog(logPath) {
   if (!path.isAbsolute(logPath)) {
     throw new RuntimeLaunchError('runtime log path must be absolute', 'USAGE_ERROR');
@@ -215,6 +246,10 @@ function openRuntimeLog(logPath) {
   }
 }
 
+// Start the runtime detached with the sanitized environment and the log as its
+// only output. It returns only once a stable pid and process birth are measured;
+// without that identity the child is terminated and the launch fails, because
+// nothing later would be permitted to signal it.
 async function spawnRuntime(options, dependencies = {}) {
   const spawnProcess = dependencies.spawn || spawn;
   const birth = dependencies.processBirth || processBirth;
@@ -256,6 +291,9 @@ async function spawnRuntime(options, dependencies = {}) {
   return receipt;
 }
 
+// Terminate only a process this launcher started, proven by pid and measured
+// birth and normally by the retained child handle. It sends SIGTERM once and, if
+// the process survives, refuses a PID-only SIGKILL and raises instead.
 async function terminateOwnedProcess(record, dependencies = {}) {
   const birth = dependencies.processBirth || processBirth;
   const matches = dependencies.processMatches || ((candidate) => processMatches(candidate, birth));
@@ -286,6 +324,10 @@ function listenerPids(listeners) {
   return new Set(listeners.map((listener) => listener.pid));
 }
 
+// Reuse a verified loopback runtime, or launch one and wait for its verified
+// handshake. When another listener wins the bind race only this launcher's own
+// child is removed, and the surviving listener is re-probed before reuse is
+// declared. Every failure path terminates the owned child first.
 async function ensureRuntime(options, dependencies = {}) {
   const normalized = normalizeListenUrl(options.url);
   const inspect = dependencies.inspectListeners || ((port) => inspectListeners(port, dependencies));
@@ -357,6 +399,7 @@ async function ensureRuntime(options, dependencies = {}) {
   }
 }
 
+// Strict option parsing: only the four known flags, each with a value.
 function parseCli(argv) {
   const values = {};
   for (let index = 0; index < argv.length; index += 1) {

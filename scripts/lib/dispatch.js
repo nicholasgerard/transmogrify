@@ -1,5 +1,12 @@
 'use strict';
 
+// Parent/child dispatch lineage and durable delivery: the installation record,
+// parent contexts, dispatch reservations, the bounded provenance block that
+// prefixes a child's first message, monotonic child events, and their
+// acknowledgements. Records are immutable once written and event ids are derived
+// from content, so a crash recreates the same id rather than a duplicate. It
+// never infers delivery and never drops an unacknowledged event.
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -15,6 +22,8 @@ const VERSION = 1;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SLUG_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+// The complete child event vocabulary. A type outside this set cannot be
+// recorded, so a parent never has to guess at an unknown event.
 const EVENT_TYPES = new Set([
   'child.spawned',
   'child.turn-completed',
@@ -27,6 +36,8 @@ const EVENT_TYPES = new Set([
   'child.delivery-unknown',
 ]);
 const DISPATCH_STATES = new Set(['reserved', 'journaled']);
+// Every collection here is bounded: a directory past its limit is refused rather
+// than scanned, and a visible label is capped before it can reach a prompt.
 const MAX_STATE_BYTES = 256 * 1024;
 const MAX_VISIBLE_BYTES = 256;
 const MAX_PARENT_RECORDS = 1_000;
@@ -35,6 +46,9 @@ const MAX_EVENT_RECORDS = 10_000;
 const MAX_EVENT_BATCH = 100;
 const ATOMIC_TEMP_PATTERN = /^\.[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json\.[1-9][0-9]*\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/i;
 
+// Dispatch failure carrying a stable code. USAGE_ERROR is caller input,
+// NOT_OWNED is another installation's record, and INVALID_LOCAL_STATE or
+// UNSAFE_LOCAL_STATE fails closed rather than repairing state in place.
 class DispatchError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -47,6 +61,8 @@ function digest(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+// Key-sorted JSON. Digests and immutability comparisons use it so key order can
+// never change an id or look like a changed record.
 function canonicalJson(value) {
   const normalize = (entry) => {
     if (Array.isArray(entry)) return entry.map(normalize);
@@ -58,6 +74,8 @@ function canonicalJson(value) {
   return JSON.stringify(normalize(value));
 }
 
+// Every required key must be present and no key outside the allowed set may
+// appear, so a record from a newer or tampered writer fails closed.
 function assertExactKeys(value, required, optional, label) {
   const keys = Object.keys(value).sort();
   const allowed = new Set([...required, ...optional]);
@@ -66,6 +84,8 @@ function assertExactKeys(value, required, optional, label) {
   }
 }
 
+// The record names in a private state directory, refusing the whole collection
+// once it exceeds its bound.
 function boundedDirectoryEntries(directory, maximum, label) {
   assertPrivateDirectory(directory, label);
   // atomicWriteJson uses this exact private temporary-name shape. A reader may
@@ -81,6 +101,8 @@ function boundedDirectoryEntries(directory, maximum, label) {
   return entries;
 }
 
+// Refuse a new record once a collection is at its bound. Checked before every
+// write, so growth stops at a refusal instead of an unbounded scan later.
 function assertWriteCapacity(count, maximum, label) {
   if (!Number.isSafeInteger(count) || count < 0 ||
       !Number.isSafeInteger(maximum) || maximum < 1) {
@@ -91,6 +113,8 @@ function assertWriteCapacity(count, maximum, label) {
   }
 }
 
+// Every record file must be named <uuid>.json. An unexpected name is
+// INVALID_LOCAL_STATE rather than something to skip quietly.
 function uuidJsonEntries(entries, label) {
   return entries.map((entry) => {
     if (!entry.endsWith('.json') || !UUID_PATTERN.test(entry.slice(0, -5))) {
@@ -100,6 +124,8 @@ function uuidJsonEntries(entries, label) {
   });
 }
 
+// A UUID-shaped id derived from a digest. Event ids are content-derived, so
+// re-recording the same event after a crash yields the same id.
 function uuidFromDigest(hex) {
   const bytes = Buffer.from(hex.slice(0, 32), 'hex');
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
@@ -108,6 +134,8 @@ function uuidFromDigest(hex) {
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
 }
 
+// The dispatch state paths under the shared state root, asserting owner-only
+// permissions on every directory that already exists.
 function pathsFor(env = process.env) {
   const root = stateRoot(env);
   const paths = {
@@ -129,6 +157,9 @@ function pathsFor(env = process.env) {
   return paths;
 }
 
+// Read one owner-only JSON record through an O_NOFOLLOW descriptor and stat that
+// descriptor, so a symlink swapped in between check and read cannot redirect it.
+// Absence is NOT_OWNED; a loose mode or foreign owner is UNSAFE_LOCAL_STATE.
 function readPrivateJson(file, label) {
   let descriptor;
   try {
@@ -151,6 +182,7 @@ function readPrivateJson(file, label) {
   }
 }
 
+// Directories holding dispatch state must be owner-only real directories.
 function assertPrivateDirectory(directory, label) {
   const stat = fs.lstatSync(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory() ||
@@ -160,6 +192,8 @@ function assertPrivateDirectory(directory, label) {
   }
 }
 
+// Serialize every installation-wide mutation. Sequence assignment, event
+// identity, and acknowledgement all assume this lock is held.
 function withInstallationLock(env, callback) {
   const paths = pathsFor(env);
   const owner = acquireLock(paths.lock);
@@ -177,6 +211,8 @@ function validateInstallation(record) {
   return record;
 }
 
+// The installation identity, created on first use. Every parent, dispatch, and
+// event is bound to it, so another installation's records are refused.
 function installationRecord(paths) {
   if (fs.existsSync(paths.installation)) {
     return validateInstallation(readPrivateJson(paths.installation, 'installation record'));
@@ -190,6 +226,8 @@ function installationRecord(paths) {
   return record;
 }
 
+// A bounded single-line string with no control characters or unpaired
+// surrogates. Every value that reaches the provenance block passes here first.
 function assertSafeVisible(value, label, maximum = MAX_VISIBLE_BYTES) {
   if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > maximum ||
       /[\u0000-\u001f\u007f-\u009f]/u.test(value) || /[\uD800-\uDFFF]/u.test(value)) {
@@ -198,6 +236,9 @@ function assertSafeVisible(value, label, maximum = MAX_VISIBLE_BYTES) {
   return value;
 }
 
+// A safe visible value that additionally carries no filesystem path, UNC path,
+// drive letter, or credential-shaped token. Display names cross into a provider
+// prompt, so they must not leak local paths or secrets.
 function assertSafeMetadataLabel(value, label) {
   assertSafeVisible(value, label);
   if (path.isAbsolute(value) ||
@@ -210,6 +251,9 @@ function assertSafeMetadataLabel(value, label) {
   return value;
 }
 
+// Shape and ownership gate for a parent context: this installation's id, slug
+// host provider and app, a safe display name, an optional bounded native task
+// reference, and its monotonic sequence counter.
 function validateParent(record, installation) {
   if (record && typeof record === 'object' && !Array.isArray(record)) {
     assertExactKeys(record, [
@@ -232,6 +276,9 @@ function validateParent(record, installation) {
   return record;
 }
 
+// Register or re-adopt a parent context under the installation lock. A native
+// task reference is a stable key: an exact match returns the existing context,
+// and the same reference with a different host or name is INVALID_STATE.
 function createParentContext(options, env = process.env) {
   if (!SLUG_PATTERN.test(options?.hostProvider || '') || !SLUG_PATTERN.test(options?.hostApp || '')) {
     throw new DispatchError('USAGE_ERROR', 'parent host provider and app must be lowercase slugs');
@@ -292,6 +339,8 @@ function createParentContext(options, env = process.env) {
   });
 }
 
+// Every parent context for this installation, oldest first. Returns empty rather
+// than throwing when none has been registered.
 function listParentContexts(env = process.env) {
   const paths = pathsFor(env);
   if (!fs.existsSync(paths.installation) || !fs.existsSync(paths.parents)) return [];
@@ -307,6 +356,9 @@ function listParentContexts(env = process.env) {
     .sort((left, right) => left.parent.createdAt.localeCompare(right.parent.createdAt));
 }
 
+// Load a parent context by path. The path must be the exact registered
+// <uuid>.json inside the parents directory and must agree with the record's own
+// parentRef; anything else is NOT_OWNED.
 function loadParentContext(file, env = process.env) {
   if (!path.isAbsolute(file || '')) {
     throw new DispatchError('USAGE_ERROR', '--parent-context-file must be absolute');
@@ -326,6 +378,8 @@ function loadParentContext(file, env = process.env) {
   return { parent: record, file: expected };
 }
 
+// Resolve a caller-supplied parent against its stored record and require them to
+// be identical, so a drifted in-memory copy is NOT_OWNED and cannot write events.
 function ownedParentContext(parentContext, env) {
   if (!parentContext?.parent) return loadParentContext(parentContext, env);
   const paths = pathsFor(env);
@@ -354,9 +408,14 @@ const APP_LABELS = new Map([
   ['claude-ide', 'Claude Code IDE'],
   ['claude-web', 'Claude web'],
 ]);
+// Version 2 of the first-message provenance block: a box-drawing frame with
+// readable host and target labels and printable-ASCII values.
 const PROVENANCE_BLOCK_VERSION = 2;
 const PROVENANCE_BLOCK_WIDTH = 60;
 
+// The displayable execution selection for the provenance block, accepting both
+// the current and the legacy profile field names. Every part must be bounded and
+// safe or the dispatch is refused.
 function profileParts(profile) {
   const requested = profile?.requested || profile?.requestedProfile || {};
   const resolved = profile?.resolved || profile?.resolvedProfile || {};
@@ -400,6 +459,9 @@ function frameLine(prefix) {
   return `${prefix}${'─'.repeat(Math.max(PROVENANCE_BLOCK_WIDTH - prefix.length, 4))}`;
 }
 
+// Render the bounded block that prefixes a child's first message. It carries
+// only safe display labels and the durable dispatch id, never a repository path,
+// a provider credential, or a provider-private identifier.
 function renderProvenanceBlock(metadata) {
   const parentProvider = assertSafeVisible(metadata.parentProvider, 'parent-provider');
   if (!SLUG_PATTERN.test(parentProvider)) {
@@ -435,6 +497,7 @@ function renderProvenanceBlock(metadata) {
   ].join('\n');
 }
 
+// A lane's lineage is exactly the dispatch, parent, and installation UUIDs.
 function validateLineage(lineage) {
   if (!lineage || typeof lineage !== 'object' || Array.isArray(lineage) ||
       lineage.version !== VERSION || !UUID_PATTERN.test(lineage.dispatchId || '') ||
@@ -444,6 +507,11 @@ function validateLineage(lineage) {
   return lineage;
 }
 
+// Reserve the durable dispatch record before any provider mutation and return
+// the rendered prompt with its provenance block. Separate digests are recorded
+// for the body, the block, and the rendered whole, because provider
+// acknowledgement applies to the prefixed input. A duplicate dispatch id is
+// INVALID_STATE and nothing is written.
 function reserveDispatch(options, env = process.env) {
   const parent = options?.parentContext?.parent || options?.parentContext;
   const prompt = options?.prompt;
@@ -536,6 +604,9 @@ function sameParentIdentity(left, right) {
   ].every((key) => canonicalJson(left?.[key]) === canonicalJson(right?.[key]));
 }
 
+// Shape gate for a dispatch record, covering the parent snapshot, the child
+// project identity, and the three prompt digests. The project key must be the
+// digest of the recorded Git common directory.
 function validateDispatch(record, installation, expectedId = null) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
     throw new DispatchError('INVALID_LOCAL_STATE', 'dispatch record is invalid');
@@ -580,6 +651,8 @@ function validateDispatch(record, installation, expectedId = null) {
   return record;
 }
 
+// A dispatch's parent snapshot must still match the live parent context, so a
+// renamed or re-registered parent cannot silently rewrite recorded lineage.
 function validateDispatchOwnership(record, installation, paths, expectedId = null) {
   const dispatch = validateDispatch(record, installation, expectedId);
   const parent = validateParent(readPrivateJson(
@@ -593,6 +666,7 @@ function validateDispatchOwnership(record, installation, paths, expectedId = nul
   return dispatch;
 }
 
+// One validated, installation-owned dispatch record by id.
 function readDispatch(dispatchId, env = process.env) {
   if (!UUID_PATTERN.test(dispatchId || '')) throw new DispatchError('USAGE_ERROR', 'dispatch id is invalid');
   const paths = pathsFor(env);
@@ -605,6 +679,8 @@ function readDispatch(dispatchId, env = process.env) {
   );
 }
 
+// Move a reservation to journaled once the lane's own spawn journal is durable.
+// An already-journaled record is idempotent; any other state is INVALID_STATE.
 function markDispatchJournaled(dispatchId, env = process.env) {
   return withInstallationLock(env, (paths) => {
     const installation = installationRecord(paths);
@@ -619,6 +695,8 @@ function markDispatchJournaled(dispatchId, env = process.env) {
   });
 }
 
+// Record what the provider actually applied. The observed profile is write-once:
+// an identical repeat returns the record and a different one is INVALID_STATE.
 function setObservedProfile(dispatchId, observedProfile, env = process.env) {
   if (!UUID_PATTERN.test(dispatchId || '') || !observedProfile ||
       typeof observedProfile !== 'object' || Array.isArray(observedProfile)) {
@@ -643,6 +721,8 @@ function setObservedProfile(dispatchId, observedProfile, env = process.env) {
   });
 }
 
+// Every dispatch this parent reserved, oldest first, each revalidated against
+// the live parent context.
 function listDispatches(parentContext, env = process.env) {
   const loaded = ownedParentContext(parentContext, env);
   const paths = pathsFor(env);
@@ -664,6 +744,8 @@ function listDispatches(parentContext, env = process.env) {
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
+// An event payload carries at most a state and a status slug. A stored record
+// fails as INVALID_LOCAL_STATE and caller input as USAGE_ERROR.
 function validateEventData(data, stored = false) {
   const invalid = (message) => {
     throw new DispatchError(stored ? 'INVALID_LOCAL_STATE' : 'USAGE_ERROR', message);
@@ -684,6 +766,8 @@ function validateEventData(data, stored = false) {
   return { ...data };
 }
 
+// The mutable per-dispatch observation checkpoint: a monotonic generation, the
+// observed phase, and the digest of the provider fingerprint it came from.
 function validateObservation(record, dispatchId) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
     throw new DispatchError('INVALID_LOCAL_STATE', 'dispatch observation is invalid');
@@ -700,11 +784,18 @@ function validateObservation(record, dispatchId) {
   return record;
 }
 
+// The event id is a digest of the installation id and the event's immutable
+// content, so recreating the same event after a crash yields the same id
+// instead of a second notification.
 function deterministicEventId(dispatch, event) {
   const { eventId: _eventId, ...content } = event;
   return uuidFromDigest(digest(`${dispatch.installationId}\0${canonicalJson(content)}`));
 }
 
+// Append one child event under the installation lock. It rescans the parent's
+// events to assign the next sequence and to find an exact semantic duplicate,
+// which is returned instead of written. The event file lands before the parent's
+// sequence counter, so a crash between the two writes repeats the same id.
 function recordEventLocked(paths, installation, dispatch, options, data) {
   const fingerprint = digest(options.fingerprint);
   const eventDirectory = path.join(paths.events, dispatch.parentRef);
@@ -779,6 +870,8 @@ function recordEventLocked(paths, installation, dispatch, options, data) {
   return event;
 }
 
+// Shape gate for one event and, when the dispatch is supplied, proof that its
+// child identity matches and that its id is still the digest of its content.
 function validateEvent(event, parentRef, expectedId = null, dispatch = null) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) {
     throw new DispatchError('INVALID_LOCAL_STATE', 'dispatch event is invalid');
@@ -813,6 +906,9 @@ function validateEvent(event, parentRef, expectedId = null, dispatch = null) {
   return event;
 }
 
+// An acknowledgement must name the exact event and carry the digest of that
+// event's canonical content, so a malformed or stale receipt cannot suppress
+// redelivery.
 function validateAcknowledgement(record, event) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
     throw new DispatchError('INVALID_LOCAL_STATE', 'event acknowledgement is invalid');
@@ -829,6 +925,7 @@ function validateAcknowledgement(record, event) {
   return record;
 }
 
+// A validated owned dispatch, read while the installation lock is held.
 function ownedDispatchLocked(paths, installation, dispatchId) {
   if (!UUID_PATTERN.test(dispatchId || '')) {
     throw new DispatchError('USAGE_ERROR', 'dispatch id is invalid');
@@ -838,6 +935,9 @@ function ownedDispatchLocked(paths, installation, dispatchId) {
   ), installation, paths, dispatchId);
 }
 
+// Record one child event for a dispatch. The caller's fingerprint is what makes
+// a retry idempotent: the same type, fingerprint, and data returns the existing
+// event rather than notifying the parent twice.
 function recordEvent(options, env = process.env) {
   if (!UUID_PATTERN.test(options?.dispatchId || '') || !EVENT_TYPES.has(options?.type) ||
       typeof options.fingerprint !== 'string' || !options.fingerprint ||
@@ -852,6 +952,9 @@ function recordEvent(options, env = process.env) {
   });
 }
 
+// Update the dispatch's observation checkpoint and, when the phase or provider
+// fingerprint changed and an event type is given, record the matching event. An
+// unchanged observation writes nothing.
 function recordObservation(options, env = process.env) {
   if (!UUID_PATTERN.test(options?.dispatchId || '') || !SLUG_PATTERN.test(options?.phase || '') ||
       typeof options.providerFingerprint !== 'string' || !options.providerFingerprint ||
@@ -898,6 +1001,9 @@ function recordObservation(options, env = process.env) {
   });
 }
 
+// Every event for a parent, oldest first, filtered by project and by
+// acknowledgement. An unacknowledged event is always returned again, so a parent
+// restart cannot lose one behind a newer observation cursor.
 function collectEvents(parentContext, options = {}, env = process.env) {
   const loaded = ownedParentContext(parentContext, env);
   const paths = pathsFor(env);
@@ -953,6 +1059,7 @@ function collectEvents(parentContext, options = {}, env = process.env) {
     .sort((left, right) => left.sequence - right.sequence);
 }
 
+// One bounded batch of pending events.
 function listEvents(parentContext, options = {}, env = process.env) {
   const limit = options.limit ?? MAX_EVENT_BATCH;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_EVENT_BATCH) {
@@ -965,6 +1072,9 @@ function countEvents(parentContext, options = {}, env = process.env) {
   return collectEvents(parentContext, options, env).length;
 }
 
+// Record the parent's acknowledgement of one exact event, keyed by its id and by
+// the digest of its content. It is idempotent, and only a valid acknowledgement
+// stops redelivery.
 function acknowledgeEvent(parentContext, eventId, env = process.env) {
   if (!UUID_PATTERN.test(eventId || '')) throw new DispatchError('USAGE_ERROR', 'event id is invalid');
   const loaded = ownedParentContext(parentContext, env);

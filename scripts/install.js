@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 
+// Installs the Transmogrify skill into the host skill roots under HOME. Every
+// target is built in a sibling stage, verified, and swapped in by rename, so a
+// failure never leaves a partially copied skill behind. It refuses a symlinked
+// or non-owner-controlled path component, refuses a target occupied by anything
+// but a recognized Transmogrify install, and moves a recognized one to a
+// timestamped backup outside the roots a host scans for skills.
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -35,12 +42,17 @@ function fail(message) {
   throw new Error(message);
 }
 
+// Requires an absolute path and resolves an existing one through realpath, so
+// containment checks and later comparisons see the path the OS will use.
 function assertAbsolute(name, value) {
   if (!value || !path.isAbsolute(value)) fail(`${name} must be an absolute path`);
   const resolved = path.resolve(value);
   return fs.existsSync(resolved) ? fs.realpathSync(resolved) : resolved;
 }
 
+// Walks every existing component from the path up to its authorized root and
+// refuses a symlink or a directory that is not caller-owned and not group or
+// world writable. A path outside that root is refused before the walk begins.
 function assertNoSymlinks(targetPath, stopAt) {
   const stop = path.resolve(stopAt);
   let current = path.resolve(targetPath);
@@ -63,6 +75,8 @@ function assertNoSymlinks(targetPath, stopAt) {
   }
 }
 
+// Refuses a symlink anywhere inside a packaged source entry, recursing through
+// directories, so a copy can never follow a link out of the source tree.
 function assertSourceTreeSafe(sourcePath) {
   const stat = fs.lstatSync(sourcePath);
   if (stat.isSymbolicLink()) fail(`packaged source entry is a symlink: ${sourcePath}`);
@@ -72,6 +86,8 @@ function assertSourceTreeSafe(sourcePath) {
   }
 }
 
+// Parses installer options and refuses --help combined with any other option, so
+// a help request can never also perform an install.
 function parseOptions(argv) {
   const options = { target: 'all', dryRun: false, help: false };
   for (let index = 0; index < argv.length; index += 1) {
@@ -101,6 +117,8 @@ function parseOptions(argv) {
   return options;
 }
 
+// Reads a path only when it is a real regular file, returning null for a missing
+// path, a symlink, or a directory instead of throwing.
 function readRegularFile(filePath) {
   if (!fs.existsSync(filePath)) return null;
   const stat = fs.lstatSync(filePath);
@@ -108,6 +126,9 @@ function readRegularFile(filePath) {
   return fs.readFileSync(filePath, 'utf8');
 }
 
+// A target counts as a previous Transmogrify install only when its manifest
+// parses and carries the exact schema version, product, and skill slug. Anything
+// else is unrecognized and is refused rather than backed up and replaced.
 function recognizedInstall(target) {
   const manifestRaw = readRegularFile(path.join(target, INSTALL_MANIFEST));
   if (manifestRaw !== null) {
@@ -123,6 +144,8 @@ function recognizedInstall(target) {
   return false;
 }
 
+// Refuses to overwrite a symlink, a non-directory, a target that is not
+// owner-controlled, or a directory holding an unrecognized installation.
 function validateExistingTarget(target) {
   if (!fs.existsSync(target)) return;
   const stat = fs.lstatSync(target);
@@ -142,6 +165,9 @@ function validateInstallPath(target, authorizedRoot) {
   validateExistingTarget(target);
 }
 
+// Resolves the bundled ws dependency and requires its package version to equal
+// the version pinned in package-lock.json, so an install cannot ship a
+// substituted or floating transport dependency.
 function resolveWsRoot(sourceRoot = SOURCE_ROOT) {
   const nodeModulesRoot = path.join(sourceRoot, 'node_modules');
   const wsRoot = path.join(nodeModulesRoot, 'ws');
@@ -172,6 +198,8 @@ function resolveWsRoot(sourceRoot = SOURCE_ROOT) {
   return { wsRoot, version: metadata.version };
 }
 
+// Copies one packaged entry into the stage, re-checking source safety and
+// refusing to overwrite anything already at the destination.
 function copyEntry(relativePath, destination) {
   const source = path.join(SOURCE_ROOT, relativePath);
   assertSourceTreeSafe(source);
@@ -182,6 +210,9 @@ function copyEntry(relativePath, destination) {
   });
 }
 
+// Requires the backup root to sit inside the authorized root and, when it
+// already exists, to be a caller-owned directory that is not group or world
+// writable. It is re-checked immediately before every swap.
 function validateBackupRoot(backupRoot, authorizedRoot) {
   assertNoSymlinks(backupRoot, authorizedRoot);
   if (!fs.existsSync(backupRoot)) return;
@@ -198,6 +229,9 @@ function directoryIdentity(directory) {
   return { device: stat.dev, inode: stat.ino, uid: stat.uid, mode: stat.mode & 0o777 };
 }
 
+// Requires the stage to still be the exact device, inode, owner, and mode
+// recorded when it was built, so a replaced or reopened stage is never renamed
+// into a skill root.
 function validateStagedDirectory(entry) {
   const stat = fs.lstatSync(entry.stage);
   const current = { device: stat.dev, inode: stat.ino, uid: stat.uid, mode: stat.mode & 0o777 };
@@ -208,12 +242,18 @@ function validateStagedDirectory(entry) {
   }
 }
 
+// Removes a stage only when that identity check still passes. A path at the
+// stage location that is no longer the recorded directory is left untouched
+// rather than deleted recursively.
 function removeExactStage(entry) {
   if (!fs.existsSync(entry.stage)) return;
   try { validateStagedDirectory(entry); } catch { return; }
   fs.rmSync(entry.stage, { recursive: true, force: true });
 }
 
+// Builds one complete install in a sibling stage and proves the bundled ws
+// module loads from it before that stage becomes eligible for a swap. A failure
+// removes the stage and leaves any existing installation untouched.
 function stageInstall(target, authorizedRoot, backupRoot, wsRoot, transactionId) {
   const parent = path.dirname(target);
   validateInstallPath(target, authorizedRoot);
@@ -267,6 +307,9 @@ function stageInstall(target, authorizedRoot, backupRoot, wsRoot, transactionId)
   };
 }
 
+// Stages every selected target, then swaps them in by rename under one
+// transaction id. A failure during the swap restores each backed-up install in
+// reverse order and preserves the half-installed tree under a failed path.
 function install(options, hooks = {}) {
   const home = assertAbsolute('HOME', process.env.HOME || os.homedir());
   const wantsCodex = options.target === 'all' || options.target === 'codex';
@@ -281,6 +324,9 @@ function install(options, hooks = {}) {
   }
   const { wsRoot, version: wsVersion } = resolveWsRoot();
 
+  // The Claude root is always a candidate and --target selects from the list;
+  // targets that resolve to the same path collapse, so a shared skill root is
+  // never staged or swapped twice in one run.
   const candidates = [
     {
       provider: 'claude',

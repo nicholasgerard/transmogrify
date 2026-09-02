@@ -607,3 +607,7 @@ test('lane CLI input files are no-follow, owner-safe, and bounded', (t) => {
   assert.throws(() => readInput({ 'input-file': invalid }), /valid UTF-8/);
   assert.throws(() => readInput({ input: 'contains\0nul' }), /must not contain NUL/);
 });
+
+test('public messages cover the Remote Control failure code', () => {
+  assert.match(publicErrorMessage('REMOTE_CONTROL_UNAVAILABLE'), /Remote Control/);
+});

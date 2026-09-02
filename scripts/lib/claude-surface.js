@@ -1,5 +1,12 @@
 'use strict';
 
+// Measured Claude Code CLI surface: the pinned executable, the sanitized child
+// environment, argument construction, agent-listing ownership checks, worker and
+// socket execution receipts, and JSONL transcript proof of delivery. Every
+// command runs against the exact verified build and every observation is tied to
+// one owned session. It never touches a session other than the exact owned one
+// and never changes the user's Claude configuration or global updater.
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -8,6 +15,8 @@ const { execFile, execFileSync, spawn } = require('node:child_process');
 const { processBirth } = require('./state');
 const { ownedLaneNameError } = require('./validation');
 
+// The CLI builds this adapter has been measured against, by version and SHA-256.
+// A build outside this map cannot host a managed lane.
 const VERIFIED_CLI_BUILDS = new Map([
   ['2.1.258', 'b63136194160791c27cfa7b0403060d85eb0752991625fde8c09f9acacb17c78'],
 ]);
@@ -34,6 +43,9 @@ const CLAUDE_ENV_KEYS = new Set([
   'USER',
 ]);
 
+// Surface failure carrying a stable code. Adapters map these straight onto their
+// own delivery projections, so a code must stay honest about whether a provider
+// mutation may already have happened.
 class ClaudeSurfaceError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -43,6 +55,8 @@ class ClaudeSurfaceError extends Error {
   }
 }
 
+// The only environment a managed Claude child sees: an allowlisted subset of the
+// caller's variables, with NUL-bearing values dropped.
 function sanitizedClaudeEnv(env = process.env) {
   const clean = {};
   for (const [key, value] of Object.entries(env)) {
@@ -60,6 +74,8 @@ function isVerifiedCliBuild(version, cliSha256) {
   return VERIFIED_CLI_BUILDS.get(version) === cliSha256;
 }
 
+// Normalize a bridge id to its cse_ form. An id outside the accepted shape is
+// PROTOCOL_ERROR, so no unvalidated value reaches a URL or a CLI argument.
 function canonicalCseId(bridgeId) {
   if (typeof bridgeId !== 'string' || !BRIDGE_PATTERN.test(bridgeId)) {
     throw new ClaudeSurfaceError('PROTOCOL_ERROR', 'invalid Claude bridge id');
@@ -78,6 +94,8 @@ function assertSafeLaneValue(value, label = 'Claude lane name') {
   return value;
 }
 
+// A model selector must be a bounded alias or first-party model name, so it can
+// never be read as a CLI flag.
 function assertSafeModelSelector(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
     throw new ClaudeSurfaceError(
@@ -88,6 +106,9 @@ function assertSafeModelSelector(value) {
   return value;
 }
 
+// Append the resolved model, effort, and fast-mode controls. An effort level
+// outside the measured set, or a non-boolean fast mode, is USAGE_ERROR rather
+// than an argument passed through unchecked.
 function appendExecutionArgs(args, options = {}) {
   if (options.model !== undefined && options.model !== null) {
     args.push('--model', assertSafeModelSelector(options.model));
@@ -110,6 +131,9 @@ function appendExecutionArgs(args, options = {}) {
   return args;
 }
 
+// The exact spawn argv: background, named, remote-controlled, prompt last. A
+// prompt that is empty, oversized, NUL-bearing, or starts with a dash is refused
+// so it can never be parsed as a flag.
 function claudeSpawnArgs(name, prompt, options = {}) {
   assertSafeLaneValue(name);
   if (typeof prompt !== 'string' || !prompt || prompt.startsWith('-') ||
@@ -127,6 +151,8 @@ function claudeSpawnArgs(name, prompt, options = {}) {
   return args;
 }
 
+// The exact resume argv for one session id, with the lane's pinned execution
+// controls reapplied.
 function claudeResumeArgs(sessionId, options = {}) {
   if (typeof sessionId !== 'string' || !UUID_PATTERN.test(sessionId)) {
     throw new ClaudeSurfaceError('USAGE_ERROR', 'Claude resume session id must be a UUID');
@@ -142,6 +168,8 @@ function sha256File(file) {
   return sha256(fs.readFileSync(file));
 }
 
+// A file this surface reads or executes must be a non-symlinked regular file
+// owned by this user with no group or world write bits.
 function assertSafeRegularFile(file, label) {
   const stat = fs.lstatSync(file);
   if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -156,6 +184,7 @@ function assertSafeRegularFile(file, label) {
   return stat;
 }
 
+// The directory form of the same owner-controlled check.
 function assertSafeDirectory(directory, label) {
   const stat = fs.lstatSync(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory() ||
@@ -166,6 +195,9 @@ function assertSafeDirectory(directory, label) {
   return stat;
 }
 
+// Read a bounded owner-controlled JSON file through an O_NOFOLLOW descriptor and
+// stat that descriptor, so a symlink swapped in between check and read cannot
+// redirect it.
 function readSafeJson(file, label) {
   let descriptor;
   try {
@@ -193,6 +225,8 @@ function parseVersion(raw) {
   return match[1];
 }
 
+// Shape gate for one agent row, including the rule that a listed job id is the
+// session's first eight hex characters. A missing pid normalizes to null.
 function validateAgentRow(agent, label = 'exact owned Claude agent row') {
   if (!agent || typeof agent !== 'object' ||
       typeof agent.sessionId !== 'string' || !UUID_PATTERN.test(agent.sessionId) ||
@@ -223,6 +257,8 @@ function parseAgents(raw) {
     .map((agent) => ({ ...agent, pid: agent.pid ?? null }));
 }
 
+// The single eight-hex job id in the launch output. Zero or several is
+// SPAWN_UNCERTAIN, because an ambiguous launch must never be adopted.
 function parseJobId(raw) {
   const matches = [...String(raw).matchAll(/\b[0-9a-f]{8}\b/gi)].map((match) => match[0].toLowerCase());
   const unique = [...new Set(matches)];
@@ -232,10 +268,21 @@ function parseJobId(raw) {
   return unique[0];
 }
 
+// Require first-party claude.ai OAuth with a projects directory, organization,
+// and account. Any other provider or auth method is outside this adapter.
 function parseAuthStatus(raw) {
   let status;
   try { status = JSON.parse(raw); } catch {
-    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude auth status returned invalid JSON');
+    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude auth status returned invalid JSON', {
+      reason: 'auth-status-unreadable',
+    });
+  }
+  if (!status || typeof status !== 'object' || status.loggedIn !== true) {
+    throw new ClaudeSurfaceError(
+      'UNSUPPORTED_ENVIRONMENT',
+      'Claude CLI is not logged in; run claude auth login',
+      { reason: 'not-logged-in' },
+    );
   }
   if (status.loggedIn !== true || status.authMethod !== 'claude.ai' ||
       status.apiProvider !== 'firstParty' || typeof status.projectsDirectory !== 'string' ||
@@ -244,11 +291,15 @@ function parseAuthStatus(raw) {
     throw new ClaudeSurfaceError(
       'UNSUPPORTED_ENVIRONMENT',
       'Claude Remote Control requires first-party claude.ai OAuth authentication',
+      { reason: 'account-not-first-party' },
     );
   }
   return status;
 }
 
+// The lane's eight-character job id must match exactly one row across the whole
+// account, and that row must be the owned session. A collision is
+// OWNERSHIP_MISMATCH, so a short-id command can never reach a stranger.
 function assertUniqueShortJobId(agents, identity) {
   if (!identity?.sessionId || !UUID_PATTERN.test(identity.sessionId) ||
       !identity?.jobId || !JOB_PATTERN.test(identity.jobId)) {
@@ -272,6 +323,9 @@ function assertUniqueShortJobId(agents, identity) {
   return jobId;
 }
 
+// The one agent row for the owned session, proven against the session id, the
+// job id, the account-wide short-id uniqueness rule, and the lane's expected
+// name and realpath seat. Anything else is OWNERSHIP_MISMATCH.
 function exactOwnedAgent(agents, identity, expected = {}) {
   if (!identity?.sessionId || !identity?.jobId) {
     throw new ClaudeSurfaceError('OWNERSHIP_MISMATCH', 'Claude provider identity is incomplete');
@@ -297,6 +351,8 @@ function exactOwnedAgent(agents, identity, expected = {}) {
   return agent;
 }
 
+// Bounded child execution with a hard timeout and SIGKILL, attaching at most the
+// safe stderr prefix to the rejected error.
 function execFilePromise(executable, args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(executable, args, {
@@ -316,6 +372,8 @@ function execFilePromise(executable, args, options = {}) {
   });
 }
 
+// Resolve the Claude CLI to an absolute realpath and require it to be an
+// owner-controlled executable regular file.
 function resolveCliPath(options, env, dependencies) {
   const requested = options.claudeBin || env.CLAUDE_BIN;
   let candidate = requested;
@@ -329,16 +387,23 @@ function resolveCliPath(options, env, dependencies) {
     }).trim();
   }
   if (!candidate || !path.isAbsolute(candidate)) {
-    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude CLI must resolve to an absolute path');
+    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude CLI must resolve to an absolute path', {
+      reason: 'cli-not-found',
+    });
   }
   const resolved = fs.realpathSync(candidate);
   const stat = assertSafeRegularFile(resolved, 'Claude CLI');
   if ((stat.mode & 0o111) === 0) {
-    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude CLI is not executable');
+    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude CLI is not executable', {
+      reason: 'cli-not-executable',
+    });
   }
   return resolved;
 }
 
+// Build the Claude CLI surface. Every process, filesystem, and hashing
+// dependency is injectable, so the ownership and fail-closed paths are testable
+// without a live CLI.
 function createClaudeSurface(dependencies = {}) {
   const deps = {
     arch: dependencies.arch || process.arch,
@@ -352,6 +417,8 @@ function createClaudeSurface(dependencies = {}) {
     spawn: dependencies.spawn || spawn,
   };
 
+  // The CLI must still be the exact realpath and digest measured at preflight. Any
+  // change is RUNTIME_MISMATCH and no command is run.
   function assertRuntimeCliIdentity(runtime) {
     if (!runtime || typeof runtime.cliPath !== 'string' || !path.isAbsolute(runtime.cliPath) ||
         typeof runtime.cliSha256 !== 'string') {
@@ -370,15 +437,22 @@ function createClaudeSurface(dependencies = {}) {
     }
   }
 
+  // Measure the compatibility tuple: Darwin arm64, a verified CLI build,
+  // first-party claude.ai auth, and symlink-free owner-controlled config and
+  // projects directories. The CLI digest is re-read afterwards so a swap during
+  // preflight is caught, and a custom CLAUDE_CONFIG_DIR is refused outright.
   function preflight(options = {}, env = process.env) {
     if (deps.platform !== 'darwin' || deps.arch !== 'arm64') {
       throw new ClaudeSurfaceError(
         'UNSUPPORTED_ENVIRONMENT',
         'the measured Claude adapter supports only Darwin arm64',
+        { reason: 'unsupported-platform' },
       );
     }
     if (env.CLAUDE_CONFIG_DIR) {
-      throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'custom CLAUDE_CONFIG_DIR is outside the measured adapter');
+      throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'custom CLAUDE_CONFIG_DIR is outside the measured adapter', {
+        reason: 'custom-config-dir',
+      });
     }
     const cleanEnv = sanitizedClaudeEnv(env);
     const timeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
@@ -400,6 +474,7 @@ function createClaudeSurface(dependencies = {}) {
       throw new ClaudeSurfaceError(
         'UNSUPPORTED_ENVIRONMENT',
         `unverified Claude CLI build ${version} (${cliSha256.slice(0, 12)})`,
+        { reason: 'cli-unpinned' },
       );
     }
     const auth = parseAuthStatus(deps.execFileSync(cliPath, ['auth', 'status', '--json'], {
@@ -444,6 +519,7 @@ function createClaudeSurface(dependencies = {}) {
     };
   }
 
+  // The account-wide agent listing, under a bounded timeout and a re-verified CLI.
   async function agents(runtime, options = {}) {
     const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000) {
@@ -457,6 +533,7 @@ function createClaudeSurface(dependencies = {}) {
     return parseAgents(result.stdout);
   }
 
+  // One CLI invocation with the lane's seat as cwd and the sanitized environment.
   async function run(runtime, args, options = {}) {
     assertRuntimeCliIdentity(runtime);
     return deps.execFile(runtime.cliPath, args, {
@@ -466,6 +543,11 @@ function createClaudeSurface(dependencies = {}) {
     });
   }
 
+  // Queue a follow-up on the exact bridge session over the public cloud channel.
+  // Only an exactly shaped acknowledgment with a clean exit, empty stderr, and the
+  // matching session id and URL counts as queued. A process that never started is
+  // NOT_DELIVERED; every other outcome is DELIVERY_UNCERTAIN, because the provider
+  // may already hold the message.
   async function sendRemoteFollowup(runtime, bridgeId, content, options = {}) {
     const exactBridgeId = canonicalCseId(bridgeId);
     const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
@@ -570,6 +652,9 @@ function createClaudeSurface(dependencies = {}) {
     });
   }
 
+  // Launch the CLI with stdout and stderr captured to exclusive 0600 receipt
+  // files. A non-zero exit, a timeout, or an unsafe or oversized receipt is
+  // SPAWN_UNCERTAIN, and the receipts stay on disk for reconciliation.
   async function launch(runtime, args, options) {
     const stdoutPath = options.stdoutPath;
     const stderrPath = options.stderrPath;
@@ -626,11 +711,22 @@ function createClaudeSurface(dependencies = {}) {
     };
   }
 
+  // The worker's own session metadata, keyed by pid. It requires the measured
+  // bridge field shape, an agreeing pid, valid session, job, and bridge ids, the
+  // exact per-pid socket path, and the runtime's CLI version.
   function readWorkerMetadata(runtime, pid) {
     const file = path.join(runtime.configDir, 'sessions', `${pid}.json`);
     const raw = readSafeJson(file, 'Claude worker metadata');
-    if (typeof raw.bridgeSessionId !== 'string' || raw.bridgeId !== undefined) {
+    if (raw.bridgeId !== undefined) {
       throw new ClaudeSurfaceError('PROTOCOL_ERROR', 'Claude worker metadata bridge shape is unverified');
+    }
+    if (typeof raw.bridgeSessionId !== 'string') {
+      // The worker started but never registered Remote Control, which in every
+      // measured case meant the CLI login was broken at launch.
+      throw new ClaudeSurfaceError(
+        'REMOTE_CONTROL_UNAVAILABLE',
+        'Claude worker has no Remote Control bridge; the session did not register (check claude auth status and the session log)',
+      );
     }
     const metadata = { ...raw, bridgeId: raw.bridgeSessionId };
     if (metadata.pid !== undefined && metadata.pid !== pid) {
@@ -655,6 +751,7 @@ function createClaudeSurface(dependencies = {}) {
     return metadata;
   }
 
+  // Time left in the worker verification deadline; exhaustion is TIMEOUT.
   function remainingReceiptMs(deadline) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
@@ -663,6 +760,9 @@ function createClaudeSurface(dependencies = {}) {
     return Math.max(1, remaining);
   }
 
+  // Bind exactly one open text-segment file of the worker process to the pinned
+  // CLI digest. Zero or several matches is UNSUPPORTED_WORKER, so a command is
+  // never sent to a process running a different build.
   function verifyWorkerExecutable(runtime, pid, deadline) {
     const output = deps.execFileSync('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], {
       encoding: 'utf8',
@@ -688,6 +788,9 @@ function createClaudeSurface(dependencies = {}) {
     return { path: matches[0], sha256: runtime.cliSha256 };
   }
 
+  // The worker's messaging socket must be an owner-private Unix socket inside an
+  // owner-private directory. Its device, inode, uid, and mode become part of the
+  // execution epoch identity.
   function socketReceipt(socketPath) {
     if (Buffer.byteLength(socketPath) > 100) {
       throw new ClaudeSurfaceError('UNSAFE_SOCKET', 'Claude messaging socket path is too long');
@@ -712,6 +815,8 @@ function createClaudeSurface(dependencies = {}) {
     };
   }
 
+  // The execution receipt for a lane's running worker, requiring the worker's own
+  // metadata to match the lane's session, job, bridge, name, and seat.
   function executionReceipt(runtime, lane, agent, options = {}) {
     if (!agent.pid) throw new ClaudeSurfaceError('INVALID_STATE', 'Claude session has no running worker');
     const metadata = readWorkerMetadata(runtime, agent.pid);
@@ -725,6 +830,8 @@ function createClaudeSurface(dependencies = {}) {
     return finishExecutionReceipt(runtime, agent, metadata, options);
   }
 
+  // The same receipt during spawn or recovery, matched against the intended
+  // session identity rather than an already-bound lane.
   function discoverExecution(runtime, expected, agent, options = {}) {
     if (!agent.pid) throw new ClaudeSurfaceError('INVALID_STATE', 'Claude session has no running worker');
     const metadata = readWorkerMetadata(runtime, agent.pid);
@@ -737,6 +844,9 @@ function createClaudeSurface(dependencies = {}) {
     return finishExecutionReceipt(runtime, agent, metadata, options);
   }
 
+  // Complete an execution receipt: process birth, the pinned worker executable,
+  // and the socket identity. Process birth is read again afterwards, so a worker
+  // replaced mid-verification is OWNERSHIP_MISMATCH.
   function finishExecutionReceipt(runtime, agent, metadata, options = {}) {
     const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
@@ -761,6 +871,9 @@ function createClaudeSurface(dependencies = {}) {
     };
   }
 
+  // The one transcript file for a session under the projects directory, following
+  // no symlinks and within a bounded traversal. Zero or several matches is
+  // DELIVERY_UNCERTAIN.
   function findTranscript(projectsDirectory, sessionId) {
     const target = `${sessionId}.jsonl`;
     const matches = [];
@@ -785,6 +898,8 @@ function createClaudeSurface(dependencies = {}) {
     return matches[0];
   }
 
+  // The transcript's identity and current size: the baseline every delivery
+  // observation reads forward from.
   function transcriptSnapshot(runtime, sessionId) {
     if (!UUID_PATTERN.test(sessionId || '')) throw new ClaudeSurfaceError('OWNERSHIP_MISMATCH', 'invalid owned session id');
     const file = findTranscript(runtime.projectsDirectory, sessionId);
@@ -792,6 +907,8 @@ function createClaudeSurface(dependencies = {}) {
     return { file, device: stat.dev, inode: stat.ino, offset: stat.size, sessionId };
   }
 
+  // The single user text of a transcript record, or null. A multi-part or non-user
+  // record is deliberately not treated as one message.
   function transcriptContent(record) {
     if (record?.type !== 'user' || record?.message?.role !== 'user') return null;
     const content = record.message.content;
@@ -802,6 +919,8 @@ function createClaudeSurface(dependencies = {}) {
     return texts.length === 1 ? texts[0] : null;
   }
 
+  // Whether a record is this exact content queued for the session or already
+  // consumed by it.
   function transcriptObservation(record, sessionId, content) {
     if (record?.type === 'queue-operation' && record.operation === 'enqueue' &&
         record.sessionId === sessionId && record.content === content &&
@@ -815,6 +934,9 @@ function createClaudeSurface(dependencies = {}) {
     return null;
   }
 
+  // Open the transcript with O_NOFOLLOW and require the descriptor's device and
+  // inode to equal the snapshot's, so a rotated or replaced file is
+  // DELIVERY_UNCERTAIN rather than read as the same transcript.
   function openOwnedTranscript(snapshot) {
     const flags = fs.constants.O_RDONLY |
       (fs.constants.O_NOFOLLOW === undefined ? 0 : fs.constants.O_NOFOLLOW);
@@ -834,6 +956,9 @@ function createClaudeSurface(dependencies = {}) {
     return { descriptor, stat };
   }
 
+  // Follow the transcript forward from the snapshot until this exact content is
+  // observed queued or consumed. Truncation, an oversized append, invalid JSONL,
+  // or the timeout is DELIVERY_UNCERTAIN, and nothing is ever resent from here.
   async function waitForTranscriptDelivery(snapshot, content, timeoutMs = 30_000) {
     if (!snapshot || !UUID_PATTERN.test(snapshot.sessionId || '')) {
       throw new ClaudeSurfaceError('OWNERSHIP_MISMATCH', 'Claude transcript snapshot has no exact session identity');
@@ -890,6 +1015,9 @@ function createClaudeSurface(dependencies = {}) {
     throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'queued Claude input was not observed in the owned transcript');
   }
 
+  // Prove the spawn prompt landed in the session's own transcript: exactly one
+  // record ending with this lane's spawn marker whose prefix hashes to the
+  // journaled prompt digest. Anything else is SPAWN_UNCERTAIN.
   function verifySpawnTranscript(runtime, sessionId, expected) {
     if (!UUID_PATTERN.test(sessionId || '') || !expected ||
         typeof expected.promptSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(expected.promptSha256) ||
@@ -942,6 +1070,9 @@ function createClaudeSurface(dependencies = {}) {
     }
   }
 
+  // Prove a steer landed: exactly one queued or consumed record ending with this
+  // delivery token whose prefix hashes to the journaled message. Duplicates, or no
+  // match at all, is DELIVERY_UNCERTAIN.
   function verifyDeliveryTranscript(runtime, sessionId, expected) {
     if (!UUID_PATTERN.test(sessionId || '') || !expected ||
         typeof expected.messageSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(expected.messageSha256) ||
@@ -993,6 +1124,8 @@ function createClaudeSurface(dependencies = {}) {
     }
   }
 
+  // Open the Remote Control deep link for the exact bridge session so the lane
+  // becomes visible natively. Presentation only; it sends no input.
   async function dispatchDeepLink(runtime, bridgeId, options = {}) {
     canonicalCseId(bridgeId);
     await deps.execFile(deps.openCommand, [`claude://code/${bridgeId}`], {

@@ -2,7 +2,11 @@
 'use strict';
 
 // Detect, launch, or relaunch Codex Desktop as a client of the selected shared
-// app-server runtime so lanes render and stream live in the app.
+// app-server runtime so lanes render and stream live in the app. This file is
+// only the CLI surface over scripts/lib/desktop-attach.js: it parses arguments,
+// prints one JSON result, and maps outcomes to exit codes. It never touches the
+// runtime, and it quits a running Desktop only through the app's own
+// application quit after explicit or standing owner authorization.
 
 const { parseArgs } = require('node:util');
 const {
@@ -32,12 +36,23 @@ options:
 
 environment:
   ${DISABLE_ENV}=off   report the check as disabled without probing
-  ${RELAUNCH_ENV}=auto standing owner authorization to relaunch`;
+  ${RELAUNCH_ENV}=auto standing owner authorization to relaunch
+
+exit codes:
+  0  attached (check) or attachment ensured (ensure)
+  1  ensure failed; the JSON result carries the code, for example
+     DESKTOP_RELAUNCH_REQUIRED, DESKTOP_HOST_SESSION, ATTACHED_ELSEWHERE,
+     RUNTIME_UNAVAILABLE, ATTACH_TIMEOUT, DESKTOP_QUIT_TIMEOUT
+  2  usage error
+  3  check found no attachment`;
 
 function usage(message) {
   throw new DesktopAttachError(message, 'USAGE_ERROR');
 }
 
+// Parses the operation and its options, refusing --relaunch-desktop and
+// --timeout-ms on check so a read-only invocation can never authorize a quit.
+// A bare invocation or a lone --help returns help text instead of an operation.
 function parseCli(argv) {
   if (argv.length === 0 || (argv.length === 1 && ['--help', '-h'].includes(argv[0]))) {
     return { help: HELP };
@@ -75,6 +90,8 @@ function parseCli(argv) {
   };
 }
 
+// Dispatches to the library check or ensure. Neither throws for an unattached
+// Desktop: that is a measured observation and returns as an ok:false receipt.
 async function main(argv = process.argv.slice(2), env = process.env, dependencies = {}) {
   const options = parseCli(argv);
   if (options.help) return options;
@@ -82,6 +99,8 @@ async function main(argv = process.argv.slice(2), env = process.env, dependencie
   return ensure(options, env, dependencies);
 }
 
+// An unattached observation is a result, not an exception: it prints as JSON and
+// exits 3, while a usage error exits 2 and every other failure exits 1.
 if (require.main === module) {
   main().then((result) => {
     if (result?.help) {

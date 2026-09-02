@@ -439,3 +439,75 @@ test('doctor exposes a non-mutating help entrypoint', async () => {
   });
   assert.match(result.help, /^usage: doctor\.js/);
 });
+
+test('doctor names the owner action for every unmet setup precondition', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer();
+  t.after(() => server.close());
+  const blocked = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'all',
+    '--url', server.url,
+  ], fixture.env, {
+    claudeSurface: {
+      preflight() {
+        const error = new Error('private@example.invalid /Users/private/.claude');
+        error.code = 'UNSUPPORTED_ENVIRONMENT';
+        error.details = { reason: 'not-logged-in' };
+        throw error;
+      },
+      run() { throw new Error('must not run'); },
+    },
+    desktopAttachment: async () => ({
+      attachment: { state: 'unattached', evidence: 'no-established-connection-to-runtime' },
+      desktop: { running: true },
+      nextAction: 'run-desktop-attach-ensure',
+    }),
+  });
+  assert.equal(blocked.ok, false);
+  assert.deepEqual(blocked.providers.claude.error, { code: 'UNSUPPORTED_ENVIRONMENT' });
+  assert.deepEqual(blocked.providers.claude.setup, {
+    reason: 'not-logged-in',
+    ownerAction: 'Run `claude auth login`, then rerun the doctor.',
+  });
+  assert.equal(blocked.providers.codex.setup.reason, 'desktop-unattached');
+  assert.match(blocked.providers.codex.setup.ownerAction, /desktop-attach\.js ensure --relaunch-desktop/);
+  assert.deepEqual(blocked.setup, {
+    ready: false,
+    ownerActions: [
+      { provider: 'codex', reason: 'desktop-unattached', ownerAction: blocked.providers.codex.setup.ownerAction },
+      { provider: 'claude', reason: 'not-logged-in', ownerAction: 'Run `claude auth login`, then rerun the doctor.' },
+    ],
+  });
+  assert.equal(JSON.stringify(blocked).includes('private@example.invalid'), false);
+  assert.equal(JSON.stringify(blocked).includes('/Users/private/.claude'), false);
+
+  const unavailable = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'codex',
+    '--url', 'ws://127.0.0.1:65534',
+  ], fixture.env, {});
+  assert.equal(unavailable.providers.codex.setup.reason, 'runtime-unavailable');
+  assert.match(unavailable.providers.codex.setup.ownerAction, /runtime-up\.sh/);
+
+  const claudeCalls = [];
+  const ready = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'all',
+    '--url', server.url,
+  ], fixture.env, {
+    claudeSurface: fakeClaudeSurface(claudeCalls, []),
+    desktopAttachment: async () => ({
+      attachment: {
+        state: 'attached', evidence: 'lsof-established-loopback-connection', clientPid: 1,
+        connection: '127.0.0.1:1->127.0.0.1:2', observedAt: '2026-09-02T22:00:00.000Z',
+      },
+      desktop: { bundleId: 'com.openai.codex', version: '26.901.20858', build: '7658', buildTested: true },
+      nextAction: 'none',
+    }),
+  });
+  assert.equal(ready.ok, true);
+  assert.deepEqual(ready.setup, { ready: true, ownerActions: [] });
+  assert.equal(ready.providers.claude.setup, undefined);
+  assert.equal(ready.providers.codex.setup, undefined);
+});

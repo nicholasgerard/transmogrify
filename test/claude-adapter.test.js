@@ -1941,3 +1941,155 @@ test('Claude reconciliation durably rebinds an exact owned worker after a verifi
     '/tmp/fake-claude-2.1.258',
   );
 });
+
+test('Claude spawn surfaces the discovery cause when delivery is uncertain', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  surface.failDiscoveryOnce = true;
+  surface.discoveryErrorCode = 'REMOTE_CONTROL_UNAVAILABLE';
+  await assert.rejects(
+    () => spawn(spawnOptions(fixture, surface), fixture.env),
+    (error) => error.code === 'SPAWN_UNCERTAIN' &&
+      error.details.causeCode === 'REMOTE_CONTROL_UNAVAILABLE' &&
+      /simulated crash boundary/.test(error.details.causeMessage) &&
+      /claude auth status/.test(error.details.ownerAction),
+  );
+  const [lane] = listLanes(fixture.repoRoot, fixture.env);
+  const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
+  assert.equal(pending.state, 'spawnUnknown');
+  assert.equal(pending.details.causeCode, 'REMOTE_CONTROL_UNAVAILABLE');
+  assert.match(pending.details.causeMessage, /simulated crash boundary/);
+});
+
+test('Claude reconcile settles a dispatched spawn whose job vanished as failed', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  surface.failDiscoveryOnce = true;
+  surface.discoveryErrorCode = 'REMOTE_CONTROL_UNAVAILABLE';
+  await assert.rejects(() => spawn(spawnOptions(fixture, surface), fixture.env), /simulated crash boundary/);
+  const [uncertain] = listLanes(fixture.repoRoot, fixture.env);
+  const pending = pendingOperationForLane(fixture.repoRoot, uncertain.laneId, fixture.env);
+  const jobId = surface.jobId;
+
+  // Too recent to settle: the job is missing but the launch might still be
+  // registering, so the spawn stays open.
+  surface.setRows([]);
+  const early = await reconcile({
+    repoRoot: fixture.repoRoot, surface, discoveryAttempts: 2, discoveryDelayMs: 0,
+  }, fixture.env);
+  assert.equal(early.results[0].outcome, 'uncertain');
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
+
+  // Past the grace period, and absent on every poll: settle without any
+  // provider mutation.
+  const launchesBefore = surface.calls.filter((call) => call.method === 'launch').length;
+  const runsBefore = surface.calls.filter((call) => call.method === 'run').length;
+  const result = await reconcile({
+    repoRoot: fixture.repoRoot, surface, discoveryAttempts: 2, discoveryDelayMs: 0, spawnAbsenceGraceMs: 0,
+  }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(result.results[0].outcome, 'spawnJobAbsent');
+  const [settled] = listLanes(fixture.repoRoot, fixture.env);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.providerId, null);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, settled.laneId, fixture.env), null);
+  const [operation] = listOperations(fixture.repoRoot, fixture.env);
+  assert.equal(operation.state, 'failed');
+  assert.equal(operation.details.outcome, 'spawnJobAbsent');
+  assert.equal(operation.details.jobId, jobId);
+  assert.equal(operation.details.causeCode, 'REMOTE_CONTROL_UNAVAILABLE');
+  assert.equal(fs.existsSync(uncertain.ownership.spawnIntent.stdoutPath), false);
+  assert.equal(fs.existsSync(uncertain.ownership.spawnIntent.stderrPath), false);
+  assert.equal(surface.calls.filter((call) => call.method === 'launch').length, launchesBefore);
+  assert.equal(surface.calls.filter((call) => call.method === 'run').length, runsBefore);
+});
+
+test('Claude reconcile keeps an uncertain spawn open while its job is still listed without a bridge', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  surface.failDiscoveryOnce = true;
+  surface.discoveryErrorCode = 'REMOTE_CONTROL_UNAVAILABLE';
+  await assert.rejects(() => spawn(spawnOptions(fixture, surface), fixture.env), /simulated crash boundary/);
+  const [uncertain] = listLanes(fixture.repoRoot, fixture.env);
+  surface.discoverExecution = () => {
+    const error = new Error('Claude worker has no Remote Control bridge');
+    error.code = 'REMOTE_CONTROL_UNAVAILABLE';
+    throw error;
+  };
+  const result = await reconcile({
+    repoRoot: fixture.repoRoot, surface, discoveryAttempts: 2, discoveryDelayMs: 0, spawnAbsenceGraceMs: 0,
+  }, fixture.env);
+  assert.equal(result.ok, false);
+  assert.equal(result.results[0].outcome, 'uncertain');
+  assert.equal(result.results[0].code, 'SPAWN_UNCERTAIN');
+  assert.equal(result.results[0].causeCode, 'REMOTE_CONTROL_UNAVAILABLE');
+  assert.match(result.results[0].ownerAction, /claude auth status/);
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, uncertain.laneId, fixture.env).details.causeCode,
+    'REMOTE_CONTROL_UNAVAILABLE');
+});
+
+test('Claude retire cleans the managed seat of a failed unbound lane without provider mutation', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  surface.failDiscoveryOnce = true;
+  const options = spawnOptions(fixture, surface);
+  delete options.cwd;
+  await assert.rejects(() => spawn(options, fixture.env), /simulated crash boundary/);
+  const [uncertain] = listLanes(fixture.repoRoot, fixture.env);
+  assert.equal(uncertain.seat.managed, true);
+  assert.equal(fs.existsSync(uncertain.seat.path), true);
+  await assert.rejects(
+    () => retire({
+      repoRoot: fixture.repoRoot, laneId: uncertain.laneId, surface, harvestedOutputSha256: 'a'.repeat(64),
+    }, fixture.env),
+    (error) => error.code === 'PENDING_OPERATION' && /reconcile first/.test(error.message),
+  );
+  surface.setRows([]);
+  const settled = await reconcile({
+    repoRoot: fixture.repoRoot, surface, discoveryAttempts: 2, discoveryDelayMs: 0, spawnAbsenceGraceMs: 0,
+  }, fixture.env);
+  assert.equal(settled.results[0].outcome, 'spawnJobAbsent');
+  await assert.rejects(
+    () => retire({ repoRoot: fixture.repoRoot, laneId: uncertain.laneId, surface }, fixture.env),
+    (error) => error.code === 'HARVEST_REQUIRED',
+  );
+  const runsBefore = surface.calls.filter((call) => call.method === 'run').length;
+  const retired = await retire({
+    repoRoot: fixture.repoRoot, laneId: uncertain.laneId, surface, harvestedOutputSha256: 'a'.repeat(64),
+  }, fixture.env);
+  assert.equal(retired.ok, true);
+  assert.equal(retired.state, 'worktreeRemoved');
+  assert.deepEqual(retired.receipt.provider, {
+    unbound: true, stop: 'notAttempted', archive: 'notAttempted', localRemoval: 'notAttempted',
+  });
+  assert.equal(retired.receipt.worktree.removed, true);
+  assert.equal(retired.receipt.harvestedOutputSha256, 'a'.repeat(64));
+  assert.equal(fs.existsSync(uncertain.seat.path), false);
+  assert.equal(surface.calls.filter((call) => call.method === 'run').length, runsBefore);
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'worktreeRemoved');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, uncertain.laneId, fixture.env), null);
+  const again = await retire({
+    repoRoot: fixture.repoRoot, laneId: uncertain.laneId, surface, harvestedOutputSha256: 'a'.repeat(64),
+  }, fixture.env);
+  assert.equal(again.receipt.alreadyRetired, true);
+});
+
+test('Claude retire of a failed unbound lane preserves an external seat', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  surface.failDiscoveryOnce = true;
+  await assert.rejects(() => spawn(spawnOptions(fixture, surface), fixture.env), /simulated crash boundary/);
+  const [uncertain] = listLanes(fixture.repoRoot, fixture.env);
+  surface.setRows([]);
+  await reconcile({
+    repoRoot: fixture.repoRoot, surface, discoveryAttempts: 2, discoveryDelayMs: 0, spawnAbsenceGraceMs: 0,
+  }, fixture.env);
+  const retired = await retire({
+    repoRoot: fixture.repoRoot, laneId: uncertain.laneId, surface, harvestedOutputSha256: 'b'.repeat(64),
+  }, fixture.env);
+  assert.equal(retired.ok, true);
+  assert.equal(retired.receipt.worktree.external, true);
+  assert.equal(fs.existsSync(fixture.seat), true);
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'worktreeRemoved');
+});

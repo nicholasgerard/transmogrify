@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 
+// Read-only startup diagnostics. It reports the ownership registry, one Codex
+// initialize handshake, the Codex Desktop attachment receipt as
+// nativeVisibility, and a Claude preflight plus agent listing. It attempts no
+// provider mutation, launches and quits nothing, and reports only redacted
+// failure codes. It exits 2 on a usage error and 3 when a requested provider is
+// not reusable.
+
 const path = require('node:path');
 const { parseArgs } = require('node:util');
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
@@ -16,8 +23,62 @@ const { VERSION } = require('./lib/version');
 
 const CODEX_BACKEND = 'codex-app-server';
 const CLAUDE_BACKEND = 'claude-code';
-const VERIFIED_DATE = '2026-09-01';
+const VERIFIED_DATE = '2026-09-02';
 const DEFAULT_TIMEOUT_MS = 20_000;
+
+// Setup preconditions only the owner can satisfy, keyed by the reason the
+// provider probe reports. The text names the exact command; it never carries
+// the probe's raw message, account, or paths.
+const CLAUDE_SETUP_ACTIONS = new Map([
+  ['not-logged-in', 'Run \`claude auth login\`, then rerun the doctor.'],
+  ['auth-status-unreadable', 'Run \`claude auth status\`; if it fails, reinstall Claude Code and sign in, then rerun the doctor.'],
+  ['account-not-first-party', 'Sign in to Claude Code with a first-party claude.ai account (\`claude auth login\`), then rerun the doctor.'],
+  ['cli-unpinned', 'Install the pinned Claude Code CLI with \`claude install 2.1.258\`, then rerun the doctor.'],
+  ['cli-not-found', 'Install Claude Code and sign in with \`claude auth login\`, or point CLAUDE_BIN at the pinned binary.'],
+  ['cli-not-executable', 'Make the Claude CLI executable, or point CLAUDE_BIN at the pinned binary.'],
+  ['unsupported-platform', 'Claude lanes run only on Apple Silicon macOS; use \`--target codex\` on this host.'],
+  ['custom-config-dir', 'Unset CLAUDE_CONFIG_DIR for Transmogrify commands; only the default config directory is measured.'],
+]);
+const CLAUDE_SETUP_FALLBACK = 'Run \`claude --version\` and \`claude auth status\`, fix what they report, then rerun the doctor.';
+const CODEX_SETUP_ACTIONS = new Map([
+  ['runtime-unavailable', 'Reuse an existing Codex app-server runtime through TRANSMOGRIFY_URL, or authorize this installation to start one with \`runtime-up.sh\`, then rerun the doctor.'],
+  ['sandbox-loopback-denied', 'Grant the doctor and lane commands loopback access on this host, then rerun the doctor.'],
+  ['desktop-unattached', 'Allow Transmogrify to relaunch Codex Desktop attached to the runtime (\`desktop-attach.js ensure --relaunch-desktop\`), or set TRANSMOGRIFY_DESKTOP_RELAUNCH=auto.'],
+  ['desktop-not-running', 'Run \`desktop-attach.js ensure\` to launch Codex Desktop attached to the runtime.'],
+  ['desktop-not-installed', 'Install Codex Desktop, or use \`--allow-protocol-only\` for lanes that need no native visibility.'],
+  ['desktop-attached-elsewhere', 'Point TRANSMOGRIFY_URL at the runtime Codex Desktop is already attached to (see nativeVisibility.nextAction).'],
+  ['desktop-unsupported-platform', 'Codex Desktop attachment is macOS-only here; Codex lanes on this host need \`--allow-protocol-only\`.'],
+  ['desktop-attach-disabled', 'Unset TRANSMOGRIFY_DESKTOP_ATTACH=off for live-visible Codex lanes.'],
+  ['desktop-tool-unavailable', 'Restore lsof, ps, and osascript on this host so the attachment can be measured.'],
+]);
+
+function claudeSetup(error) {
+  const reason = typeof error?.details?.reason === 'string' ? error.details.reason : 'unavailable';
+  return { reason, ownerAction: CLAUDE_SETUP_ACTIONS.get(reason) || CLAUDE_SETUP_FALLBACK };
+}
+function codexSetup(reason) {
+  const ownerAction = CODEX_SETUP_ACTIONS.get(reason);
+  return ownerAction ? { reason, ownerAction } : null;
+}
+function attachmentSetupReason(attachment) {
+  return new Map([
+    ['unattached', 'desktop-unattached'],
+    ['notRunning', 'desktop-not-running'],
+    ['notInstalled', 'desktop-not-installed'],
+    ['attachedElsewhere', 'desktop-attached-elsewhere'],
+    ['unsupportedPlatform', 'desktop-unsupported-platform'],
+    ['disabled', 'desktop-attach-disabled'],
+    ['toolUnavailable', 'desktop-tool-unavailable'],
+  ]).get(attachment?.state) || null;
+}
+function setupSummary(providers) {
+  const ownerActions = [];
+  for (const provider of ['codex', 'claude']) {
+    const setup = providers[provider]?.setup;
+    if (setup) ownerActions.push({ provider, reason: setup.reason, ownerAction: setup.ownerAction });
+  }
+  return { ready: ownerActions.length === 0, ownerActions };
+}
 const HELP = `usage: doctor.js --repo-root <absolute-path> [options]
 
 options:
@@ -32,6 +93,9 @@ function usage(message) {
   throw error;
 }
 
+// Strict option parsing with per-target grammar: --url is Codex-only and
+// --claude-bin is Claude-only, so a flag is never silently ignored. Every
+// failure is USAGE_ERROR.
 function parseDoctorArgs(argv, env = process.env) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) {
     return { help: HELP };
@@ -90,6 +154,8 @@ function parseDoctorArgs(argv, env = process.env) {
   return { repoRoot, target, url, claudeBin, timeoutMs };
 }
 
+// Lane and pending-operation counts per backend. Counts only; no lane id,
+// provider id, or seat path reaches the report.
 function ownershipSummary(registry) {
   const counts = {
     [CODEX_BACKEND]: { ownedLanes: 0, pendingOperations: 0 },
@@ -104,6 +170,8 @@ function ownershipSummary(registry) {
   return counts;
 }
 
+// Only a small allowlist of codes is reported; everything else collapses to
+// PROVIDER_UNAVAILABLE so no internal detail is published.
 function publicFailureCode(error) {
   const allowed = new Set([
     'PROTOCOL_ERROR',
@@ -116,6 +184,8 @@ function publicFailureCode(error) {
   return allowed.has(error?.code) ? error.code : 'PROVIDER_UNAVAILABLE';
 }
 
+// The placeholder entry for a provider this run did not target. It reports null
+// availability rather than implying a passing probe.
 function notRequested(provider, pinned, probe) {
   return {
     provider,
@@ -146,6 +216,10 @@ async function inspectDesktopAttachment(options, env, dependencies) {
   }
 }
 
+// Turn the attachment receipt into the doctor's nativeVisibility block. Verified
+// only when Desktop holds a live connection to the selected runtime; an
+// attached but untested Desktop build is still verified, with a next action to
+// run a disposable app-visibility check.
 function nativeVisibilityFor(receipt) {
   const attachment = receipt?.attachment || { state: 'unknown' };
   if (attachment.state === 'attached') {
@@ -177,6 +251,9 @@ function nativeVisibilityFor(receipt) {
   };
 }
 
+// One initialize handshake plus the Desktop attachment read, then close.
+// Reusable means the runtime is inside the pinned version line; a runtime
+// outside it is reported honestly rather than used. No lifecycle method is sent.
 async function probeCodex(options, env, dependencies) {
   let client;
   try {
@@ -206,6 +283,8 @@ async function probeCodex(options, env, dependencies) {
     }
     const reusable = client.verifiedRuntime === true;
     const attachment = await inspectDesktopAttachment(options, env, dependencies);
+    const attachmentSetup = attachment?.attachment?.state === 'attached'
+      ? null : codexSetup(attachmentSetupReason(attachment?.attachment));
     return {
       provider: 'codex',
       requested: true,
@@ -214,6 +293,7 @@ async function probeCodex(options, env, dependencies) {
       reuse: reusable ? 'existing-compatible-protocol-runtime' : 'blocked-unverified-runtime',
       probe: 'initialize-handshake-and-desktop-attachment-read',
       nativeVisibility: nativeVisibilityFor(attachment),
+      ...(attachmentSetup ? { setup: attachmentSetup } : {}),
       pinned: {
         userAgentVersionLine: '0.151.x',
         verifiedDate: VERIFIED_DATE,
@@ -250,12 +330,15 @@ async function probeCodex(options, env, dependencies) {
           nextAction: 'obtain-scoped-host-authorization-or-use-a-full-lifecycle-native-channel',
         } : {}),
       },
+      setup: codexSetup(sandboxDenied ? 'sandbox-loopback-denied' : 'runtime-unavailable'),
     };
   } finally {
     client?.close?.();
   }
 }
 
+// Claude preflight plus one agent listing. It proves the pinned CLI build,
+// first-party auth, and a parseable listing without touching any session.
 async function probeClaude(options, env, dependencies) {
   const surface = dependencies.claudeSurface ||
     (dependencies.createClaudeSurface || createClaudeSurface)();
@@ -299,10 +382,14 @@ async function probeClaude(options, env, dependencies) {
         verifiedDate: VERIFIED_DATE,
       },
       error: { code: publicFailureCode(error) },
+      setup: claudeSetup(error),
     };
   }
 }
 
+// The next safe commands to suggest: reconciliation only, and only for a
+// provider that is reusable and actually owns lanes. Host bindings are named
+// rather than expanded, so no local path is printed.
 function maintenanceCommands(options, ownership, providers) {
   const commands = [];
   if (options.target !== 'claude' && providers.codex.reusable === true &&
@@ -331,6 +418,8 @@ function maintenanceCommands(options, ownership, providers) {
   return commands;
 }
 
+// Run the requested probes and assemble the report. ok is true only when every
+// requested provider is reusable; providerMutationsAttempted is always false.
 async function doctor(options, env = process.env, dependencies = {}) {
   const ensure = dependencies.ensureRegistry || ensureRegistry;
   const read = dependencies.readRegistry || readRegistry;
@@ -367,6 +456,7 @@ async function doctor(options, env = process.env, dependencies = {}) {
       ownership,
     },
     providers,
+    setup: setupSummary(providers),
     nextSafeMaintenanceCommands: maintenanceCommands(options, ownership, providers),
   };
 }

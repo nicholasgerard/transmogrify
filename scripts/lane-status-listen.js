@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 'use strict';
 
-/**
- * Wait for a status transition on exact registry-owned Codex lanes.
- * `--all` means all active lanes bound to the selected runtime, never every
- * thread hosted by that runtime.
- */
+// Wait for a status transition on exact registry-owned Codex lanes. `--all`
+// means every active lane bound to the selected runtime, never every thread
+// hosted by that runtime. A watched lane's provider cwd must equal its durable
+// seat before its status is accepted, and the listener exits on the first wake.
+// It only observes status: it never starts, steers, interrupts, or archives.
+
 const { AppServerClient, validateUrl } = require('./lib/app-server');
 const { activeLanes } = require('./lib/state');
 const { boundedCursor, laneNameError } = require('./lib/validation');
@@ -30,6 +31,9 @@ function usage(message) {
   process.exit(2);
 }
 
+// Parses flags and <name>=<selector> watch arguments. A selector is a bounded
+// lane or provider id prefix, and --max-min is capped to the longest delay a
+// Node timer can hold so a configured expiry always fires.
 function parseArgs(argv) {
   let watchAll = false;
   let urlFlag;
@@ -105,6 +109,9 @@ try { lanes = activeLanes(options.repoRoot, 'codex-app-server'); } catch (error)
   console.error('OWNERSHIP ERROR registry verification failed');
   process.exit(3);
 }
+// Every named watch must resolve to exactly one owned active lane on the
+// selected runtime. An ambiguous, foreign-runtime, or already watched selector
+// is a refusal, never a silently narrowed watch set.
 const watch = new Map();
 if (options.watchAll) {
   for (const lane of lanes) {
@@ -153,6 +160,9 @@ let closing = false;
 let polling = false;
 let pollTimer;
 
+// Requires the schema-defined status type and active flags, reading an absent
+// activeFlags as empty. An unrecognized type or flag throws rather than being
+// dropped, because a status that cannot be read is not a status of no change.
 function normalizeStatus(status) {
   if (!status || typeof status !== 'object' || Array.isArray(status) ||
       !STATUS_TYPES.has(status.type)) {
@@ -165,6 +175,9 @@ function normalizeStatus(status) {
   return { type: status.type, activeFlags: [...flags] };
 }
 
+// Requires the provider's returned cwd to equal the lane's durable seat before
+// its status is accepted. thread/resume must also carry the top-level cwd, so a
+// subscription is never established against another working directory.
 function assertProviderSeat(lane, response, method, requireResponseCwd = false) {
   const thread = response?.thread;
   if (!thread || typeof thread !== 'object' || Array.isArray(thread) ||
@@ -188,6 +201,8 @@ function hasActiveFlags(status) {
   return status?.type === 'active' && status.activeFlags?.length > 0;
 }
 
+// Closes the listener exactly once. The latch keeps a later notification or poll
+// from re-entering, and the short delay lets the final report flush before exit.
 function finish(code) {
   if (closing) return;
   closing = true;
@@ -206,6 +221,9 @@ function report(name, status) {
   }
 }
 
+// Records a changed status for a watched lane and wakes the operator on the
+// first active-to-stopped transition or non-empty active flag. An unchanged
+// status is ignored; an unreadable one ends the listener as protocol uncertainty.
 function observeStatus(threadId, status, source) {
   const name = nameByThreadId.get(threadId);
   if (!name || !state.has(name)) return;
@@ -225,6 +243,9 @@ function observeStatus(threadId, status, source) {
   }
 }
 
+// Pages the opening census under fixed page, row, duplicate, and cursor-cycle
+// bounds, then binds each watched lane to its seat-verified opening status. A
+// lane that is not active is dropped here, which is what scopes --all.
 async function readSnapshot() {
   const snapshot = new Map();
   const seen = new Set();
@@ -268,6 +289,9 @@ async function readSnapshot() {
   }
 }
 
+// Establishes one metadata-only thread/resume subscription per active lane at
+// its owned seat. Both returned cwd fields must match before it counts, and the
+// resume snapshot itself can already wake the listener.
 async function subscribeActiveThreads() {
   let count = 0;
   for (const [name, status] of state) {
@@ -289,6 +313,9 @@ async function subscribeActiveThreads() {
   return count;
 }
 
+// Seat-verified thread/read fallback for lanes whose notifications never arrive.
+// It is guarded against re-entry, and any polling failure ends the listener as
+// protocol uncertainty rather than leaving a stale status standing.
 async function pollStatuses() {
   if (polling || closing) return;
   polling = true;
@@ -367,6 +394,8 @@ async function pollStatuses() {
   }
 })();
 
+// The expiry timer is unreferenced, so it bounds a live listener without holding
+// the process open once the connection and poll timer are gone.
 setTimeout(() => {
   console.log(`listener expired after ${options.maxMin}m with no lane idle`);
   finish(0);

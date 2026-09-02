@@ -126,7 +126,9 @@ replace it with a branch, tag, or different revision.
 6. Reuse a compatible runtime that the doctor verifies. Never kill, restart,
    reconfigure, steer, interrupt, archive, or adopt a runtime or lane that this
    Transmogrify installation does not exactly own. If no compatible Codex
-   runtime is available, ask before starting one.
+   runtime is available, ask before starting one. If the doctor reports
+   \`setup.ownerActions\`, ask the user to complete each listed action (for
+   example \`claude auth login\`) and rerun the doctor before any spawn.
 7. When Codex is a target on macOS, run
    \`node "$SKILL_ROOT/scripts/desktop-attach.js" check\`. Codex lanes stream
    live only while Codex Desktop is a client of the shared runtime. If the

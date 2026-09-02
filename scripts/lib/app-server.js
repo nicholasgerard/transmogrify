@@ -1,10 +1,20 @@
 'use strict';
 
+// Codex app-server JSON-RPC client over a pinned loopback WebSocket. It accepts
+// only literal 127.0.0.1 or ::1 root-path URLs, one headerless JSON document per
+// text frame, and a bounded inbound message size. It completes the
+// initialize/initialized handshake before returning control, keeps client and
+// server request ids separate, and projects every unresolved call as
+// transport-unknown. It relays no approval or user-input authority.
+
 const { EventEmitter } = require('node:events');
 const path = require('node:path');
 const WebSocket = require('ws');
 const { VERSION } = require('./version');
 
+// Lifecycle event names this client emits itself. A provider notification using
+// one of them reaches only the generic channel, so it cannot impersonate a
+// connection or error event.
 const RESERVED_DIRECT_EVENTS = new Set([
   'connection/closed',
   'error',
@@ -15,6 +25,9 @@ const RESERVED_DIRECT_EVENTS = new Set([
 ]);
 const MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
 
+// Transport or protocol failure. The code is what callers project: only an
+// explicit refusal is safe, and TRANSPORT_UNKNOWN means the request may still
+// have been received.
 class AppServerError extends Error {
   constructor(message, details = {}) {
     super(message);
@@ -22,6 +35,9 @@ class AppServerError extends Error {
   }
 }
 
+// Accept only a literal loopback ws or wss URL with a root path. Credentials, a
+// path, a query, a fragment, or a non-loopback host is USAGE_ERROR, because the
+// accepted endpoint is an unauthenticated local control plane.
 function validateUrl(url) {
   let parsed;
   try { parsed = new URL(url); } catch (error) {
@@ -42,6 +58,7 @@ function validateUrl(url) {
   return parsed.toString();
 }
 
+// Every timeout is a positive 32-bit-safe integer, so no call can wait forever.
 function validateTimeout(timeoutMs) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
     throw new AppServerError(`invalid timeout ${timeoutMs}: expected 1..2147483647 milliseconds`, {
@@ -51,6 +68,9 @@ function validateTimeout(timeoutMs) {
   return timeoutMs;
 }
 
+// Reduce the initialize user-agent to its bounded product/version form. Anything
+// oversized, control-bearing, or unrecognized returns null and fails the
+// handshake.
 function canonicalCodexUserAgent(value) {
   if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 512 ||
       /[\u0000-\u001f\u007f\u2028\u2029]/u.test(value)) return null;
@@ -58,12 +78,16 @@ function canonicalCodexUserAgent(value) {
   return match ? `${match[1]}/${match[2]}` : null;
 }
 
+// The reported Codex home must be a bounded, normalized, absolute, control-free
+// path before it becomes part of the recorded runtime identity.
 function validCodexHome(value) {
   return typeof value === 'string' && path.isAbsolute(value) && path.normalize(value) === value &&
     Buffer.byteLength(value, 'utf8') <= 4096 &&
     !/[\u0000-\u001f\u007f\u2028\u2029]/u.test(value);
 }
 
+// One connection to one runtime. Adapters obtain it through a helper that always
+// closes it, so a client is never shared across lanes or left open.
 class AppServerClient extends EventEmitter {
   constructor(options) {
     super();
@@ -83,6 +107,10 @@ class AppServerClient extends EventEmitter {
     this.verifiedRuntime = false;
   }
 
+  // Open the socket, send initialize with the experimental capability, validate
+  // the returned runtime identity, and emit the required initialized notification
+  // before returning. An unrecognized identity is RUNTIME_MISMATCH; verifiedRuntime
+  // separately records whether the build is inside the supported version line.
   async connect() {
     if (this.socket) throw new AppServerError('client is already connected', { code: 'CLIENT_STATE' });
     const deadline = Date.now() + this.timeoutMs;
@@ -154,6 +182,8 @@ class AppServerClient extends EventEmitter {
     };
   }
 
+  // One correlated request with its own timeout. A timeout rejects as
+  // TRANSPORT_UNKNOWN, because the server may still have received it.
   call(method, params = {}, timeoutMs = this.timeoutMs) {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new AppServerError('app-server client is not connected', { code: 'CLIENT_STATE' }));
@@ -183,6 +213,8 @@ class AppServerClient extends EventEmitter {
     this.socket.send(JSON.stringify(message));
   }
 
+  // Await the first matching notification. A connection close or the timeout
+  // rejects as TRANSPORT_UNKNOWN, and both listeners are always removed.
   waitForNotification(method, predicate = () => true, timeoutMs = this.timeoutMs) {
     return new Promise((resolve, reject) => {
       validateTimeout(timeoutMs);
@@ -219,6 +251,10 @@ class AppServerClient extends EventEmitter {
     try { this.socket.close(); } catch {}
   }
 
+  // Route one inbound text frame. Invalid JSON, a non-object frame, a malformed
+  // method, array params, and any otherwise unrecognized envelope are protocol
+  // violations: the connection closes and every pending call is projected as
+  // transport-unknown.
   #onMessage(raw) {
     let message;
     try { message = JSON.parse(raw.toString()); } catch {
@@ -286,6 +322,8 @@ class AppServerClient extends EventEmitter {
     try { this.socket?.terminate(); } catch {}
   }
 
+  // Every unresolved call becomes transport-unknown when the connection ends. None
+  // is silently dropped, and none is retried here.
   #onClose() {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
@@ -321,6 +359,9 @@ class AppServerClient extends EventEmitter {
     this.pending.clear();
   }
 
+  // Server-initiated requests are refused by default: this client carries no
+  // unattended approval or user-input authority. A custom handler's exception
+  // returns a fixed error rather than echoing local exception text.
   async #handleServerRequest(message) {
     let response;
     try {

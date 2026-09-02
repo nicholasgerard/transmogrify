@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 
-/** Read-only JSON-RPC diagnostics for a loopback Codex app-server. */
+// Read-only JSON-RPC diagnostics for a loopback Codex app-server. The method
+// allowlist is default-deny and there is no mutation override. A content-bearing
+// thread read also requires a repository root, a registry-owned thread, and a
+// runtime identity that still matches the lane's record. Census rows are reduced
+// to status, timestamps, and source, notification payloads are dropped, and
+// opaque pagination cursors are reported only as booleans.
+
 const fs = require('node:fs');
 const { TextDecoder } = require('node:util');
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
@@ -37,13 +43,23 @@ options:
   --timeout <milliseconds>    bounded request timeout
   --repo-root <absolute-path> required for content-bearing thread reads
 
-Use - to read at most ${MAX_PARAMS_BYTES} bytes of UTF-8 JSON parameters from stdin.`;
+Use - to read at most ${MAX_PARAMS_BYTES} bytes of UTF-8 JSON parameters from stdin.
 
+exit codes:
+  0  the method returned a result
+  1  the runtime returned an RPC error for the method
+  2  policy refusal or ownership precondition
+  3  usage, transport, or protocol failure`;
+
+// Prints one redacted JSON failure envelope and exits: 2 for a policy refusal or
+// an ownership precondition, 3 for a usage, transport, or protocol failure.
 function fail(code, message, exitCode, details = {}) {
   console.error(JSON.stringify({ version: 1, ok: false, code, message, ...details }));
   process.exit(exitCode);
 }
 
+// Reads at most MAX_PARAMS_BYTES of strict UTF-8 from stdin, so an unbounded or
+// mis-encoded parameter document is refused before it is parsed.
 function readBoundedStdin() {
   const chunks = [];
   let total = 0;
@@ -62,6 +78,9 @@ function readBoundedStdin() {
   }
 }
 
+// Projects a census row status onto the schema-defined shape, returning null
+// when the type or any active flag is unrecognized rather than passing it
+// through. A dropped status is omitted from the row, not reported as unknown.
 function safeThreadStatus(status) {
   if (!status || typeof status !== 'object' || Array.isArray(status)) return null;
   if (!THREAD_STATUS_TYPES.has(status.type)) return null;
@@ -71,6 +90,9 @@ function safeThreadStatus(status) {
   return activeFlags.length === status.activeFlags.length ? { type: 'active', activeFlags } : null;
 }
 
+// Reduces a census row to status, timestamps, and source. Thread and parent IDs,
+// previews, names, local paths, and Git metadata are removed, so an unrelated
+// lane's identity never reaches routine output.
 function safeThreadSummary(thread) {
   if (!thread || typeof thread !== 'object' || Array.isArray(thread)) return null;
   const status = safeThreadStatus(thread.status);
@@ -82,6 +104,9 @@ function safeThreadSummary(thread) {
   };
 }
 
+// Applies census redaction to the two listing methods and returns every other
+// result unchanged. A missing data[] or an invalid cursor is a protocol error,
+// and cursor values are replaced by booleans because they are opaque transport.
 function publicResult(method, result) {
   if (!['thread/list', 'thread/loaded/list'].includes(method)) return result;
   if (!result || typeof result !== 'object' || Array.isArray(result) || !Array.isArray(result.data)) {
@@ -111,6 +136,8 @@ if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
   console.log(HELP);
   process.exit(0);
 }
+// Removes a named option and its value from argv in place, so what remains is
+// exactly the method and its optional parameter document.
 function take(name) {
   const index = args.indexOf(name);
   if (index === -1) return null;
@@ -152,6 +179,9 @@ try {
   fail('USAGE_ERROR', 'parameters must be bounded valid UTF-8 JSON', 3);
 }
 
+// A content-bearing read is gated before the connection opens: the requested
+// thread must be registry-owned for this repository and recorded against the
+// runtime being dialed. Every ownership failure is a refusal, never a retry.
 let ownedLane;
 if (OWNED_CONTENT_METHODS.has(method)) {
   if (!repoRoot) {
@@ -187,6 +217,8 @@ if (OWNED_CONTENT_METHODS.has(method)) {
       error.code = 'UNVERIFIED_RUNTIME';
       throw error;
     }
+    // The recorded runtime identity is compared again after the handshake, so a
+    // different app-server answering the same endpoint cannot serve owned content.
     if (ownedLane) {
       for (const key of ['endpoint', 'codexHome', 'platformFamily', 'platformOs']) {
         if (ownedLane.runtime?.[key] !== client.runtimeIdentity?.[key]) {

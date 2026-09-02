@@ -1,5 +1,12 @@
 'use strict';
 
+// Pinned private Claude archival, the one undocumented Anthropic surface
+// Transmogrify uses. It is gated on an exact tuple: macOS arm64, a verified CLI
+// build, the pinned Claude Desktop bundle digest, and a bound organization. It
+// archives only the exact owned bridge session, reads bounded responses, and
+// fails closed. It never enrols a device, never retries an authentication
+// refusal, and never touches a session it was not handed.
+
 const os = require('node:os');
 const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
@@ -8,6 +15,9 @@ const {
   canonicalCseId,
 } = require('./claude-surface');
 
+// The pinned compatibility tuple for this surface. These values are receipts
+// rather than configuration: changing one without a fresh live acceptance run
+// removes the basis for using the private API at all.
 const API_ORIGIN = 'https://api.anthropic.com';
 const DESKTOP_BUILD = '1.40609.1';
 const DESKTOP_BUNDLE_ID = 'com.anthropic.claudefordesktop';
@@ -25,6 +35,8 @@ const CCR_HEADERS = {
   'anthropic-client-feature': 'ccr',
 };
 
+// Private-API failure carrying a stable code. Callers map every code except an
+// explicit authentication refusal to an uncertain archive outcome.
 class ClaudePrivateApiError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -34,6 +46,9 @@ class ClaudePrivateApiError extends Error {
   }
 }
 
+// Extract the OAuth access token from the Keychain credential blob. A malformed
+// record or missing token is PRIVATE_AUTH_UNAVAILABLE, and the token itself is
+// never logged or journaled.
 function parseCredential(raw) {
   let credential;
   try { credential = JSON.parse(raw); } catch {
@@ -50,6 +65,9 @@ function sha256File(file) {
   return require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+// The Desktop bundle must be the pinned regular file, neither a symlink nor
+// group- or world-writable, and its digest must match. It is stat-ed before and
+// after hashing so a swap during the read is caught.
 function assertPinnedDesktopFile(file, expectedSha256, dependencies) {
   let before;
   try { before = dependencies.lstatSync(file); } catch {
@@ -70,6 +88,8 @@ function assertPinnedDesktopFile(file, expectedSha256, dependencies) {
   }
 }
 
+// Read at most the bounded response size and parse it. An oversized, unreadable,
+// or non-JSON body is an uncertain archive outcome, never a silent empty result.
 async function boundedJson(response, label) {
   let raw;
   if (response.body && typeof response.body.getReader === 'function') {
@@ -111,6 +131,8 @@ async function boundedJson(response, label) {
   }
 }
 
+// The actionable reason inside a 403 body: an untrusted device or a stale
+// session. Anything else stays unknown.
 function privateAuthReason(body) {
   for (const value of [
     body?.error?.details?.error_code,
@@ -122,6 +144,9 @@ function privateAuthReason(body) {
   return null;
 }
 
+// Build the private archival client. Every external dependency is injectable so
+// the pinned-tuple and fail-closed paths are testable without contacting the
+// network, the Keychain, or the Desktop bundle.
 function createClaudePrivateApi(dependencies = {}) {
   const deps = {
     execFileSync: dependencies.execFileSync || execFileSync,
@@ -131,6 +156,8 @@ function createClaudePrivateApi(dependencies = {}) {
     username: dependencies.username || os.userInfo().username,
   };
 
+  // One Info.plist value from the installed Desktop app. An unreadable plist is
+  // UNVERIFIED_PRIVATE_VERSION, never a default.
   function desktopPlistValue(key) {
     try {
       return deps.execFileSync('/usr/bin/plutil', [
@@ -146,6 +173,8 @@ function createClaudePrivateApi(dependencies = {}) {
     }
   }
 
+  // The installed Desktop identity, plus proof that its app.asar is the pinned
+  // bundle.
   function desktopBundle() {
     const build = desktopPlistValue('CFBundleShortVersionString');
     const bundleVersion = desktopPlistValue('CFBundleVersion');
@@ -154,6 +183,8 @@ function createClaudePrivateApi(dependencies = {}) {
     return { build, bundleId, bundleVersion };
   }
 
+  // Read the exact Claude Code credential from this user's macOS Keychain. The
+  // token is never cached, written, or included in any receipt.
   function accessToken() {
     let raw;
     try {
@@ -174,6 +205,10 @@ function createClaudePrivateApi(dependencies = {}) {
     return parseCredential(raw);
   }
 
+  // The whole pinned tuple must hold before any private call: macOS arm64, a
+  // verified CLI version and build digest, the pinned Desktop build, bundle
+  // version and id, and a bound organization. Anything else is
+  // UNVERIFIED_PRIVATE_VERSION and nothing is sent.
   function preflight(runtime) {
     const desktop = desktopBundle();
     if (runtime.platform !== 'darwin' || runtime.arch !== 'arm64' ||
@@ -189,6 +224,9 @@ function createClaudePrivateApi(dependencies = {}) {
     }
   }
 
+  // One bounded, redirect-refusing, credential-omitting call to the private
+  // endpoint. A transport failure is REMOTE_ARCHIVE_UNCERTAIN because the request
+  // may still have been received.
   async function request(path, options, runtime, token) {
     let response;
     try {
@@ -212,6 +250,9 @@ function createClaudePrivateApi(dependencies = {}) {
     return response;
   }
 
+  // Project a non-OK response. 401 and a stale-session 403 are authentication
+  // refusals, an untrusted-device 403 is PRIVATE_TRUST_REQUIRED because enrolment
+  // is deliberately not automated, and every other status is uncertain.
   async function failClosedHttp(response, label) {
     if (response.status === 401) {
       throw new ClaudePrivateApiError('PRIVATE_AUTH_REJECTED', `${label} rejected Claude OAuth authentication`);
@@ -236,6 +277,9 @@ function createClaudePrivateApi(dependencies = {}) {
     );
   }
 
+  // Read the session's status, requiring every returned record to name this exact
+  // session and to agree. Another session's id is OWNERSHIP_MISMATCH; disagreeing
+  // records or an unrecognized status are uncertain.
   async function readStatus(cseId, runtime, token, timeoutMs) {
     const response = await request(
       `/v1/code/sessions/${cseId}`,
@@ -280,6 +324,10 @@ function createClaudePrivateApi(dependencies = {}) {
     return status;
   }
 
+  // Archive the exact owned bridge session: read status first, dispatch archive at
+  // most once, then poll for the archived status within bounded attempts. Once the
+  // archive request is dispatched every later failure reports archiveDispatched,
+  // so the caller records the archive as unknown rather than not attempted.
   async function ensureArchived(options) {
     const { bridgeId, runtime } = options;
     let cseId;
@@ -334,6 +382,9 @@ function createClaudePrivateApi(dependencies = {}) {
     }
   }
 
+  // Read-only verification of an archive whose dispatch already happened. It never
+  // sends the archive request, and an unverified result still reports
+  // archiveDispatched so the retirement journal stays honest.
   async function verifyArchived(options) {
     const { bridgeId, runtime } = options;
     let cseId;

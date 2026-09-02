@@ -1,7 +1,15 @@
 'use strict';
 
+// Frozen, documentation-derived execution guidance: what each intent, effort,
+// speed, setting, and model is for, and which model and effort a neutral intent
+// resolves to per provider. It is data only, with no I/O and no behavior; the
+// profile resolver still validates everything here against a live or pinned
+// catalog. Guidance never maps an intent to premium Fast.
+
 const GUIDANCE_VERSION = '2026-09-02';
 
+// Operator-facing descriptions surfaced by the capabilities command. These are
+// advice, not constraints: the catalog decides what is actually selectable.
 const INTENT_DESCRIPTORS = Object.freeze([
   Object.freeze({
     id: 'provider-default',
@@ -162,6 +170,8 @@ const CLAUDE_MODEL_DESCRIPTORS = Object.freeze([
   }),
 ]);
 
+// The Codex intent-to-selection mapping consumed by profile resolution, plus the
+// provider values Standard and Fast compile to.
 const CODEX_GUIDANCE = Object.freeze({
   provider: 'codex',
   source: Object.freeze({
@@ -178,6 +188,8 @@ const CODEX_GUIDANCE = Object.freeze({
   speeds: Object.freeze({ standard: 'default', fast: 'priority' }),
 });
 
+// The Claude intent-to-selection mapping. It declares no speed mapping, because
+// Claude Fast is model-specific and comes from the pinned catalog.
 const CLAUDE_GUIDANCE = Object.freeze({
   provider: 'claude',
   source: Object.freeze({
@@ -193,6 +205,8 @@ const CLAUDE_GUIDANCE = Object.freeze({
   }),
 });
 
+// The published selection guide for Codex: model, effort, and speed descriptions
+// with their documentation sources.
 const CODEX_SELECTION_GUIDE = Object.freeze({
   version: GUIDANCE_VERSION,
   provider: 'codex',
@@ -213,6 +227,8 @@ const CODEX_SELECTION_GUIDE = Object.freeze({
   ]),
 });
 
+// The published selection guide for Claude. Its constraints record the measured
+// boundaries, including that account availability is only proven at launch.
 const CLAUDE_SELECTION_GUIDE = Object.freeze({
   version: GUIDANCE_VERSION,
   provider: 'claude',
@@ -239,12 +255,14 @@ const CLAUDE_SELECTION_GUIDE = Object.freeze({
   ]),
 });
 
+// The resolver guidance for a provider; an unknown provider throws.
 function guidanceFor(provider) {
   if (provider === 'codex') return CODEX_GUIDANCE;
   if (provider === 'claude') return CLAUDE_GUIDANCE;
   throw new Error(`unsupported execution guidance provider: ${provider}`);
 }
 
+// The published selection guide for a provider; an unknown provider throws.
 function selectionGuideFor(provider) {
   if (provider === 'codex') return CODEX_SELECTION_GUIDE;
   if (provider === 'claude') return CLAUDE_SELECTION_GUIDE;

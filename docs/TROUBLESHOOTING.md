@@ -1,7 +1,7 @@
 # Troubleshooting
 
-Transmogrify fails closed when provider identity, runtime identity, ownership, or a
-destructive cleanup precondition cannot be proved. For `lane.js` and
+Transmogrify fails closed when provider identity, runtime identity, ownership,
+or a destructive cleanup precondition cannot be proved. For `lane.js` and
 `doctor.js`, exit code 2 means a safe refusal or incomplete exact-owned
 operation; exit code 3 means an uncertain or unexpected failure that requires
 observation before any retry.
@@ -23,6 +23,21 @@ node "$SKILL_ROOT/scripts/doctor.js" --repo-root /absolute/path/to/repository --
 
 Add `--url` only to Codex commands when the runtime is not the default
 `ws://127.0.0.1:8843`.
+
+## Symptom index
+
+| Symptom or code | Section |
+| --- | --- |
+| Install, upgrade, rollback, or uninstall | [Installation and upgrades](#installation-and-upgrades) |
+| Refused `WORKTREES` root inside the repository | [Managed worktree is not ignored](#managed-worktree-is-not-ignored) |
+| Ownership or mode refusal on state and seat paths | [Private state or worktree permissions](#private-state-or-worktree-permissions) |
+| `boundary:sandbox-loopback-denied`, occupied or incompatible endpoint | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
+| `NATIVE_VISIBILITY_REQUIRED`, `DESKTOP_RELAUNCH_REQUIRED`, `DESKTOP_HOST_SESSION`, `ATTACHED_ELSEWHERE`, `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, `DESKTOP_QUIT_TIMEOUT` | [Codex Desktop is not attached](#codex-desktop-is-not-attached) |
+| `NO_ACTIVE_TURN`, unmarked or foreign native rows | [Codex lane and native row symptoms](#codex-lane-and-native-row-symptoms) |
+| Mobile task fails after a Desktop restart | [Codex mobile Remote access](#codex-mobile-remote-access) |
+| Claude CLI, account, Desktop, or Keychain refusal | [Claude compatibility or authentication problems](#claude-compatibility-or-authentication-problems) |
+| `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
+| `CLEANUP_RETRYABLE`, `CLEANUP_BLOCKED` | [Cleanup is blocked](#cleanup-is-blocked) |
 
 ## Installation and upgrades
 
@@ -99,9 +114,9 @@ rejected for registry state and must not be used to construct a mailbox path.
 
 ## Managed worktree is not ignored
 
-Transmogrify refuses an in-repository `WORKTREES` root unless Git ignores it. Add
-the directory to the target repository's `.gitignore`, or configure an absolute
-root outside every Git worktree. Verify an in-repository path with:
+Transmogrify refuses an in-repository `WORKTREES` root unless Git ignores it.
+Add the directory to the target repository's `.gitignore`, or configure an
+absolute root outside every Git worktree. Verify an in-repository path with:
 
 ```bash
 git -C /absolute/path/to/repository check-ignore --quiet --no-index -- \
@@ -133,13 +148,13 @@ ownership or purpose is unclear:
 install -d -m 700 "$HOME/.local/share/transmogrify/worktrees/example-repository"
 ```
 
-## Codex runtime problems
+## Codex runtime is unavailable or occupied
 
 `boundary:sandbox-loopback-denied` means the operator's current execution
 sandbox refused even a loopback client connection. The runtime may still be
 healthy. Grant the doctor and exact provider-control commands a scoped host
-execution authorization, or use a same-provider native control API only when
-it supplies the full spawn, steer, status, interrupt, recover, retire, and
+execution authorization, or use a same-provider native control API only when it
+supplies the full spawn, steer, status, interrupt, recover, retire, and
 ownership contract. Re-run the doctor before declaring readiness.
 
 If the doctor reports an occupied or incompatible endpoint, do not kill or
@@ -151,55 +166,13 @@ lsof -nP -iTCP:8843 -sTCP:ESTABLISHED
 ```
 
 Reuse a listener only after the initialize handshake succeeds. Run
-`"$SKILL_ROOT/scripts/runtime-up.sh"` only when no compatible runtime exists and the machine
-owner authorizes this Transmogrify installation to own the new detached process.
-The launcher refuses non-loopback endpoints and never cleans up a process it
-did not launch and identify exactly. A newly launched child runs with
-`-c mcp_servers.codex_app={command="",enabled=false}` so the Desktop-only
-`codex_app` MCP bridge stays off on the runtime this installation owns; a
-reused listener keeps its own configuration.
-
-An initialize handshake proves protocol compatibility, not native-app
-attachment. Attachment is a separate measured receipt: on macOS,
-`scripts/desktop-attach.js check` reports whether the Codex Desktop process
-holds an ESTABLISHED loopback connection to the selected runtime, and
-`doctor.js` turns that into `nativeVisibility.verified`. Desktop joins a
-runtime only when it is launched with `CODEX_APP_SERVER_WS_URL` pointing at
-it; a normal launch starts a private bundled app-server instead. If Desktop was
-restarted or updated while an independent app-server survived, the two are
-different processes even though the old endpoint still responds, and the
-doctor shows `desktop-attachment:unattached`.
-
-Run `node "$SKILL_ROOT/scripts/desktop-attach.js" ensure` to repair it. An
-existing attachment, including one set up by another operator, is reused as
-is. A Desktop that is not running is launched attached. A running unattached
-Desktop must be quit and relaunched, which ends whatever the app's private
-runtime was doing: the tool refuses with `DESKTOP_RELAUNCH_REQUIRED` until
-the owner agrees (`--relaunch-desktop` for one run, or the standing
-`TRANSMOGRIFY_DESKTOP_RELAUNCH=auto`), and it refuses with
-`DESKTOP_HOST_SESSION` when the command itself runs inside the app's private
-runtime, because the relaunch would end that session. `ATTACHED_ELSEWHERE`
-means Desktop is already attached to another loopback Codex runtime; point
-`TRANSMOGRIFY_URL` at the reported endpoint instead of competing with it.
-`RUNTIME_UNAVAILABLE` means nothing listens on the selected endpoint yet;
-reuse or start a runtime first. Never repair any of this by restarting a
-shared runtime or by adopting rows from either process. Until the attachment
-receipt is verified, exact-owned recovery and retirement on the recorded
-runtime remain available and a new Codex lane needs `--allow-protocol-only`.
-
-OpenAI's CLI-exposed `app-server daemon`/`app-server proxy` surface remains the
-candidate replacement for this mechanism. It is observed in local CLI help but
-not documented in the official app-server reference, so it stays on the
-roadmap until its launcher behavior, control socket, and safe multi-client
-semantics pass a disposable live acceptance test. A private Desktop IPC or
-app-tools socket is not an alternative.
-
-A native row whose title lacks the `::: ` marker, or that shows a “controlled
-from another app” banner with no live activity, was not created by this
-installation's current runtime. Never rename, adopt, or replay it. Continue
-harvesting and retiring only the exact registry-owned lanes through their
-recorded runtime, and do not resume new Codex dispatches until a
-current-launch visibility check passes.
+`"$SKILL_ROOT/scripts/runtime-up.sh"` only when no compatible runtime exists and
+the machine owner authorizes this Transmogrify installation to own the new
+detached process. The launcher refuses non-loopback endpoints and never cleans
+up a process it did not launch and identify exactly. A newly launched child runs
+with `-c mcp_servers.codex_app={command="",enabled=false}` so the Desktop-only
+`codex_app` MCP bridge stays off on the runtime this installation owns; a reused
+listener keeps its own configuration.
 
 Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 `PATH`, `TRANSMOGRIFY_URL` or `TRANSMOGRIFY_PORT` for the loopback endpoint, and
@@ -209,15 +182,78 @@ Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 The detached child receives a bounded allowlist containing ordinary process,
 locale, home, temp, and certificate-path settings. Ambient API keys, access
 tokens, proxy credentials, `NODE_OPTIONS`, and unrelated secrets are excluded.
-The 0.2.x launcher therefore expects an existing Codex login available under
-its `HOME`/`CODEX_HOME`. An API-key-only or authenticated-proxy environment
-requires a future explicit credential channel; never add the secret to the
-launcher log or command line.
+The launcher therefore expects an existing Codex login available under its
+`HOME`/`CODEX_HOME`. An API-key-only or authenticated-proxy environment requires
+a future explicit credential channel; never add the secret to the launcher log
+or command line.
+
+## Codex Desktop is not attached
+
+An initialize handshake proves protocol compatibility, not native-app
+attachment. Attachment is a separate measured receipt: on macOS,
+`scripts/desktop-attach.js check` reports whether the Codex Desktop process
+holds an ESTABLISHED loopback connection to the selected runtime, and
+`doctor.js` turns that into `nativeVisibility.verified`. Desktop joins a runtime
+only when it is launched with `CODEX_APP_SERVER_WS_URL` pointing at it; a normal
+launch starts a private bundled app-server instead. If Desktop was restarted or
+updated while an independent app-server survived, the two are different
+processes even though the old endpoint still responds, and the doctor shows
+`desktop-attachment:unattached`.
+
+```bash
+node "$SKILL_ROOT/scripts/desktop-attach.js" check
+node "$SKILL_ROOT/scripts/desktop-attach.js" ensure
+```
+
+`check` is read-only and exits 0 only with a live attachment receipt. `ensure`
+reuses an existing attachment as is, including one another operator set up;
+launches Desktop attached when it is not running; and quits and relaunches a
+running unattached Desktop only after the owner authorizes it. A relaunch ends
+whatever the app's private runtime was doing, so ask first.
+
+| Code | Meaning | Repair |
+| --- | --- | --- |
+| `NATIVE_VISIBILITY_REQUIRED` | Codex spawn found no attachment receipt | Attach, or pass `--allow-protocol-only` for a deliberately unattached lane |
+| `DESKTOP_RELAUNCH_REQUIRED` | Desktop is running unattached and the repair quits it | Run `ensure --relaunch-desktop` after the owner agrees, or set the standing `TRANSMOGRIFY_DESKTOP_RELAUNCH=auto` |
+| `DESKTOP_HOST_SESSION` | The command runs inside a Desktop-hosted session, so the relaunch would end it | Attach from a session outside the app, or spawn Claude lanes and `--allow-protocol-only` Codex lanes |
+| `ATTACHED_ELSEWHERE` | Desktop already streams another loopback Codex runtime | Point `TRANSMOGRIFY_URL` at the reported endpoint instead of competing with it |
+| `RUNTIME_UNAVAILABLE` | Nothing listens on the selected endpoint yet | Reuse or start a runtime first |
+| `ATTACH_TIMEOUT` | Desktop launched but no connection appeared inside the wait window | Re-run `check`; raise `--timeout-ms` if the host is slow to start the app |
+| `DESKTOP_QUIT_TIMEOUT` | Desktop did not exit after its own quit request | Finish or discard the app's open work, then retry |
+
+`TRANSMOGRIFY_DESKTOP_ATTACH=off` reports the check as disabled without probing;
+`ensure` then refuses with `ATTACH_DISABLED`. The app is located by bundle
+identifier, `com.openai.codex` first and then `com.openai.chat`;
+`TRANSMOGRIFY_DESKTOP_BUNDLE_ID` overrides that list for a differently packaged
+build.
+
+Never repair any of this by restarting a shared runtime or by adopting rows from
+either process. Until the attachment receipt is verified, exact-owned recovery
+and retirement on the recorded runtime remain available and a new Codex lane
+needs `--allow-protocol-only`.
+
+OpenAI's CLI-exposed `app-server daemon`/`app-server proxy` surface remains the
+candidate replacement for this mechanism. It is observed in local CLI help but
+not documented in the official app-server reference, so it stays on the roadmap
+until its launcher behavior, control socket, and safe multi-client semantics
+pass a disposable live acceptance test. A private Desktop IPC or app-tools
+socket is not an alternative.
+
+## Codex lane and native row symptoms
 
 `steer` or `interrupt` returning `NO_ACTIVE_TURN` with exit code 2 means the
 exact owned thread has no current turn. It is not evidence that the thread is
 foreign, broken, or safe to delete. Inspect status and continue at an explicit
 turn boundary.
+
+A native row whose title lacks the `::: ` marker, or that shows a "controlled
+from another app" banner with no live activity, was not created by this
+installation's current runtime. Never rename, adopt, or replay it. Continue
+harvesting and retiring only the exact registry-owned lanes through their
+recorded runtime, and do not resume new Codex dispatches until a current-launch
+visibility check passes.
+
+## Codex mobile Remote access
 
 Codex mobile Remote access is a Desktop-host integration, not an app-server
 handshake guarantee. OpenAI's
@@ -230,12 +266,12 @@ for every task.
 
 If a pre-restart exact-owned task remains visible on mobile but returns a server
 error while a fresh disposable post-restart task works, do not keep pressing
-Retry and do not restart or replace a shared app-server. The 0.2.x compatibility
-receipt documents this as a host-integration reattachment seam; native Desktop
-rehydration did not repair the affected task. Continue only through a control
-channel whose exact receipts still verify, preserve the lane and worktree, and
-follow [the protocol boundary](PROTOCOL.md#codex-lane-lifecycle). Do not archive
-or replace the task until its output is harvested and the operator explicitly
+Retry and do not restart or replace a shared app-server. This is the measured
+host-integration reattachment seam, and native Desktop rehydration did not
+repair the affected task. Continue only through a control channel whose exact
+receipts still verify, preserve the lane and worktree, and follow
+[the protocol boundary](PROTOCOL.md#mobile-and-remote-hosts). Do not archive or
+replace the task until its output is harvested and the operator explicitly
 chooses a successor-lane recovery.
 
 ## Claude compatibility or authentication problems
@@ -269,11 +305,10 @@ bundle receipt, the exact account/organization identity, and the existing
 `Claude Code-credentials` Keychain item. Transmogrify never enrolls a device,
 refreshes login, searches Keychain broadly, or falls back to another endpoint.
 A 401, untrusted-device 403, or changed response shape requires manual provider
-setup or a compatibility refresh—not a blind retry.
-If the exact stop was already verified, the error receipt says so separately.
-An auth/trust failure before archive dispatch leaves archive not attempted; the
-same failure after POST dispatch is archive-unknown and requires observation,
-not replay.
+setup or a compatibility refresh, not a blind retry. If the exact stop was
+already verified, the error receipt says so separately. An auth/trust failure
+before archive dispatch leaves archive not attempted; the same failure after
+POST dispatch is archive-unknown and requires observation, not replay.
 
 ## Pending or uncertain operation
 
@@ -298,11 +333,11 @@ that flag for general reconciliation.
 A Codex lane whose thread was created but whose first turn never receipted
 stays pending after reconciliation, and its parent receives one
 `child.needs-attention` event per journal state. Reconciliation never replays
-the input. To abandon the lane, run its exact `retire` command with the
-harvest digest of whatever output exists; retirement re-inspects the thread,
-refuses while a turn is active, closes the spawn journal, and archives the
-empty thread. A lane that never received its thread ID keeps its attention
-event and its seat for owner review; no provider call can be replayed for it.
+the input. To abandon the lane, run its exact `retire` command with the harvest
+digest of whatever output exists; retirement re-inspects the thread, refuses
+while a turn is active, closes the spawn journal, and archives the empty
+thread. A lane that never received its thread ID keeps its attention event and
+its seat for owner review; no provider call can be replayed for it.
 
 `PARENT_EVENT_UNRECORDED` with exit code 3 means the spawn itself is verified
 and journaled, but the durable parent event could not be written, most often
@@ -322,11 +357,11 @@ local condition, then rerun the exact lane's `retire` command or exact-owned
 reconciliation. The pending harvest and retirement receipt are reused; the
 provider archive is not replayed.
 
-`CLEANUP_BLOCKED` means provider retirement may be complete while the local
-seat remains for review. Transmogrify preserves a managed worktree when it was
-dirty at harvest, is dirty now, changed HEAD after harvest, no longer matches
-the recorded filesystem identity, or is outside its managed root. Once dirt or
-a changed HEAD is observed, automatic deletion remains permanently blocked.
+`CLEANUP_BLOCKED` means provider retirement may be complete while the local seat
+remains for review. Transmogrify preserves a managed worktree when it was dirty
+at harvest, is dirty now, changed HEAD after harvest, no longer matches the
+recorded filesystem identity, or is outside its managed root. Once dirt or a
+changed HEAD is observed, automatic deletion remains permanently blocked.
 Ignored files are included in the dirt census and remain preserved.
 
 Review and harvest the preserved worktree manually. Do not edit the ownership

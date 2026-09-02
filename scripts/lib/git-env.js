@@ -1,5 +1,10 @@
 'use strict';
 
+// Environment for every Git subprocess this installation runs. System, global,
+// and hook configuration are disabled so repository reads and mutations behave
+// identically regardless of the operator's ambient setup. It must never forward
+// a caller's GIT_*, credential, or proxy variables into a managed seat.
+
 const GIT_ENV_KEYS = new Set([
   'HOME',
   'LANG',
@@ -14,6 +19,9 @@ const GIT_ENV_KEYS = new Set([
   'USER',
 ]);
 
+// Builds that environment from the allowlist. A key outside GIT_ENV_KEYS, a
+// non-string value, or an embedded NUL is dropped rather than repaired, and the
+// pinned GIT_CONFIG_* overrides are applied last so no caller can preempt them.
 function sanitizedGitEnv(env = process.env) {
   const clean = {};
   for (const [key, value] of Object.entries(env)) {

@@ -1,5 +1,13 @@
 'use strict';
 
+// Durable ownership registry and local lock manager: the single authority for
+// the lanes, provider identities, and worktree seats this installation owns,
+// and for the one pending operation pointer per lane. Operation records are
+// monotonic rather than an append-only log, so a phase transition atomically
+// replaces the record, existing detail keys are immutable, and later phases
+// only add receipts. It performs no provider I/O and never treats a local
+// record as evidence that a provider mutation happened.
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -9,6 +17,8 @@ const { validateUnobservedProfile } = require('./execution-profile');
 const { sanitizedGitEnv } = require('./git-env');
 
 const SCHEMA_VERSION = 1;
+// Lane lifecycle vocabulary. Active states still own provider or seat
+// resources; retired states have released them.
 const ACTIVE_LANE_STATES = new Set([
   'planned',
   'created',
@@ -32,6 +42,9 @@ const RETIRED_LANE_STATES = new Set([
   'worktreeRemoved',
 ]);
 const TERMINAL_OPERATION_STATES = new Set(['complete', 'failed', 'notDelivered']);
+// The complete set of legal lane state edges. An edge that is not listed here
+// cannot be written, so no repair path can invent a shortcut through the
+// lifecycle.
 const LANE_TRANSITIONS = new Map([
   ['planned', new Set(['created', 'failed', 'deliveryUnknown'])],
   ['created', new Set(['materialized', 'active', 'idle', 'failed', 'deliveryUnknown', 'retireRequested', 'stopRequested'])],
@@ -47,13 +60,15 @@ const LANE_TRANSITIONS = new Map([
   ['archiveUnknown', new Set(['localRemovalPending', 'archivedVerified'])],
   ['localRemovalPending', new Set(['archivedVerified'])],
   ['deliveryUnknown', new Set(['created', 'materialized', 'active', 'idle', 'failed', 'retireRequested', 'archiveUnknown', 'stopRequested', 'stopped', 'recoverRequested'])],
-  ['failed', new Set(['retireRequested', 'worktreeRemoved'])],
+  ['failed', new Set(['retireRequested', 'cleanupEligible', 'worktreeRemoved'])],
   ['archivedVerified', new Set(['cleanupEligible', 'worktreeRemoved'])],
   ['cleanupEligible', new Set(['worktreeRemoved'])],
   ['logicallyRetired', new Set(['cleanupEligible', 'worktreeRemoved'])],
   ['worktreeRemoved', new Set()],
 ]);
 
+// A self-transition is a no-op; any other unlisted edge throws before the
+// registry is written.
 function assertLaneTransition(from, to) {
   if (from === to) return;
   if (!LANE_TRANSITIONS.get(from)?.has(to)) {
@@ -61,6 +76,9 @@ function assertLaneTransition(from, to) {
   }
 }
 
+// Absolute root of the private state tree, from TRANSMOGRIFY_STATE_DIR or the
+// platform state directory. Refuses a nearest existing ancestor that is not a
+// current-user-owned directory without group or world write bits.
 function stateRoot(env = process.env) {
   const configured = env.TRANSMOGRIFY_STATE_DIR ||
     path.join(env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), '.local', 'state'), 'transmogrify');
@@ -85,6 +103,8 @@ function stateRoot(env = process.env) {
   return path.join(canonicalAncestor, ...missing);
 }
 
+// A state directory must be a real current-user-owned directory with no group
+// or world bits. Absence is not a failure; the caller creates it.
 function assertPrivateStateDirectory(directory) {
   if (!fs.existsSync(directory)) return;
   const stat = fs.lstatSync(directory);
@@ -98,11 +118,15 @@ function assertPrivateStateDirectory(directory) {
   }
 }
 
+// Create the directory 0700 and re-assert privacy, so a pre-existing loosened
+// directory still fails closed.
 function ensurePrivateStateDirectory(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   assertPrivateStateDirectory(directory);
 }
 
+// One trimmed Git read under the sanitized Git environment. A non-zero exit
+// throws with the child's stderr and is never treated as an empty answer.
 function gitOutput(repoRoot, args) {
   try {
     return execFileSync('git', ['-C', repoRoot, ...args], {
@@ -121,6 +145,9 @@ function identityFor(targetPath) {
   return { device: stat.dev, inode: stat.ino };
 }
 
+// Canonical repository identity: the realpath worktree root, its Git common
+// directory, and the device/inode receipt for each. Refuses a path that is not
+// the worktree root, so a subdirectory cannot claim another project's lanes.
 function resolveProject(repoRoot) {
   if (!repoRoot || !path.isAbsolute(repoRoot)) {
     throw new Error(`REPO_ROOT must be an absolute path: ${repoRoot || '(missing)'}`);
@@ -141,10 +168,15 @@ function resolveProject(repoRoot) {
   };
 }
 
+// Project directory name: SHA-256 of the Git common directory, so every
+// worktree of one repository shares a single ownership registry.
 function projectKey(project) {
   return crypto.createHash('sha256').update(project.commonDir).digest('hex');
 }
 
+// Resolve and privacy-check every state path for a repository. The state root
+// must lie outside both the worktree and the Git common directory, so registry
+// and operation records are never committable or reachable through the repo.
 function projectPaths(repoRoot, env = process.env) {
   const project = resolveProject(repoRoot);
   const root = stateRoot(env);
@@ -177,6 +209,8 @@ function sameIdentity(left, right) {
   return left?.device === right?.device && left?.inode === right?.inode;
 }
 
+// Order-insensitive deep JSON equality. Immutability checks compare records
+// this way so key order can never look like a changed field.
 function sameJson(left, right) {
   const canonicalize = (value) => {
     if (Array.isArray(value)) return value.map(canonicalize);
@@ -195,6 +229,8 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const GIT_OBJECT_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const CLAUDE_BACKEND = 'claude-code';
 
+// Unknown fields fail closed: a record written by a newer or tampered writer is
+// refused rather than silently carried forward.
 function assertExactKeys(value, allowed, label) {
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new Error(`${label} contains unsupported field ${key}`);
@@ -207,6 +243,9 @@ function assertTimestamp(value, label) {
   }
 }
 
+// One Claude execution epoch: UUID, contiguous ordinal, worker pid with its
+// measured process birth, and the 0600 control socket's device, inode, uid and
+// mode. Contiguous ordinals mean no epoch can be dropped or reordered.
 function validateExecutionEpoch(epoch, expectedOrdinal) {
   if (!epoch || typeof epoch !== 'object' || Array.isArray(epoch)) {
     throw new Error('Claude execution epoch must be an object');
@@ -251,6 +290,10 @@ const CLAUDE_RUNTIME_IDENTITY_KEYS = [
   'accountFingerprint',
 ];
 
+// The measured Claude compatibility tuple: platform, arch, CLI path, version
+// and SHA-256, config and projects directory identities, and the account
+// fingerprint. allowLegacyProjectsIdentity keeps a pre-0.2 receipt on an
+// already-retired lane readable without weakening any check on a live lane.
 function validateClaudeRuntime(runtime, label = 'Claude runtime', options = {}) {
   if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) {
     throw new Error(`${label} must be an object`);
@@ -281,10 +324,15 @@ function validateClaudeRuntime(runtime, label = 'Claude runtime', options = {}) 
   }
 }
 
+// The subset of the runtime tuple that must survive a CLI upgrade unchanged.
+// The build hash is deliberately excluded: it is what a transition rebinds.
 function sameClaudeRuntimeIdentity(left, right) {
   return CLAUDE_RUNTIME_IDENTITY_KEYS.every((key) => left?.[key] === right?.[key]);
 }
 
+// Receipts are stored durably and surface in diagnostics, so any nested field
+// whose name suggests a token, secret, credential, or authorization is refused.
+// tokenSha256 is the single exception because it is already a digest.
 function assertReceipt(receipt, label) {
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
     throw new Error(`${label} is required`);
@@ -301,6 +349,10 @@ function assertReceipt(receipt, label) {
   visit(receipt);
 }
 
+// Whole-record invariant for a Claude lane: session and job bind atomically and
+// the job is the session's first eight hex characters, a bridge or execution
+// epoch requires that session, and the runtime-epoch chain must preserve the
+// immutable identity while advancing build hash and epoch ordinals in order.
 function validateClaudeProviderIdentity(lane) {
   const identity = lane.providerIdentity;
   if (identity === undefined) return;
@@ -411,6 +463,10 @@ function validateClaudeProviderIdentity(lane) {
   });
 }
 
+// The immutable intent recorded before the Claude CLI is executed: operation,
+// nonce, display name, prompt digests, preflight session census, and capture
+// paths. It must still match the lane's ownership, so a replayed or edited
+// intent cannot be used to adopt a different provider session.
 function validateClaudeSpawnIntent(lane) {
   if (lane.providerIdentity === undefined) return;
   const intent = lane.ownership?.spawnIntent;
@@ -450,6 +506,8 @@ function validateClaudeSpawnIntent(lane) {
   }
 }
 
+// The pending operation pointer and the append-only observed-stop records. Each
+// stop keeps the state it was observed from and a secret-free receipt.
 function validateLaneJournal(lane) {
   if (lane.pendingOperationId !== undefined && lane.pendingOperationId !== null &&
       !UUID_PATTERN.test(lane.pendingOperationId)) {
@@ -479,6 +537,9 @@ function validateLaneJournal(lane) {
   }
 }
 
+// The immutable managed-seat intent. A bound seat must match its intent field
+// for field including the base commit, so a lane can never be moved onto a
+// different worktree or branch after reservation.
 function validateSeatIntent(lane) {
   if (lane.seatIntent === undefined || lane.seatIntent === null) return;
   const intent = lane.seatIntent;
@@ -515,6 +576,8 @@ function validateSeatIntent(lane) {
   }
 }
 
+// Dispatch lineage is exactly three UUIDs: the dispatch, its parent context,
+// and the installation. Only lanes reserved under a parent carry one.
 function validateLineage(lane) {
   if (lane.lineage === undefined) return;
   const lineage = lane.lineage;
@@ -530,6 +593,8 @@ function validateLineage(lane) {
   }
 }
 
+// The lane's immutable execution profile must be a valid unobserved profile and
+// name the same provider as the lane target.
 function validateExecutionProfile(lane) {
   if (lane.executionProfile === undefined) return;
   try {
@@ -542,6 +607,9 @@ function validateExecutionProfile(lane) {
   }
 }
 
+// Cross-lane exclusivity for the whole registry: one owner per provider id, per
+// Claude session, job, and bridge, and one live lane per worktree seat. A lane
+// in worktreeRemoved has released its seat and no longer blocks a claim.
 function validateProviderIdentities(registry) {
   const claims = new Map();
   const seatClaims = new Map();
@@ -585,6 +653,9 @@ function validateProviderIdentities(registry) {
   }
 }
 
+// Whole-registry gate on every read and before every write. The recorded
+// project identity must equal the resolved one; a mismatch requires explicit
+// adoption rather than silently re-homing another repository's lanes.
 function validateRegistry(registry, project) {
   if (!registry || registry.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(`unsupported or corrupt registry schema: ${registry?.schemaVersion ?? '(missing)'}`);
@@ -602,6 +673,9 @@ function validateRegistry(registry, project) {
   return registry;
 }
 
+// Read a private JSON state file. Refuses symlinks, non-files, foreign owners,
+// and group- or world-accessible modes. Returns null for ENOENT; corrupt JSON
+// throws instead of being read as an empty record.
 function readJson(file) {
   let raw;
   try {
@@ -632,6 +706,9 @@ function fsyncDirectory(directory) {
   try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
 }
 
+// Durable replace: write 0600 to an exclusive private temporary name, fsync,
+// rename, then fsync the directory. A crash leaves either the previous record
+// or the new one, never a partial file.
 function atomicWriteJson(file, value) {
   const directory = path.dirname(file);
   ensurePrivateStateDirectory(directory);
@@ -650,6 +727,9 @@ function atomicWriteJson(file, value) {
   fsyncDirectory(directory);
 }
 
+// The kernel's start time for a pid, the second half of a process identity so a
+// recycled pid cannot impersonate a lock or worker owner. Returns null when ps
+// cannot answer, which callers must not read as proof the process is gone.
 function processBirth(pid, options = {}) {
   const timeoutMs = options.timeoutMs ?? 30_000;
   try {
@@ -667,6 +747,8 @@ function processBirth(pid, options = {}) {
 const SELF_START_MS = Date.now() - (process.uptime() * 1000);
 const FALLBACK_BIRTH_PREFIX = 'self-start-ms:';
 
+// Monotonic self-identity for hosts where ps is unavailable. It proves only
+// this process's own ownership and never judges another pid.
 function fallbackProcessBirth(startMs = SELF_START_MS) {
   return `${FALLBACK_BIRTH_PREFIX}${Math.round(startMs)}`;
 }
@@ -684,6 +766,9 @@ function processGone(owner, dependencies = {}) {
   }
 }
 
+// True when the recorded pid is live and its measured birth still matches. A
+// live pid whose birth cannot be measured counts as matching, so a lock is
+// never reclaimed from a process that may still hold it.
 function processMatches(owner, dependencies = {}) {
   if (!owner || !Number.isInteger(owner.pid) || owner.pid < 1 || !owner.processBirth) return false;
   const signal = dependencies.kill || process.kill.bind(process);
@@ -714,6 +799,8 @@ function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
+// A lock claim receipt: a fresh token plus this process's pid, measured birth,
+// host, and time. The token is what proves the claim, not the pid.
 function lockOwner(dependencies = {}) {
   const pid = dependencies.selfPid ?? process.pid;
   const birth = (dependencies.processBirth || processBirth)(pid) ||
@@ -727,6 +814,10 @@ function lockOwner(dependencies = {}) {
   };
 }
 
+// One point-in-time read of a lock directory: its identity, its owner receipt
+// if one was published, and whether it is reclaimable. An owner is stale when
+// its process is gone, or when the receipt has been untouched past the
+// ownerless grace and no longer matches a live process. Null means absent.
 function staleLockObservation(lockDirectory, ownerlessGraceMs) {
   let stat;
   try {
@@ -762,6 +853,8 @@ function staleLockObservation(lockDirectory, ownerlessGraceMs) {
   };
 }
 
+// Remove a quarantined lock directory, and only while it holds nothing but the
+// owner receipt. Unexpected contents are left in place for manual review.
 function removeQuarantinedLock(directory) {
   try {
     const entries = fs.readdirSync(directory);
@@ -776,6 +869,9 @@ function removeQuarantinedLock(directory) {
   }
 }
 
+// Rename a lock aside only while it is still the exact directory and owner that
+// were observed as stale. Any change returns false, so a lock reclaimed or
+// re-taken between observation and action is never stolen from its new owner.
 function quarantineObservedLock(lockDirectory, observed) {
   const current = staleLockObservation(lockDirectory, 0);
   if (!current || current.stat.dev !== observed.stat.dev || current.stat.ino !== observed.stat.ino) {
@@ -799,6 +895,7 @@ function quarantineObservedLock(lockDirectory, observed) {
   return true;
 }
 
+// Reclaim the reaper lock itself when its holder died mid-reap.
 function reclaimStaleCoordinator(reaperDirectory, ownerlessGraceMs) {
   const observed = staleLockObservation(reaperDirectory, ownerlessGraceMs);
   if (!observed?.stale) return false;
@@ -866,6 +963,8 @@ function claimLock(lockDirectory, owner) {
   return null;
 }
 
+// Take the single-reaper lock, retrying once after reclaiming a dead
+// coordinator. Returns null rather than waiting: reaping is best effort.
 function acquireReaper(reaperDirectory, ownerlessGraceMs) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const claimed = claimLock(reaperDirectory, lockOwner());
@@ -875,6 +974,9 @@ function acquireReaper(reaperDirectory, ownerlessGraceMs) {
   return null;
 }
 
+// Quarantine a stale lock while holding the reaper lock, re-verifying directory
+// identity, owner token, and staleness after the reaper is held. Every failed
+// re-check returns false and leaves the lock exactly as it was.
 function reapStaleLock(lockDirectory, observed, ownerlessGraceMs) {
   const reaperDirectory = `${lockDirectory}.reaper`;
   const reaper = acquireReaper(reaperDirectory, ownerlessGraceMs);
@@ -914,6 +1016,9 @@ function reapStaleLock(lockDirectory, observed, ownerlessGraceMs) {
   }
 }
 
+// Claim a lock directory, reaping a proven-stale holder, until waitMs elapses.
+// A timeout throws LOCAL_LOCK_TIMEOUT, which callers project as a safe refusal
+// because no provider mutation has been attempted behind it.
 function acquireLock(lockDirectory, options = {}) {
   const waitMs = options.waitMs ?? 5000;
   const pollMs = options.pollMs ?? 50;
@@ -942,6 +1047,8 @@ function acquireLock(lockDirectory, options = {}) {
   }
 }
 
+// Release only a lock this owner's token still holds; releasing another
+// process's lock throws rather than unlinking it.
 function releaseLock(lockDirectory, owner) {
   const ownerFile = path.join(lockDirectory, 'owner.json');
   const current = readJson(ownerFile);
@@ -957,11 +1064,15 @@ function releaseLock(lockDirectory, owner) {
   fs.rmdirSync(lockDirectory);
 }
 
+// Run one synchronous registry mutation under the project-wide lock.
 function withProjectLock(paths, callback, options) {
   const owner = acquireLock(paths.lock, options);
   try { return callback(); } finally { releaseLock(paths.lock, owner); }
 }
 
+// Hold a per-lane lease across an asynchronous provider operation so two local
+// hosts cannot dispatch to one lane. The lease serializes this machine only; it
+// is not a provider-side guarantee.
 async function withLaneLease(repoRoot, laneId, callback, env = process.env, options) {
   if (!/^[0-9A-Za-z._-]+$/.test(laneId || '')) throw new Error(`invalid lane id: ${laneId}`);
   const paths = projectPaths(repoRoot, env);
@@ -983,6 +1094,8 @@ function newRegistry(project) {
   };
 }
 
+// Return the validated registry, creating an empty one on first use. Every
+// later read revalidates the recorded project identity.
 function ensureRegistry(repoRoot, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -995,6 +1108,8 @@ function ensureRegistry(repoRoot, env = process.env) {
   });
 }
 
+// Validated registry read. Throws when no registry exists and never creates
+// one, so a read cannot silently adopt a repository.
 function readRegistry(repoRoot, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   const registry = readJson(paths.registry);
@@ -1002,12 +1117,16 @@ function readRegistry(repoRoot, env = process.env) {
   return { paths, registry: validateRegistry(registry, paths.project) };
 }
 
+// Revalidate before persisting, so no in-memory mutation can write a record
+// that a later read would reject.
 function writeRegistry(paths, registry) {
   validateRegistry(registry, paths.project);
   registry.updatedAt = new Date().toISOString();
   atomicWriteJson(paths.registry, registry);
 }
 
+// Operation records are addressed by UUID only, so an operation id can never
+// escape the operations directory.
 function operationFile(paths, operationId) {
   if (!UUID_PATTERN.test(operationId || '')) {
     throw new Error(`invalid operation id: ${operationId}`);
@@ -1015,6 +1134,8 @@ function operationFile(paths, operationId) {
   return path.join(paths.operations, `${operationId}.json`);
 }
 
+// Shape gate for one operation journal record: UUID identity, type, state,
+// nullable lane and provider bindings, an object detail bag, and timestamps.
 function validateOperationRecord(record, expectedOperationId) {
   if (!record || typeof record !== 'object' || Array.isArray(record) ||
       !UUID_PATTERN.test(record.operationId || '') ||
@@ -1051,6 +1172,9 @@ function newOperationRecord(operation, operationId = operation.operationId || cr
   }, operationId);
 }
 
+// The monotonic operation rule: identity, type, lane, and creation time never
+// change, providerId binds once, and every existing detail key must be
+// resubmitted unchanged. A later phase may only add new receipt keys.
 function patchedOperationRecord(current, patch) {
   for (const protectedKey of ['operationId', 'type', 'laneId', 'createdAt']) {
     if (patch[protectedKey] !== undefined && patch[protectedKey] !== current[protectedKey]) {
@@ -1082,6 +1206,8 @@ function patchedOperationRecord(current, patch) {
   }, current.operationId);
 }
 
+// Create a standalone operation journal. An existing operation id is refused so
+// a reused id can never overwrite another journal.
 function beginOperation(repoRoot, operation, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1098,6 +1224,7 @@ function beginOperation(repoRoot, operation, env = process.env) {
   });
 }
 
+// Apply a monotonic patch to an existing operation journal.
 function updateOperation(repoRoot, operationId, patch, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1111,6 +1238,8 @@ function updateOperation(repoRoot, operationId, patch, env = process.env) {
   });
 }
 
+// Every operation journal for the project, ordered by id. Entries that are not
+// UUID-named JSON are ignored as host metadata; a malformed record still throws.
 function listOperations(repoRoot, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   if (!fs.existsSync(paths.operations)) return [];
@@ -1123,6 +1252,8 @@ function listOperations(repoRoot, env = process.env) {
     });
 }
 
+// One live lane per worktree path. A lane in worktreeRemoved has released its
+// seat and no longer blocks a new claim.
 function assertSeatClaimAvailable(registry, laneId, claimedPath) {
   if (!path.isAbsolute(claimedPath || '')) throw new Error('lane seat claim requires an absolute path');
   const collision = Object.values(registry.lanes).find((entry) =>
@@ -1139,6 +1270,9 @@ function assertSeatAvailable(registry, laneId, seat) {
   assertSeatClaimAvailable(registry, laneId, seat.path);
 }
 
+// Build the durable lane record for a reservation. providerId is always null
+// here: a lane and its seat claim are durable before any provider mutation, and
+// only a later binding may name the provider.
 function reservationRecord(paths, registry, lane, options = {}) {
   if (!lane || typeof lane.laneId !== 'string' || !lane.laneId ||
       typeof lane.backend !== 'string' || !lane.backend ||
@@ -1182,6 +1316,10 @@ function reservationRecord(paths, registry, lane, options = {}) {
   return record;
 }
 
+// Atomically reserve the spawn journal and its lane before any provider
+// creation. An exact retry of the same operation and lane is idempotent;
+// anything else is a collision. This is a pre-dispatch refusal point, so a
+// failure here means the provider was never contacted.
 function reserveSpawn(repoRoot, reservation, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1241,6 +1379,9 @@ function reserveSpawn(repoRoot, reservation, env = process.env) {
   });
 }
 
+// Record the materialized worktree seat on the pending spawn and its journal.
+// The seat must match the immutable seat intent field for field, including its
+// base commit; rebinding the identical seat is idempotent.
 function bindLaneSeat(repoRoot, laneId, operationId, seat, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1285,6 +1426,9 @@ function bindLaneSeat(repoRoot, laneId, operationId, seat, env = process.env) {
   });
 }
 
+// Open an operation journal and make it the lane's single pending operation.
+// Refuses while another operation is still pending, so two mutations can never
+// be in flight against one lane.
 function beginLaneOperation(repoRoot, laneId, operation, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1312,6 +1456,8 @@ function beginLaneOperation(repoRoot, laneId, operation, env = process.env) {
   });
 }
 
+// The lane's pending operation record, or null. A pointer to a journal owned by
+// another lane throws rather than being reported as this lane's work.
 function pendingOperationForLane(repoRoot, laneId, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1329,6 +1475,8 @@ function pendingOperationForLane(repoRoot, laneId, env = process.env) {
   });
 }
 
+// Monotonic patch restricted to the operation currently pending for the lane,
+// so a stale operation id cannot advance a phase.
 function updatePendingLaneOperation(repoRoot, laneId, operationId, patch, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1347,6 +1495,10 @@ function updatePendingLaneOperation(repoRoot, laneId, operationId, patch, env = 
   });
 }
 
+// Move the operation to a terminal state and clear the lane pointer in one
+// registry write. A repeat whose patch already matches the persisted record
+// returns it unchanged, so a crash between the two writes is repairable
+// locally without a second provider effect.
 function completeLaneOperation(repoRoot, laneId, operationId, patch = {}, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1375,6 +1527,9 @@ function completeLaneOperation(repoRoot, laneId, operationId, patch = {}, env = 
   });
 }
 
+// Clear a lane pointer left behind when its journal already reached a terminal
+// state. Returns null when there is nothing to settle and never changes an
+// operation's recorded outcome.
 function settleTerminalLaneOperationPointer(repoRoot, laneId, env = process.env) {
   const pending = pendingOperationForLane(repoRoot, laneId, env);
   if (!pending || !TERMINAL_OPERATION_STATES.has(pending.state)) return null;
@@ -1387,6 +1542,9 @@ function settleTerminalLaneOperationPointer(repoRoot, laneId, env = process.env)
   );
 }
 
+// Register a lane whose provider id is already known, creating the registry on
+// first use. Managed spawns reserve and then bind instead; this single-step
+// form is used by the test fixtures.
 function registerLane(repoRoot, lane, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1439,6 +1597,8 @@ function registerLane(repoRoot, lane, env = process.env) {
   });
 }
 
+// Reserve a lane with no spawn journal. Managed spawns use reserveSpawn so the
+// journal and the lane become durable together.
 function reserveLane(repoRoot, lane, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1451,6 +1611,10 @@ function reserveLane(repoRoot, lane, env = process.env) {
   });
 }
 
+// Bind a Codex lane to its provider thread once the creation receipt is in
+// hand. providerId, seat, runtime endpoint, and creation receipt are immutable,
+// and re-binding the same id is idempotent and may not move lane state. Claude
+// lanes are refused here because their identity binds atomically elsewhere.
 function bindLaneProvider(repoRoot, laneId, providerId, patch = {}, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1523,6 +1687,10 @@ function bindLaneProvider(repoRoot, laneId, providerId, patch = {}, env = proces
   });
 }
 
+// Bind a Claude lane's session, job, bridge, and first execution epoch in one
+// registry write and advance its spawn journal to providerObserved. Session and
+// job must agree, every identity is immutable, and an exact re-observation
+// returns the lane unchanged so a retried spawn cannot fork the identity.
 function bindClaudeSpawnObservation(repoRoot, laneId, binding, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1624,6 +1792,9 @@ function bindClaudeSpawnObservation(repoRoot, laneId, binding, env = process.env
   });
 }
 
+// Bind only the Claude session and job, leaving bridge and epoch unbound.
+// Managed spawns use bindClaudeSpawnObservation; this partial form is exercised
+// by the state tests.
 function bindClaudeProviderIdentity(repoRoot, laneId, binding, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1678,6 +1849,9 @@ function bindClaudeProviderIdentity(repoRoot, laneId, binding, env = process.env
   });
 }
 
+// Bind the Claude bridge id to a lane whose session is already bound. The
+// bridge is immutable and exclusive across lanes; an exact re-bind returns the
+// lane unchanged.
 function bindLaneProviderBridge(repoRoot, laneId, bridgeId, receipt, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1721,6 +1895,9 @@ function bindLaneProviderBridge(repoRoot, laneId, bridgeId, receipt, env = proce
   });
 }
 
+// Append the next execution epoch for a fully bound Claude lane. Ordinals are
+// assigned here and never by the caller, and re-appending a known epoch id
+// requires an identical record.
 function appendLaneExecutionEpoch(repoRoot, laneId, epoch, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1759,6 +1936,10 @@ function appendLaneExecutionEpoch(repoRoot, laneId, epoch, env = process.env) {
   });
 }
 
+// Record a verified Claude CLI transition: a new build under an unchanged
+// provider identity, a worker receipt matching that build, and a genuinely new
+// execution epoch. It appends to both epoch chains and never overwrites the
+// spawn runtime, so the original identity receipt stays readable.
 function rebindClaudeRuntime(repoRoot, laneId, transition, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1860,6 +2041,10 @@ function rebindClaudeRuntime(repoRoot, laneId, transition, env = process.env) {
   });
 }
 
+// Record a durable stop observation and move the lane to stopped. The record
+// keeps the state it was observed from, a repeat of the same observation id
+// must be identical, and a lane already stopped without this receipt is refused
+// rather than re-stopped.
 function observeLaneStopped(repoRoot, laneId, observation, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1910,6 +2095,9 @@ function observeLaneStopped(repoRoot, laneId, observation, env = process.env) {
   });
 }
 
+// Read-modify-write one lane under the project lock. The callback sees a clone
+// and returns a patch; identity, provider, seat, runtime, ownership, lineage,
+// and profile fields stay immutable and state must follow a legal transition.
 function mutateLane(repoRoot, laneId, callback, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1942,6 +2130,8 @@ function mutateLane(repoRoot, laneId, callback, env = process.env) {
   });
 }
 
+// Patch a lane directly under the same immutability and transition rules as
+// mutateLane.
 function updateLane(repoRoot, laneId, patch, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1981,6 +2171,8 @@ function ownedProviderLane(repoRoot, backend, providerId, env = process.env) {
   ) || null;
 }
 
+// The lane record, or a NOT_OWNED error. Mutation paths resolve ownership here
+// rather than trusting a caller-supplied lane.
 function requireOwnedLane(repoRoot, laneId, env = process.env) {
   if (!laneId) throw new Error('lane id is required');
   const lane = listLanes(repoRoot, env).find((entry) => entry.laneId === laneId);
@@ -1988,12 +2180,15 @@ function requireOwnedLane(repoRoot, laneId, env = process.env) {
   return lane;
 }
 
+// The same ownership gate keyed by backend and provider id.
 function requireOwnedProviderLane(repoRoot, backend, providerId, env = process.env) {
   const lane = ownedProviderLane(repoRoot, backend, providerId, env);
   if (!lane) throw new Error(`NOT_OWNED: ${backend} resource ${providerId}`);
   return lane;
 }
 
+// Lanes for one backend that are neither retired nor terminal: the fleet the
+// listener and reconciliation paths work over.
 function activeLanes(repoRoot, backend, env = process.env) {
   return listLanes(repoRoot, env).filter((lane) =>
     lane.backend === backend && ACTIVE_LANE_STATES.has(lane.state) && !RETIRED_LANE_STATES.has(lane.state)

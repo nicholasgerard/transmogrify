@@ -1,7 +1,16 @@
 'use strict';
 
+// Provider-neutral execution profiles: normalizing a request of intent, model,
+// effort, setting, and Standard/Fast speed, building a provider capability
+// catalog, and resolving one immutable requested/resolved profile with a
+// separate observed receipt. Resolution is deterministic and JSON-stable, so a
+// stored profile can be re-resolved and compared exactly. Premium Fast is never
+// selected implicitly and no unsupported selection is silently dropped.
+
 const PROFILE_VERSION = 1;
 
+// The provider-neutral vocabulary. An intent names a purpose rather than a
+// model, and speed is exactly Standard or Fast on both providers.
 const INTENTS = Object.freeze([
   'provider-default',
   'fast-loop',
@@ -17,6 +26,8 @@ const CLAUDE_MODEL_SELECTOR_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CLAUDE_CLI_COMPATIBILITY_VERSION = '2.1.258';
 const CLAUDE_CLI_COMPATIBILITY_VERIFIED_AT = '2026-09-02';
 
+// Profile failure carrying a stable code. Adapters re-project it as
+// EXECUTION_PROFILE_UNSUPPORTED while keeping this code in the details.
 class ExecutionProfileError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -30,6 +41,8 @@ function fail(code, message, details) {
   throw new ExecutionProfileError(code, message, details);
 }
 
+// Only a plain object counts; a class instance or exotic prototype is rejected
+// rather than serialized.
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     return false;
@@ -38,6 +51,8 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
+// Define an own data property, so a key such as __proto__ becomes ordinary data
+// instead of reaching a prototype.
 function setOwn(target, key, value) {
   Object.defineProperty(target, key, {
     value,
@@ -47,12 +62,17 @@ function setOwn(target, key, value) {
   });
 }
 
+// Locale-independent ordering, so a catalog serializes identically everywhere.
 function compareCodeUnits(left, right) {
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
 }
 
+// Deep-copy a value into canonical JSON form with sorted keys, refusing cycles,
+// symbols, accessors, non-finite numbers, sparse or decorated arrays, and
+// undefined fields. Every stored profile passes through here, which is what
+// makes a digest of one stable and reproducible.
 function toJsonSafe(value, label = 'value', ancestors = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') {
     return value;
@@ -126,6 +146,7 @@ function toJsonSafe(value, label = 'value', ancestors = new Set()) {
   return result;
 }
 
+// Canonical serialization, used for profile digests and equality checks.
 function stableStringify(value) {
   return JSON.stringify(toJsonSafe(value));
 }
@@ -160,6 +181,8 @@ function requiredString(value, label, code = 'INVALID_CATALOG') {
   return value;
 }
 
+// Unknown fields fail closed, so a newer catalog or request cannot smuggle an
+// unhandled control past resolution.
 function assertKnownKeys(value, allowed, label, code) {
   const unknown = Object.keys(value).filter((key) => !allowed.includes(key)).sort();
   if (unknown.length > 0) {
@@ -167,6 +190,8 @@ function assertKnownKeys(value, allowed, label, code) {
   }
 }
 
+// Normalize a caller request. speedExplicit is kept separately because Fast may
+// only ever be chosen deliberately, never inherited from a default.
 function normalizeExecutionRequest(request = {}) {
   requiredObject(request, 'request', 'INVALID_REQUEST');
   assertKnownKeys(
@@ -198,6 +223,7 @@ function normalizeExecutionRequest(request = {}) {
   };
 }
 
+// The catalog provenance record, which must at least name its kind.
 function normalizeSource(source, fallbackKind) {
   const raw = source === undefined ? { kind: fallbackKind } : requiredObject(source, 'source');
   const normalized = toJsonSafe(raw, 'source');
@@ -207,6 +233,8 @@ function normalizeSource(source, fallbackKind) {
   return normalized;
 }
 
+// Effort levels in code-unit order, accepting either bare strings or
+// level/description objects. A duplicate level is INVALID_CATALOG.
 function normalizeEffortList(efforts, label) {
   if (!Array.isArray(efforts)) {
     fail('INVALID_CATALOG', `${label} must be an array`, { label });
@@ -238,6 +266,7 @@ function normalizeEffortList(efforts, label) {
   return result.sort((left, right) => compareCodeUnits(left.level, right.level));
 }
 
+// Provider-advertised native tiers, ordered and deduplicated for stable output.
 function normalizeNativeTiers(tiers, label) {
   if (!Array.isArray(tiers)) {
     fail('INVALID_CATALOG', `${label} must be an array`, { label });
@@ -260,6 +289,9 @@ function normalizeNativeTiers(tiers, label) {
   return result.sort((left, right) => compareCodeUnits(left.id, right.id));
 }
 
+// Build the Codex catalog from a live model/list response. A response still
+// carrying a nextCursor is INCOMPLETE_CATALOG, because a partial catalog could
+// resolve a selection the full one would refuse.
 function catalogFromCodexModelList(modelList, options = {}) {
   requiredObject(modelList, 'modelList');
   requiredObject(options, 'options');
@@ -413,6 +445,9 @@ function catalogFromCodexModelList(modelList, options = {}) {
   });
 }
 
+// Build the pinned Claude catalog. It is documentation-derived rather than
+// runtime-advertised, so it refuses any CLI version but the verified
+// compatibility build.
 function createClaudeCliCatalog(options = {}) {
   requiredObject(options, 'options');
   assertKnownKeys(options, ['source'], 'options', 'INVALID_CATALOG');
@@ -498,6 +533,8 @@ function createClaudeCliCatalog(options = {}) {
   });
 }
 
+// Normalize intent-to-selection guidance. Guidance may never map an intent to
+// Fast: premium speed stays an explicit caller decision.
 function normalizeGuidance(guidance = {}, provider) {
   requiredObject(guidance, 'guidance', 'INVALID_GUIDANCE');
   assertKnownKeys(
@@ -591,6 +628,8 @@ function normalizeGuidance(guidance = {}, provider) {
   });
 }
 
+// A native control is a kind plus an explicit value, so a resolved profile always
+// names the exact provider field it compiles to.
 function normalizeNativeControl(control, label, code = 'INVALID_CATALOG') {
   if (control === null) return null;
   requiredObject(control, label, code);
@@ -602,6 +641,8 @@ function normalizeNativeControl(control, label, code = 'INVALID_CATALOG') {
   return { kind, value: toJsonSafe(control.value, `${label}.value`) };
 }
 
+// Named execution settings, each requiring an explicit native control and
+// optionally pinning the effort level it owns.
 function normalizeExecutionSettings(settings, label) {
   if (!Array.isArray(settings)) {
     fail('INVALID_CATALOG', `${label} must be an array`, { label });
@@ -646,6 +687,9 @@ function normalizeExecutionSettings(settings, label) {
   return result.sort((left, right) => compareCodeUnits(left.id, right.id));
 }
 
+// The native controls for Standard and Fast. Standard is mandatory and Fast may
+// not reuse Standard's control, so an unsupported Fast cannot silently resolve
+// to the same provider request.
 function normalizeSpeedCompatibility(compatibility, label) {
   if (compatibility === null) return null;
   requiredObject(compatibility, label, 'INVALID_CATALOG');
@@ -688,6 +732,9 @@ function normalizeSpeedCompatibility(compatibility, label) {
   return toJsonSafe(result);
 }
 
+// Whole-catalog gate before resolution: version, provider, model list, effort
+// lists, selector policy, and speed compatibility must all be internally
+// consistent.
 function validateNormalizedCatalog(catalog, provider) {
   requiredObject(catalog, 'catalog');
   if (catalog.profileVersion !== PROFILE_VERSION || catalog.provider !== provider) {
@@ -915,6 +962,8 @@ function validateNormalizedCatalog(catalog, provider) {
   }
 }
 
+// The one catalog entry a selector names by id, selector, or alias. Several
+// matches is AMBIGUOUS_MODEL; none returns null for the selector policy to judge.
 function findCatalogModel(catalog, selector) {
   const matches = catalog.models.filter((model) => (
     model.id === selector
@@ -928,6 +977,10 @@ function findCatalogModel(catalog, selector) {
   return null;
 }
 
+// Resolve the model from the explicit request, then intent guidance, then the
+// catalog's single selectable default. A hidden, retired, or superseded model is
+// refused, and an unlisted selector is accepted only under a
+// validated-passthrough policy whose pattern still admits it.
 function resolveModel(catalog, request, intentGuidance) {
   let selector = request.model;
   let selection = 'explicit';
@@ -1001,6 +1054,9 @@ function resolveModel(catalog, request, intentGuidance) {
   return { model: null, selector, catalogId: null, selection };
 }
 
+// Resolve a named execution setting, which must exist in the catalog and be
+// supported by the resolved model. It requires a catalog-resolved model, because
+// a passthrough selector cannot prove support.
 function resolveExecutionSetting(catalog, request, modelResolution) {
   if (request.setting === undefined || request.setting === null) return null;
   const definitions = catalog.executionSettings === undefined ? [] : catalog.executionSettings;
@@ -1036,6 +1092,10 @@ function resolveExecutionSetting(catalog, request, modelResolution) {
   };
 }
 
+// Resolve effort from the explicit request, an execution setting that owns it,
+// intent guidance, or the model's documented default. Requesting an effort
+// alongside a setting that pins one is CONFLICTING_EXECUTION_SETTING, and an
+// unsupported level is UNSUPPORTED_EFFORT rather than a silent downgrade.
 function resolveEffort(catalog, request, intentGuidance, modelResolution, settingResolution) {
   let level;
   let selection;
@@ -1082,6 +1142,8 @@ function resolveEffort(catalog, request, intentGuidance, modelResolution, settin
   return { level, selection };
 }
 
+// Per-model speed guidance keyed by catalog id or selector. Conflicting mappings
+// for the same model are INVALID_GUIDANCE.
 function guidanceSpeedsForModel(guidance, modelResolution) {
   const keys = [];
   if (modelResolution.model !== null) keys.push(modelResolution.model.id);
@@ -1095,6 +1157,9 @@ function guidanceSpeedsForModel(guidance, modelResolution) {
   return mappings.length > 0 ? mappings[0] : guidance.speeds;
 }
 
+// Resolve Standard or Fast to the exact native control the provider accepts.
+// Fast without an explicit request is IMPLICIT_FAST_FORBIDDEN, and a speed the
+// surface does not support is UNSUPPORTED_SPEED.
 function resolveSpeed(catalog, request, guidance, modelResolution) {
   if (request.speed === 'fast' && !request.speedExplicit) {
     fail('IMPLICIT_FAST_FORBIDDEN', 'premium fast speed must be requested explicitly', {});
@@ -1175,6 +1240,10 @@ function resolveSpeed(catalog, request, guidance, modelResolution) {
   };
 }
 
+// Resolve one immutable profile: the normalized request, the resolved model,
+// effort, optional setting and speed with their native controls, and the catalog
+// and guidance provenance. The observed half starts null and is only ever filled
+// in from a provider receipt.
 function resolveExecutionProfile({ provider, request = {}, catalog, guidance = {} } = {}) {
   const normalizedProvider = requiredExactString(provider, 'provider', 'INVALID_REQUEST');
   validateNormalizedCatalog(catalog, normalizedProvider);
@@ -1232,11 +1301,15 @@ function resolveExecutionProfile({ provider, request = {}, catalog, guidance = {
   });
 }
 
+// Resolve against a fully paginated live Codex model/list.
 function resolveCodexExecutionProfile({ request = {}, modelList, guidance = {}, source } = {}) {
   const catalog = catalogFromCodexModelList(modelList, { source });
   return resolveExecutionProfile({ provider: 'codex', request, catalog, guidance });
 }
 
+// Resolve against the pinned Claude catalog, expanding the ultracode effort
+// shorthand into the execution setting. Combining it with a different setting is
+// INVALID_REQUEST.
 function resolveClaudeExecutionProfile({ request = {}, guidance = {}, source } = {}) {
   const catalog = createClaudeCliCatalog({ source });
   let expandedRequest = request;
@@ -1252,6 +1325,9 @@ function resolveClaudeExecutionProfile({ request = {}, guidance = {}, source } =
   return resolveExecutionProfile({ provider: 'claude', request: expandedRequest, catalog, guidance });
 }
 
+// Gate a stored profile before it is reused: exact shape, current version, no
+// observation yet, and no implicitly requested Fast. Returns the canonical copy,
+// which is what callers compare and store.
 function validateUnobservedProfile(profile) {
   const safe = toJsonSafe(profile, 'profile');
   requiredObject(safe, 'profile', 'INVALID_PROFILE');
@@ -1419,6 +1495,8 @@ function validateUnobservedProfile(profile) {
   return safe;
 }
 
+// The original caller request recovered from a stored profile, so it can be
+// re-resolved and compared against current capabilities.
 function requestFromProfile(profile) {
   const safe = validateUnobservedProfile(profile);
   return {
@@ -1432,6 +1510,10 @@ function requestFromProfile(profile) {
   };
 }
 
+// Attach the provider's observed model, effort, speed, native control, and
+// receipt to an unobserved profile. The requested and resolved halves are left
+// untouched, so a contradicting observation stays visible instead of overwriting
+// the recorded decision.
 function withObservedExecution(profile, observation) {
   const safeProfile = validateUnobservedProfile(profile);
   requiredObject(observation, 'observation', 'INVALID_OBSERVATION');

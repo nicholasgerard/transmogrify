@@ -42,6 +42,8 @@ const TESTED_DESKTOP_BUILDS = Object.freeze([
   Object.freeze({ version: '26.901.20858', build: '7658', observedOn: '2026-09-02' }),
 ]);
 
+// Attachment failure carrying a stable code. Every code names the Desktop state
+// that was observed, so a refusal tells the operator what to fix.
 class DesktopAttachError extends Error {
   constructor(message, code = 'DESKTOP_ATTACH_FAILED', details = null) {
     super(message);
@@ -54,6 +56,10 @@ function usage(message) {
   throw new DesktopAttachError(message, 'USAGE_ERROR');
 }
 
+// Bounded child execution that never rejects. A missing or unusable tool comes
+// back as code null with a failure reason, so an inspection gap is reported
+// rather than mistaken for a negative observation. PATH is forced to the system
+// directories so a same-user entry cannot substitute the tool.
 function execFileResult(executable, args, options = {}) {
   return new Promise((resolve) => {
     execFile(executable, args, {
@@ -81,6 +87,8 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+// The runtime this check is about: explicit option, then TRANSMOGRIFY_URL, then
+// the default loopback port, always through the loopback URL validator.
 function resolveRuntimeUrl(options, env) {
   return validateUrl(options.url || env.TRANSMOGRIFY_URL ||
     `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
@@ -94,6 +102,8 @@ function runtimePort(runtimeUrl) {
   return port;
 }
 
+// The attach wait is bounded on both ends, so ensure can neither spin nor return
+// before the app has had time to connect.
 function boundedTimeout(value) {
   const timeoutMs = value === undefined ? DEFAULT_ATTACH_TIMEOUT_MS : value;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > MAX_ATTACH_TIMEOUT_MS) {
@@ -102,6 +112,8 @@ function boundedTimeout(value) {
   return timeoutMs;
 }
 
+// The bundle identifiers to look for, overridable by environment. An override
+// that is not a bundle identifier is a usage error, never a shell fragment.
 function bundleCandidates(env) {
   if (env[BUNDLE_ENV] !== undefined) {
     if (!BUNDLE_ID_PATTERN.test(env[BUNDLE_ENV])) usage(`${BUNDLE_ENV} must be a bundle identifier`);
@@ -110,6 +122,7 @@ function bundleCandidates(env) {
   return DEFAULT_BUNDLE_IDS;
 }
 
+// Split an lsof address into host, port, and whether the host is loopback.
 function parseAddress(raw) {
   const match = /^(\[[0-9a-fA-F:]+\]|[0-9.]+):(\d{1,5})$/.exec(raw || '');
   if (!match) return null;
@@ -155,6 +168,8 @@ function clientConnections(connections, port) {
     connection.local.loopback && connection.local.port !== port);
 }
 
+// Run a system tool and turn an unavailable one into TOOL_UNAVAILABLE, so a
+// missing tool is never read as proof that Desktop is unattached.
 async function requireTool(run, executable, args, env, timeoutMs = 5000) {
   const result = await run(executable, args, { timeoutMs, env });
   if (result.code === null) {
@@ -163,6 +178,8 @@ async function requireTool(run, executable, args, env, timeoutMs = 5000) {
   return result;
 }
 
+// The first installed Desktop application among the accepted bundle identifiers,
+// with its path, version, and build. Null when none is installed.
 async function resolveDesktopApp(run, env) {
   for (const bundleId of bundleCandidates(env)) {
     const located = await requireTool(run, 'osascript', [
@@ -184,6 +201,8 @@ async function resolveDesktopApp(run, env) {
   return null;
 }
 
+// Process ids whose executable lives inside this application bundle. Matching on
+// the resolved bundle path keeps an unrelated process of the same name out.
 async function desktopProcessIds(run, appPath, env) {
   const listed = await requireTool(run, 'ps', ['-axo', 'pid=,comm='], env);
   const prefix = `${appPath}/Contents/MacOS/`;
@@ -214,6 +233,8 @@ async function ancestorProcessIds(run, env, startPid) {
   return ancestors;
 }
 
+// Established client connections into the runtime port, or an empty list when
+// nothing is connected.
 async function establishedClients(run, port, env) {
   const result = await requireTool(run, 'lsof', [
     '-nP', `-iTCP:${port}`, '-sTCP:ESTABLISHED', '-Fpcn',
@@ -261,11 +282,17 @@ async function attachedElsewhere(run, pids, port, env) {
   return found;
 }
 
+// Whether this Desktop version and build are among the tested pair. Reported for
+// the operator; the attachment receipt itself is always measured.
 function buildTested(app) {
   return TESTED_DESKTOP_BUILDS.some((tested) =>
     tested.version === app.version && tested.build === app.build);
 }
 
+// Read-only attachment receipt. It reports exactly one state: attached with the
+// observed connection, or disabled, unsupportedPlatform, notInstalled,
+// notRunning, attachedElsewhere, unattached, or toolUnavailable when inspection
+// itself failed. It launches nothing, quits nothing, and touches no runtime.
 async function check(options = {}, env = process.env, dependencies = {}) {
   const run = dependencies.execFileResult || execFileResult;
   const platform = dependencies.platform || process.platform;
@@ -369,6 +396,9 @@ async function check(options = {}, env = process.env, dependencies = {}) {
   }, 'run-desktop-attach-ensure');
 }
 
+// Quit Desktop through the application's own quit and wait for its processes to
+// exit. A refusal is DESKTOP_QUIT_FAILED and a survivor is DESKTOP_QUIT_TIMEOUT;
+// no process is ever signalled.
 async function quitDesktop(run, desktop, env, dependencies) {
   const sleep = dependencies.sleep || delay;
   const clock = dependencies.clock || Date.now;
@@ -393,6 +423,9 @@ async function quitDesktop(run, desktop, env, dependencies) {
   }
 }
 
+// Launch Desktop with the attach variable set to the runtime URL. A launch that
+// reports the app was already running is DESKTOP_STILL_RUNNING, because that
+// launch could not have carried the environment.
 async function launchDesktopAttached(run, desktop, runtimeUrl, env) {
   const launched = await requireTool(run, 'open', [
     '-b', desktop.bundleId, '--env', `${ATTACH_ENV}=${runtimeUrl.replace(/\/$/, '')}`,
@@ -408,6 +441,12 @@ async function launchDesktopAttached(run, desktop, runtimeUrl, env) {
   }
 }
 
+// Bring Desktop to an attached state and prove it with a fresh check. An
+// already-attached app is reused and a stopped app is launched attached.
+// Relaunching a running unattached app quits it, so it requires explicit or
+// standing owner authorization, is refused from a session hosted by the app
+// itself, and is refused when Desktop is already attached elsewhere or no
+// loopback runtime is listening.
 async function ensure(options = {}, env = process.env, dependencies = {}) {
   const run = dependencies.execFileResult || execFileResult;
   const sleep = dependencies.sleep || delay;

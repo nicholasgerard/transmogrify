@@ -1,5 +1,12 @@
 'use strict';
 
+// Codex app-server lane adapter: spawn, status, steer, interrupt, boundary
+// resume, retire, and recovery for exact-owned Codex threads. Every provider
+// mutation is journaled before dispatch and confirmed by an exact receipt: the
+// client message id, the provider cwd, or the archived listing row. An
+// unconfirmed outcome is projected as unknown. It never replays an input whose
+// delivery is unknown and never widens a thread's sandbox or approval policy.
+
 const crypto = require('node:crypto');
 const path = require('node:path');
 const {
@@ -53,6 +60,8 @@ const {
   boundedCursor, canonicalLaneName, laneNameError, normalizeThreadStatus, ownedLaneNameError,
 } = require('./validation');
 
+// The complete thread/list source set. Listing every kind is what makes an
+// archived-thread census complete rather than a partial view of one client.
 const SOURCE_KINDS = [
   'cli',
   'vscode',
@@ -75,11 +84,15 @@ const RETIRED_STATES = new Set([
 const UNRESOLVED_SPAWN_STATES = new Set([
   'turnRequestDispatched', 'materialized', 'partial', 'unknown',
 ]);
+// Bounds for every paginated provider read, plus the measured retry budget for
+// the input receipt that a turn/start response can omit on this runtime line.
 const MAX_PAGINATION_PAGES = 100;
 const MAX_PAGINATION_ROWS = 10_000;
 const DEFAULT_INPUT_RECEIPT_VERIFY_ATTEMPTS = 100;
 const DEFAULT_INPUT_RECEIPT_VERIFY_DELAY_MS = 100;
 
+// Adapter failure carrying a stable code. The code, not the message, is what
+// the CLI maps to an exit status and a public delivery projection.
 class TransmogrifyError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -88,6 +101,8 @@ class TransmogrifyError extends Error {
   }
 }
 
+// The selected runtime endpoint: explicit option, then TRANSMOGRIFY_URL, then
+// the default loopback port. Callers still pass the result through validateUrl.
 function runtimeUrl(options, env = process.env) {
   return options.url || env.TRANSMOGRIFY_URL ||
     `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`;
@@ -97,6 +112,8 @@ function worktreesRoot(options, env = process.env) {
   return options.worktrees || env.WORKTREES || `${options.repoRoot}/.worktrees`;
 }
 
+// The uniform success envelope. It carries lane state, capabilities, and
+// visibility so a caller never has to re-read the registry to interpret it.
 function laneResult(operation, lane, extra = {}) {
   return {
     version: 1,
@@ -112,6 +129,10 @@ function laneResult(operation, lane, extra = {}) {
   };
 }
 
+// Resolve the lane a command may act on, by lane id or provider id. Refuses
+// another backend as ADAPTER_MISMATCH, a retired lane for a mutation as
+// LANE_RETIRED, an unbound provider as DELIVERY_UNKNOWN, and a lane owned on a
+// different runtime endpoint as RUNTIME_MISMATCH. No provider call is made.
 function ownedLane(options, env, action = 'read') {
   if (options.laneId) {
     const lane = requireOwnedLane(options.repoRoot, options.laneId, env);
@@ -141,6 +162,8 @@ function ownedLane(options, env, action = 'read') {
   return lane;
 }
 
+// The connected runtime must be the exact one the lane was created on. The same
+// endpoint serving a different Codex home or platform is RUNTIME_MISMATCH.
 function assertRuntimeIdentity(lane, client) {
   for (const key of ['endpoint', 'codexHome', 'platformFamily', 'platformOs']) {
     if (lane.runtime?.[key] !== client.runtimeIdentity?.[key]) {
@@ -149,12 +172,17 @@ function assertRuntimeIdentity(lane, client) {
   }
 }
 
+// Re-verify the seat's recorded identity before a mutation, so a replaced or
+// moved worktree becomes SEAT_MISMATCH instead of silent execution elsewhere.
 function assertSeatIdentity(options, lane, env) {
   try { return verifyLaneSeat(options.repoRoot, lane.seat); } catch (error) {
     throw new TransmogrifyError('SEAT_MISMATCH', error.message);
   }
 }
 
+// Every Codex response carrying a cwd must name the exact reserved seat. A
+// missing or non-string value is PROTOCOL_ERROR as malformed; a well-formed
+// different path is OWNERSHIP_MISMATCH. Both fail closed before input is sent.
 function assertProviderSeat(lane, thread, responseCwd, method, requireResponseCwd = false) {
   if (!thread || typeof thread !== 'object' || Array.isArray(thread) ||
       typeof thread.cwd !== 'string' ||
@@ -176,6 +204,8 @@ function assertProviderSeat(lane, thread, responseCwd, method, requireResponseCw
   return thread;
 }
 
+// Bounded attempts and delay for the persisted input receipt. Out-of-range
+// values are USAGE_ERROR, so no caller can turn this into an unbounded poll.
 function turnReceiptVerificationBounds(options) {
   const attempts = options.inputReceiptVerifyAttempts ?? DEFAULT_INPUT_RECEIPT_VERIFY_ATTEMPTS;
   const delayMs = options.inputReceiptVerifyDelayMs ?? DEFAULT_INPUT_RECEIPT_VERIFY_DELAY_MS;
@@ -186,6 +216,9 @@ function turnReceiptVerificationBounds(options) {
   return { attempts, delayMs };
 }
 
+// Open one app-server connection for the duration of a callback and always
+// close it. A runtime outside the supported version line is UNVERIFIED_RUNTIME
+// and no lifecycle mutation is attempted behind it.
 async function withClient(options, callback, env = process.env) {
   const client = new AppServerClient({
     url: runtimeUrl(options, env),
@@ -208,6 +241,8 @@ async function withClient(options, callback, env = process.env) {
   }
 }
 
+// Fully paginate model/list under the page, row, and cursor-cycle bounds. A
+// truncated or looping catalog is PROTOCOL_ERROR, never a partial answer.
 async function readModelCatalog(client) {
   const data = [];
   const seenCursors = new Set();
@@ -238,6 +273,8 @@ async function readModelCatalog(client) {
   throw new TransmogrifyError('PROTOCOL_ERROR', 'model/list exceeded the bounded page count');
 }
 
+// The caller's execution intent with unset controls omitted, so a provider
+// default stays a default instead of being pinned to a resolved value.
 function executionRequest(options) {
   return Object.fromEntries([
     ['intent', options.intent],
@@ -247,6 +284,8 @@ function executionRequest(options) {
   ].filter(([, value]) => value !== undefined));
 }
 
+// Re-project an execution-profile failure as EXECUTION_PROFILE_UNSUPPORTED,
+// keeping the original profile code in details. Any other error rethrows.
 function profileFailure(error) {
   if (!(error instanceof ExecutionProfileError)) throw error;
   throw new TransmogrifyError('EXECUTION_PROFILE_UNSUPPORTED', error.message, {
@@ -254,6 +293,9 @@ function profileFailure(error) {
   });
 }
 
+// Resolve the immutable execution profile against the live model catalog. A
+// supplied profile must resolve identically or it is refused as stale. This
+// runs before any reservation, so a refusal here mutated nothing.
 async function resolveSpawnProfile(options, env) {
   let supplied = null;
   if (options.executionProfile !== undefined) {
@@ -290,6 +332,8 @@ async function resolveSpawnProfile(options, env) {
   }, env);
 }
 
+// Public capability report for Codex: intents, selection guide, guidance, and
+// the catalog derived from a fully paginated live model/list.
 async function executionCapabilities(options = {}, env = process.env) {
   return withClient(options, async (client, initialized) => {
     const modelList = await readModelCatalog(client);
@@ -321,6 +365,8 @@ async function executionCapabilities(options = {}, env = process.env) {
   }, env);
 }
 
+// Operator-readable phrasing for each non-attached Desktop state, so a refusal
+// names the state that was actually observed.
 const ATTACHMENT_DESCRIPTIONS = new Map([
   ['unattached', 'running without a connection to the selected runtime'],
   ['notRunning', 'not running'],
@@ -370,6 +416,11 @@ async function resolveSpawnVisibility(options, endpoint, env) {
   );
 }
 
+// Create an exact-owned Codex lane: resolve visibility and profile, reserve the
+// lane, seat, and spawn journal, then start the thread, dispatch the first turn,
+// and verify its input receipt and thread name. A failure before the provider
+// request is failed or notDelivered; any failure after thread/start keeps the
+// returned provider id, marks the lane delivery-unknown, and replays nothing.
 async function spawn(options, env = process.env) {
   if (!options.repoRoot || !path.isAbsolute(options.repoRoot) ||
       typeof options.input !== 'string' || !options.input) {
@@ -766,6 +817,9 @@ async function spawn(options, env = process.env) {
       });
     }, env);
   } catch (error) {
+    // A partial success already journaled its exact phase. Every other failure is
+    // settled here: notDelivered while the provider request was never sent, unknown
+    // once it was, with the lane following the same split.
     if (error.code !== 'PARTIAL_SUCCESS') {
       try {
         if (operation && !spawnVerified) {
@@ -802,6 +856,8 @@ async function spawn(options, env = process.env) {
   }
 }
 
+// The newest turn only. A not-materialized precondition error means a genuinely
+// empty thread and returns null; every other RPC error propagates.
 async function newestTurn(client, threadId) {
   try {
     const turns = await client.call('thread/turns/list', {
@@ -826,6 +882,9 @@ async function newestTurn(client, threadId) {
   }
 }
 
+// The exact input receipt: one userMessage item carrying this operation's client
+// id whose single text part hashes to the dispatched input. Zero matches,
+// several, or different content is PROTOCOL_ERROR and fails closed.
 function userMessageTurnReceipt(turn, clientUserMessageId, inputSha256) {
   if (!turn || typeof turn.id !== 'string' || !Array.isArray(turn.items)) {
     throw new TransmogrifyError('PROTOCOL_ERROR', 'turn receipt is missing its item list');
@@ -844,6 +903,10 @@ function userMessageTurnReceipt(turn, clientUserMessageId, inputSha256) {
   return turn.id;
 }
 
+// Accept the turn/start response as the input receipt when it carries the exact
+// marker; otherwise page thread/items/list for the persisted row within the
+// bounded retry budget. A receipt naming another turn fails closed, and an
+// exhausted budget is PROTOCOL_ERROR with the input never resent.
 async function verifiedUserMessageTurnReceipt(
   client,
   threadId,
@@ -900,6 +963,9 @@ async function verifiedUserMessageTurnReceipt(
   throw new TransmogrifyError('PROTOCOL_ERROR', 'turn receipt did not contain one exact client message id');
 }
 
+// Search a thread's persisted items for one client message id under shared page
+// and row budgets. Returns the turn id, or null when it is absent. A duplicated
+// marker, a marker in two turns, or a cursor cycle is PROTOCOL_ERROR.
 async function findTurnByClientMessage(
   client,
   threadId,
@@ -961,6 +1027,8 @@ async function findTurnByClientMessage(
   return matchedTurnId;
 }
 
+// Collapse thread status and newest-turn status into one observed phase. The
+// turn wins where both speak, because a thread can read active with no turn.
 function phaseFor(thread, turn) {
   if (turn?.status === 'inProgress') return 'executing';
   if (turn?.status === 'failed' || thread.status.type === 'systemError') return 'failed';
@@ -971,6 +1039,8 @@ function phaseFor(thread, turn) {
   return 'unknown';
 }
 
+// One seat-verified read of the thread plus its newest turn. Mutations call it
+// first, so an ownership or protocol failure lands before any dispatch.
 async function inspectThread(client, lane) {
   const read = await client.call('thread/read', {
     threadId: lane.providerId,
@@ -989,6 +1059,8 @@ async function inspectThread(client, lane) {
   return { thread, turn, phase: phaseFor(thread, turn) };
 }
 
+// Map an observed phase onto a lane state. Retirement states are sticky: an
+// observation never walks a lane back out of retirement.
 function observedLaneState(lane, phase) {
   if (RETIRED_STATES.has(lane.state) || ['retireRequested', 'archiveUnknown'].includes(lane.state)) {
     return lane.state;
@@ -1003,6 +1075,9 @@ function messageDigest(message) {
   return crypto.createHash('sha256').update(message).digest('hex');
 }
 
+// A pending operation must be the same type and carry the same request details,
+// otherwise this request is OPERATION_PENDING. This is what makes a retry
+// idempotent instead of a second provider effect.
 function assertPendingMutation(operation, type, lane, details = {}) {
   if (operation.type !== type) {
     throw new TransmogrifyError(
@@ -1021,11 +1096,15 @@ function assertPendingMutation(operation, type, lane, details = {}) {
   return operation;
 }
 
+// Move the lane to deliveryUnknown, leaving an already-failed lane alone.
 function markLaneDeliveryUnknown(options, lane, env) {
   if (lane.state === 'failed') return lane;
   return updateLane(options.repoRoot, lane.laneId, { state: 'deliveryUnknown' }, env);
 }
 
+// Write an inspection back onto the lane. interruptRequested has no direct edge
+// to active, so a lane observed executing again settles through idle rather
+// than skipping a legal transition.
 function updateLaneFromInspection(options, lane, inspected, env) {
   const state = observedLaneState(lane, inspected.phase);
   if (lane.state === 'interruptRequested' && state === 'active') {
@@ -1039,6 +1118,8 @@ function updateLaneFromInspection(options, lane, inspected, env) {
   }, env);
 }
 
+// Seat- and runtime-verified read of one lane. It records the observed phase and
+// provider status and performs no provider mutation.
 async function status(options, env = process.env) {
   const lane = ownedLane(options, env, 'read');
   assertSeatIdentity(options, lane, env);
@@ -1060,6 +1141,10 @@ async function status(options, env = process.env) {
   }, env);
 }
 
+// Deliver a mid-turn steer against the newest turn under the lane lease. A
+// newest turn that is not inProgress is NO_ACTIVE_TURN and proven not delivered.
+// A transport failure journals the operation unknown, marks the lane
+// delivery-unknown, and returns DELIVERY_UNCERTAIN without resending anything.
 async function steer(options, env = process.env) {
   if (!options.message) throw new TransmogrifyError('USAGE_ERROR', 'steer requires message');
   let lane = ownedLane(options, env, 'mutate');
@@ -1155,6 +1240,10 @@ async function steer(options, env = process.env) {
   }, env);
 }
 
+// Interrupt the newest turn under the lane lease. A pending interrupt whose
+// target turn is no longer active reconciles to complete from that observation;
+// while the target is still active the outcome stays DELIVERY_UNCERTAIN. A
+// dispatch failure is journaled unknown and never replayed.
 async function interrupt(options, env = process.env) {
   let lane = ownedLane(options, env, 'mutate');
   assertSeatIdentity(options, lane, env);
@@ -1247,6 +1336,10 @@ async function interrupt(options, env = process.env) {
   }, env);
 }
 
+// Send a boundary input to an idle lane: thread/resume with the owned seat and
+// resolved profile, then turn/start with a durable client message id. The resume
+// and turn phases journal separately so recovery can prove which one landed.
+// Anything unobservable is RECOVERY_UNCERTAIN and the input is never replayed.
 async function resume(options, env = process.env) {
   if (!options.message) throw new TransmogrifyError('USAGE_ERROR', 'resume requires message');
   const receiptVerification = turnReceiptVerificationBounds(options);
@@ -1454,6 +1547,9 @@ async function resume(options, env = process.env) {
   }, env);
 }
 
+// One complete bounded scan of the archived listing for this exact provider id.
+// Duplicate rows or a cursor cycle is PROTOCOL_ERROR, and a match must still
+// pass the seat check before it counts as a retirement receipt.
 async function listArchived(client, lane) {
   let cursor = null;
   const seen = new Set();
@@ -1501,6 +1597,8 @@ async function listArchived(client, lane) {
   return true;
 }
 
+// Retry the archived-listing census within bounded attempts. Returns false when
+// the row never appears; the caller decides whether that is unknown.
 async function verifyArchived(client, lane, options) {
   const attempts = options.archiveVerifyAttempts ?? 5;
   const delayMs = options.archiveVerifyDelayMs ?? 100;
@@ -1519,6 +1617,8 @@ async function verifyArchived(client, lane, options) {
   return false;
 }
 
+// Retirement requires a lowercase SHA-256 harvest receipt before any provider
+// mutation. A missing or malformed digest is USAGE_ERROR.
 function requireHarvestedOutputSha256(options) {
   if (!/^[0-9a-f]{64}$/.test(options.harvestedOutputSha256 || '')) {
     throw new TransmogrifyError(
@@ -1529,6 +1629,8 @@ function requireHarvestedOutputSha256(options) {
   return options.harvestedOutputSha256;
 }
 
+// The harvest receipt already journaled on a pending retirement. Its absence is
+// HARVEST_REQUIRED; recovery never invents one.
 function retirementHarvestReceipt(operation) {
   const receipt = operation?.details?.harvestReceipt;
   if (!receipt || !/^[0-9a-f]{64}$/.test(receipt.outputSha256 || '')) {
@@ -1537,6 +1639,9 @@ function retirementHarvestReceipt(operation) {
   return receipt;
 }
 
+// Resume the pending retirement journal, or open one after capturing the harvest
+// receipt for the current seat. A supplied digest that contradicts the journaled
+// receipt is HARVEST_MISMATCH.
 function prepareRetirementOperation(options, lane, env) {
   const pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
   if (pending) {
@@ -1563,6 +1668,10 @@ function prepareRetirementOperation(options, lane, env) {
   return { operation, harvestReceipt };
 }
 
+// Local cleanup once provider retirement is verified. An unmanaged or deferred
+// seat only closes the journal. A permanent block is CLEANUP_BLOCKED and stays
+// blocked until the owner acknowledges manual removal; a transient local failure
+// is CLEANUP_RETRYABLE, and neither performs a further provider mutation.
 function finishRetiredCleanup(options, lane, operation, harvestReceipt, env) {
   if (lane.seat?.managed !== true) {
     completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
@@ -1616,6 +1725,10 @@ function finishRetiredCleanup(options, lane, operation, harvestReceipt, env) {
   }
 }
 
+// Close a spawn journal whose thread exists but whose first turn never
+// receipted. It refuses while a turn is active, pages once more for the exact
+// input receipt, then completes with the recovered turn or marks the journal
+// superseded by retirement. The first input is never replayed.
 async function settleUnresolvedSpawnForRetirement(options, lane, pending, env) {
   if (!lane.providerId || pending.providerId !== lane.providerId ||
       !UNRESOLVED_SPAWN_STATES.has(pending.state) ||
@@ -1663,6 +1776,10 @@ async function settleUnresolvedSpawnForRetirement(options, lane, pending, env) {
   }, env);
 }
 
+// Archive an exact-owned thread and then release its managed seat. It requires a
+// harvest receipt first, refuses an active newest turn, sends thread/archive
+// once, and accepts only an exact archived-listing row whose cwd matches the
+// seat. An unverified archive leaves the lane in archiveUnknown for recovery.
 async function retire(options, env = process.env) {
   let lane = ownedLane(options, env, 'read');
   const existingRetirement = pendingOperationForLane(options.repoRoot, lane.laneId, env);
@@ -1867,6 +1984,10 @@ async function retire(options, env = process.env) {
   }, env);
 }
 
+// Local-only recovery for a lane that needs no provider call: settle an
+// undispatched spawn journal, align a lane still marked planned behind a
+// terminal journal, and clear a terminal pending pointer. Returns null when the
+// lane genuinely requires provider observation.
 async function repairLocalRecoveryState(options, initial, operations, env) {
   return withLaneLease(options.repoRoot, initial.laneId, async () => {
     let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
@@ -1922,6 +2043,8 @@ async function repairLocalRecoveryState(options, initial, operations, env) {
   }, env);
 }
 
+// Time left in the aggregate recovery deadline. Exhaustion is TIMEOUT, so a
+// fleet recovery cannot spend an unbounded budget on one call.
 function remainingRecoveryMs(deadline) {
   const remaining = Math.floor(deadline - Date.now());
   if (remaining < 1) {
@@ -1930,6 +2053,10 @@ function remainingRecoveryMs(deadline) {
   return remaining;
 }
 
+// Reconcile one lane or the whole Codex fleet against the runtime. It repairs
+// what local state alone proves, then observes the provider for the rest,
+// never replaying an unknown mutation and never inferring creation from a title.
+// Each lane is reported as confirmed, notDelivered, or unknown.
 async function recover(options, env = process.env) {
   const recoveryDeadline = Number.isInteger(options.timeoutMs)
     ? Date.now() + options.timeoutMs : null;

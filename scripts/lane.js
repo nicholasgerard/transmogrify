@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 
+// Transmogrify operator CLI: one provider-neutral entry point for lane
+// lifecycle, parent contexts, dispatch, and bounded child waits. It resolves the
+// provider from the durable lane record, strips provider control handles from
+// every public result, and maps each adapter code to a fixed public message, a
+// delivery projection, and an exit status: 0 confirmed, 2 safe refusal or
+// precondition failure, 3 transport, protocol, or provider uncertainty.
+
 const fs = require('node:fs');
 const path = require('node:path');
 const { parseArgs, TextDecoder } = require('node:util');
@@ -137,6 +144,8 @@ const OPERATION_OPTIONS = {
     'finish-retirements', 'no-cleanup-worktree',
   ]),
 };
+// The only error-detail keys that reach public output. Everything else is
+// dropped, so a provider handle cannot leak through a failure path.
 const SAFE_DETAIL_KEYS = new Set([
   'alreadyStopped',
   'attempted',
@@ -160,6 +169,8 @@ const SAFE_DETAIL_KEYS = new Set([
   'state',
   'stop',
 ]);
+// Codes that prove no provider mutation was attempted. They exit 2; every other
+// code is projected as uncertain and exits 3.
 const SAFE_REFUSALS = new Set([
   'ADAPTER_MISMATCH',
   'CLEANUP_BLOCKED',
@@ -192,6 +203,8 @@ const SAFE_REFUSALS = new Set([
   'UNVERIFIED_RUNTIME',
   'USAGE_ERROR',
 ]);
+// Fixed public text per code. Routine CLI output never echoes a provider or
+// local exception message.
 const PUBLIC_ERROR_MESSAGES = new Map([
   ['ADAPTER_MISMATCH', 'lane backend does not support this operation'],
   ['CLEANUP_BLOCKED', 'provider retirement is verified; local cleanup remains blocked'],
@@ -223,6 +236,7 @@ const PUBLIC_ERROR_MESSAGES = new Map([
   ['PRIVATE_AUTH_REJECTED', 'Claude rejected the private archive credential'],
   ['PRIVATE_AUTH_UNAVAILABLE', 'Claude private archive authentication is unavailable'],
   ['PRIVATE_TRUST_REQUIRED', 'Claude private archival requires manual trusted-device enrollment'],
+  ['REMOTE_CONTROL_UNAVAILABLE', 'the Claude session did not register Remote Control; check claude auth status, then stop and remove that session and reconcile'],
   ['PROTOCOL_ERROR', 'the provider returned an unverified protocol shape'],
   ['RECOVERY_UNCERTAIN', 'provider recovery outcome is unknown'],
   ['REMOTE_ARCHIVE_UNCERTAIN', 'remote provider archive outcome is unknown'],
@@ -243,6 +257,8 @@ function usage(message) {
   throw error;
 }
 
+// Caller input must be strict UTF-8 without NUL or unpaired surrogates, so a
+// prompt cannot carry an unencodable byte to a provider.
 function decodeInput(buffer, label) {
   let value;
   try { value = new TextDecoder('utf-8', { fatal: true }).decode(buffer); } catch {
@@ -254,6 +270,8 @@ function decodeInput(buffer, label) {
   return value;
 }
 
+// Read at most the input bound from a descriptor, refusing anything longer
+// rather than silently truncating it.
 function readBounded(descriptor, label) {
   const chunks = [];
   let total = 0;
@@ -268,6 +286,8 @@ function readBounded(descriptor, label) {
   return decodeInput(Buffer.concat(chunks), label);
 }
 
+// Resolve --input, or --input-file with - for stdin, into one bounded string. A
+// file must be absolute, owner-controlled, non-symlinked, and regular.
 function readInput(values) {
   if (values.input !== undefined && values['input-file'] !== undefined) {
     usage('use either --input or --input-file, not both');
@@ -305,6 +325,8 @@ function readInput(values) {
   }
 }
 
+// The adapter that owns a lane, chosen from the durable record's backend. An
+// unowned lane is NOT_OWNED and an unknown backend is ADAPTER_MISMATCH.
 function adapterForLane(repoRoot, laneId, env) {
   let lane;
   try { lane = requireOwnedLane(repoRoot, laneId, env); } catch (error) {
@@ -318,6 +340,8 @@ function adapterForLane(repoRoot, laneId, env) {
   throw error;
 }
 
+// Redact bearer tokens, provider session and bridge ids, and credential-shaped
+// query or key/value pairs from any string that reaches public output.
 function safeString(value) {
   return value
     .replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [redacted]')
@@ -328,6 +352,8 @@ function safeString(value) {
       '$1=[redacted]');
 }
 
+// The fixed message for a code, with a generic fallback so an unmapped code
+// still cannot print internal text.
 function publicErrorMessage(code) {
   if (PUBLIC_ERROR_MESSAGES.has(code)) return PUBLIC_ERROR_MESSAGES.get(code);
   if (typeof code === 'string' && code.startsWith('ERR_PARSE_ARGS_')) {
@@ -336,6 +362,8 @@ function publicErrorMessage(code) {
   return 'operator operation failed';
 }
 
+// Project error details down to the allowlisted keys, redacting every surviving
+// string.
 function safeDetails(details) {
   if (details === null || details === undefined) return undefined;
   if (Array.isArray(details)) return details.map(safeDetails);
@@ -395,6 +423,8 @@ const PRIVATE_RESULT_KEYS = new Set([
   'userAgent',
 ]);
 
+// Parse an integer option inside explicit bounds. Anything else is a usage error
+// rather than a clamped value.
 function boundedInteger(value, label, minimum, maximum, fallback) {
   if (value === undefined) return fallback;
   if (!/^\d+$/.test(value)) usage(`${label} must be an integer`);
@@ -405,6 +435,8 @@ function boundedInteger(value, label, minimum, maximum, fallback) {
   return parsed;
 }
 
+// The public view of one dispatch, carrying its lane state or, when the lane
+// cannot be resolved, why.
 function dispatchSummary(dispatch, resolved = { lane: null, reason: 'missing' }) {
   const lane = resolved.lane;
   return {
@@ -421,6 +453,8 @@ function dispatchSummary(dispatch, resolved = { lane: null, reason: 'missing' })
   };
 }
 
+// Whether a lane lookup failed because its repository or registry is gone rather
+// than because the lane is not owned.
 function repositoryUnavailable(error) {
   return error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ||
     /not a git repository|ownership registry does not exist|REPO_ROOT must be/.test(error?.message || '');
@@ -455,6 +489,8 @@ function laneForDispatch(dispatch, env) {
   return resolveDispatchLane(dispatch, env).lane;
 }
 
+// The one completed spawn journal for this dispatch, used to emit the spawned
+// event a crashed launch never recorded. Two matches is invalid local state.
 function completedSpawnOperation(dispatch, lane, env) {
   if (!lane?.providerId) return null;
   const matches = listOperations(dispatch.child.repoRoot, env).filter((operation) =>
@@ -470,6 +506,8 @@ function completedSpawnOperation(dispatch, lane, env) {
   return matches[0] || null;
 }
 
+// The one terminal spawn journal for a dispatch whose lane never bound a
+// provider: a proven failure rather than an unknown.
 function terminalUnstartedSpawnOperation(dispatch, lane, env) {
   if (lane?.providerId) return null;
   const matches = listOperations(dispatch.child.repoRoot, env).filter((operation) =>
@@ -484,6 +522,10 @@ function terminalUnstartedSpawnOperation(dispatch, lane, env) {
   return matches[0] || null;
 }
 
+// Derive at most one child event from durable local state alone: a completed or
+// terminal spawn journal, a retirement phase needing attention, or a
+// delivery-unknown lane. It contacts no provider and never invents an event for
+// an open spawn journal.
 function localEventForLane(dispatch, lane, env) {
   if (!lane) return null;
   const spawnOperation = completedSpawnOperation(dispatch, lane, env);
@@ -567,6 +609,8 @@ function localEventForLane(dispatch, lane, env) {
   }, env).event;
 }
 
+// Reconcile a child's open spawn journal through its own adapter, without
+// replaying the launch. Returns the refreshed lane.
 async function reconcilePendingSpawnDispatch(dispatch, lane, values, env, timeoutMs) {
   const pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
   if (pending?.type !== 'spawn') return lane;
@@ -588,6 +632,9 @@ async function reconcilePendingSpawnDispatch(dispatch, lane, values, env, timeou
   return requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
 }
 
+// Observe one child and record at most one event for it. A dispatch whose lane
+// stays unresolvable past a grace period becomes an attention event rather than
+// a failure of the whole parent.
 async function observeDispatch(dispatch, values, env, deadline, remainingChildren) {
   const resolved = resolveDispatchLane(dispatch, env);
   let lane = resolved.lane;
@@ -707,6 +754,8 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
   return { lane, event: observation.event };
 }
 
+// One observation round over every outstanding child, collecting per-child
+// errors instead of aborting the round.
 async function observeParentChildren(context, values, env, deadline) {
   const dispatches = listDispatches(context, env)
     .filter((dispatch) => !values['repo-root'] || dispatch.child.repoRoot === values['repo-root']);
@@ -725,6 +774,9 @@ async function observeParentChildren(context, values, env, deadline) {
   return { dispatches, errors };
 }
 
+// Bounded parent wait: return pending events immediately, otherwise observe
+// every child and check again until the deadline. Expiry is NO_EVENT, and
+// unacknowledged events stay pending rather than being consumed here.
 async function waitForParentEvent(context, values, env) {
   const timeoutMs = boundedInteger(values['timeout-ms'], '--timeout-ms', 0, 60_000, 60_000);
   const after = boundedInteger(values.after, '--after', 0, Number.MAX_SAFE_INTEGER, 0);
@@ -763,6 +815,9 @@ async function waitForParentEvent(context, values, env) {
   }
 }
 
+// Project a successful result for public output: strip provider control handles
+// and redact every string, stopping key stripping inside the exempt metadata
+// subtrees while still redacting their strings.
 function publicSuccess(value, exempt = false) {
   if (value === null || value === undefined) return value;
   if (Array.isArray(value)) return value.map((entry) => publicSuccess(entry, exempt));
@@ -776,6 +831,8 @@ function publicSuccess(value, exempt = false) {
     ]));
 }
 
+// Each operation accepts only its own options, so a flag is never silently
+// ignored on the wrong command.
 function validateOptionGrammar(operation, usedOptions) {
   const allowed = OPERATION_OPTIONS[operation];
   for (const option of usedOptions) {
@@ -783,6 +840,9 @@ function validateOptionGrammar(operation, usedOptions) {
   }
 }
 
+// The public delivery projection for a failure. An adapter that reported exact
+// per-phase outcomes keeps them; otherwise only a proven refusal is
+// notAttempted and everything else defaults to unknown.
 function errorEffect(code, details = {}) {
   if (['verified', 'unknown'].includes(details?.providerMutation) &&
       ['verified', 'notAttempted', 'unknown'].includes(details.stop || 'verified') &&
@@ -812,10 +872,14 @@ function errorEffect(code, details = {}) {
   return { providerMutation: 'unknown' };
 }
 
+// Safe refusals and argument errors exit 2; everything else exits 3.
 function exitCodeForError(code) {
   return SAFE_REFUSALS.has(code) || String(code || '').startsWith('ERR_PARSE_ARGS_') ? 2 : 3;
 }
 
+// Exit status for a fleet result carrying per-lane outcomes: 0 when all are
+// confirmed, 2 when the only incomplete entries are safe refusals or deferrals,
+// and 3 as soon as one entry is uncertain.
 function resultExitCode(result) {
   if (result?.ok !== false) return 0;
   const entries = [
@@ -840,6 +904,8 @@ function resultExitCode(result) {
   return foundIncomplete ? 2 : 3;
 }
 
+// Parse and dispatch one operation. Every path returns a projected result, and
+// the caller turns it into output and an exit status.
 async function main(argv, env = process.env) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) {
     return { help: HELP };

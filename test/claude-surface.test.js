@@ -522,3 +522,58 @@ test('Claude spawn attribution requires one exact prompt and nonce marker transc
     spawnNonce,
   }), /not uniquely receipted/);
 });
+
+test('Claude worker metadata without a Remote Control bridge is reported as REMOTE_CONTROL_UNAVAILABLE', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-nobridge-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configDir = path.join(root, 'config');
+  const sessionsDir = path.join(configDir, 'sessions');
+  fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+  const pid = 43211;
+  const metadata = {
+    pid, sessionId: SESSION_ID, jobId: '11111111', name: '::: unbridged lane', cwd: root,
+    messagingSocketPath: `/tmp/cc-socks/${pid}.sock`, version: PINNED_CLI_VERSION,
+  };
+  fs.writeFileSync(path.join(sessionsDir, `${pid}.json`), JSON.stringify(metadata), { mode: 0o600 });
+  const surface = createClaudeSurface({
+    sha256File: () => PINNED_CLI_SHA256,
+    processBirth() { throw new Error('must not reach process inspection'); },
+    execFileSync() { throw new Error('must not reach lsof'); },
+  });
+  const runtime = {
+    configDir, cliSha256: PINNED_CLI_SHA256, cliVersion: PINNED_CLI_VERSION, cleanEnv: { PATH: '/usr/bin:/bin' },
+  };
+  const expected = { sessionId: SESSION_ID, jobId: '11111111', name: '::: unbridged lane', cwd: root };
+  assert.throws(
+    () => surface.discoverExecution(runtime, expected, { pid }, { timeoutMs: 100 }),
+    (error) => error.code === 'REMOTE_CONTROL_UNAVAILABLE' && /claude auth status/.test(error.message),
+  );
+  // A retired `bridgeId` field is shape drift, not a missing bridge.
+  fs.writeFileSync(path.join(sessionsDir, `${pid}.json`), JSON.stringify({
+    ...metadata, bridgeId: 'session_old',
+  }), { mode: 0o600 });
+  assert.throws(
+    () => surface.discoverExecution(runtime, expected, { pid }, { timeoutMs: 100 }),
+    (error) => error.code === 'PROTOCOL_ERROR',
+  );
+});
+
+test('Claude preflight failures carry a setup reason for the doctor', () => {
+  assert.throws(
+    () => parseAuthStatus(JSON.stringify({
+      loggedIn: false, authMethod: 'none', apiProvider: 'firstParty', projectsDirectory: '/tmp/.claude/projects',
+    })),
+    (error) => error.code === 'UNSUPPORTED_ENVIRONMENT' && error.details.reason === 'not-logged-in',
+  );
+  assert.throws(
+    () => parseAuthStatus('Starting background service…'),
+    (error) => error.code === 'UNSUPPORTED_ENVIRONMENT' && error.details.reason === 'auth-status-unreadable',
+  );
+  assert.throws(
+    () => parseAuthStatus(JSON.stringify({
+      loggedIn: true, authMethod: 'apiKey', apiProvider: 'firstParty',
+      projectsDirectory: '/tmp/.claude/projects', orgId: 'org-test', email: 'test@example.invalid',
+    })),
+    (error) => error.code === 'UNSUPPORTED_ENVIRONMENT' && error.details.reason === 'account-not-first-party',
+  );
+});

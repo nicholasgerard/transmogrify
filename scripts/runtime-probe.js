@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
-/** Read-only identity and compatibility probe for a loopback Codex app-server. */
+// Read-only identity and compatibility probe for a loopback Codex app-server.
+// It completes the initialize handshake, prints the returned user-agent, and
+// exits 1 when the handshake or the verified 0.151.x line check fails, 2 on a
+// usage error. It sends no other request and never mutates provider state.
+
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
 const { VERSION } = require('./lib/version');
 
@@ -59,6 +63,8 @@ try {
     }
     console.log(`Codex app-server protocol verified: ${initialized.userAgent}`);
   } catch (error) {
+    // The caught error is discarded and the message is fixed, so an untrusted
+    // listener cannot echo remote text into operator output.
     void error;
     console.error('runtime probe failed: app-server handshake or compatibility verification failed');
     process.exitCode = 1;

@@ -1,16 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 
-/**
- * Compatibility CLI for exact owned Codex lane control.
- *
- *   steer.js --input-file - <threadId>      mid-turn steer
- *   steer.js --resume --input-file - <id>   boundary continuation
- *   steer.js --interrupt <threadId>        interrupt newest active turn
- *
- * Exit codes: 0 confirmed; 2 no active turn / not owned; 3 usage, transport,
- * protocol, or delivery-unknown failure.
- */
+// Compatibility CLI for exact owned Codex lane control: mid-turn steer,
+// boundary resume, and interrupt of the newest active turn. A repository root
+// is required because the adapter verifies registry ownership and the newest
+// turn before any provider mutation. Exit codes: 0 confirmed; 2 no active turn
+// or not owned; 3 usage, transport, protocol, or delivery-unknown failure. It
+// never creates, renames, or archives a lane.
+
 const fs = require('node:fs');
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
@@ -25,13 +22,21 @@ function usage(error) {
   process.exit(3);
 }
 
-const HELP = 'usage: steer.js [--resume|--interrupt] [--input-file <absolute|->] [--url ws://…] [--repo-root /absolute/repo] [--prefix "Tag:"|--no-prefix] [--] <owned-thread-id> [legacy-message]';
+const HELP = `usage: steer.js [--resume|--interrupt] [--input-file <absolute|->] [--url ws://…] [--repo-root /absolute/repo] [--prefix "Tag:"|--no-prefix] [--] <owned-thread-id> [legacy-message]
+
+exit codes:
+  0  the steer, resume, or interrupt was confirmed
+  2  no active turn, or the thread is not owned by this installation
+  3  usage, transport, protocol, or delivery-unknown failure`;
 
 if (process.argv.length === 3 && ['--help', '-h'].includes(process.argv[2])) {
   console.log(HELP);
   process.exit(0);
 }
 
+// Parses options up to the first positional or --, leaving the thread id and any
+// legacy message for the caller. An unknown option is a usage failure rather
+// than a positional, so a mistyped flag can never become steered input.
 function parseArgs(argv) {
   const options = {
     interrupt: false,
@@ -67,6 +72,9 @@ function parseArgs(argv) {
   return { options, positionals: argv.slice(index) };
 }
 
+// Reads at most MAX_INPUT_BYTES and requires strict UTF-8 with no NUL and no
+// unpaired surrogate, so unbounded or unencodable text is refused before it can
+// become a provider turn.
 function readBounded(descriptor) {
   const chunks = [];
   let total = 0;
@@ -88,6 +96,9 @@ function readBounded(descriptor) {
   return value;
 }
 
+// Opens an absolute path without following a symlink and requires a
+// caller-owned regular file that is not group or world writable, so another
+// writer cannot substitute the text an owned lane will be steered with.
 function readInputFile(inputFile) {
   if (inputFile === '-') return readBounded(0);
   if (!path.isAbsolute(inputFile)) usage('--input-file must be absolute or -');
@@ -127,6 +138,8 @@ if (!providerId || (!options.interrupt && !rawMessage)) {
 }
 const repoRoot = options.repoRoot || process.env.REPO_ROOT;
 if (!repoRoot) usage('--repo-root or REPO_ROOT is required for ownership verification');
+// Steered text is attributed to its orchestrator unless the caller supplies a
+// different prefix or suppresses the prefix outright.
 const prefixText = options.prefix === null ? 'Orchestrator:' : options.prefix;
 const message = options.noPrefix ? rawMessage : `${prefixText} ${rawMessage}`;
 const request = { repoRoot, providerId, url, message };

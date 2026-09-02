@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.2
+
+- Name the failing check when a Claude spawn cannot be verified: the refusal
+  and the journal carry `causeCode` and `causeMessage`, a session that never
+  registered Remote Control reports `REMOTE_CONTROL_UNAVAILABLE` with the
+  owner action, and `reconcile` repeats that guidance.
+- Settle a dispatched Claude spawn whose job has vanished: after a grace period
+  and repeated absence, `reconcile` closes the journal as `spawnJobAbsent`,
+  the parent receives `child.failed`, and `retire` frees the managed seat
+  without any provider mutation.
+- Let the doctor say what setup the owner still has to do: `setup.ownerActions`
+  names the exact command for a logged-out or unpinned Claude CLI, a missing
+  Codex runtime, or an unattached Codex Desktop, and SKILL.md and `/start`
+  make the operator ask before spawning.
+- Editorial pass over SKILL.md, README, and every document under `docs/`:
+  shorter, current, without historical narrative; module and function
+  comments across `scripts/`.
+
 ## 0.2.1
 
 - Restore the Codex Desktop attachment path as a measured receipt. The new

@@ -57,20 +57,17 @@ waiting when they expose a suitable receipt. A Transmogrify-managed app-visible
 lane still goes through `lane.js` so its provenance, execution profile,
 lineage, events, retirement, and cleanup remain portable across hosts.
 
-On the recorded compatibility tuple, both orchestrators created Codex lanes
-that rendered in Codex Desktop and the ChatGPT mobile app. A later Desktop
-restart demonstrated that a surviving standalone runtime can remain
-protocol-compatible without remaining the app's live control plane, so
-attachment is measured rather than assumed: `scripts/desktop-attach.js`
-reports whether Codex Desktop holds a live connection to the selected runtime,
-launches or (with owner authorization) relaunches the app attached, and
-`spawn` records `desktopAttached` lanes from that receipt. Without it a Codex
-lane is recorded protocol-only, and only with `--allow-protocol-only`. The
-dated visibility and topology receipts are recorded in the
-[protocol contract](docs/PROTOCOL.md#codex-lane-lifecycle). The Claude adapter
-creates named local Claude Code Remote Control sessions. Desktop and mobile
-visibility, mobile-originated input, and native archive behavior are
-live-verified on the dated client and host tuple. See
+Codex lanes render and stream in Codex Desktop, and in the ChatGPT mobile app
+through it, while the app is a client of the shared runtime. That attachment
+is measured, never assumed: `scripts/desktop-attach.js` reports whether Codex
+Desktop holds a live connection to the selected runtime and can launch or,
+with owner authorization, relaunch the app attached; `spawn` records
+`desktopAttached` lanes from that receipt and otherwise refuses unless
+`--allow-protocol-only` labels a deliberately unattached lane. Claude lanes are
+named local Claude Code Remote Control sessions with live-verified Desktop and
+mobile visibility, mobile-originated input, and native archive behavior. The
+verified builds and receipts are in the
+[protocol contract](docs/PROTOCOL.md) and
 [Claude Code integration](docs/CLAUDE-CODE.md).
 
 ## Requirements
@@ -78,10 +75,10 @@ live-verified on the dated client and host tuple. See
 - [Node.js](https://nodejs.org/en/download) 20 or newer with npm.
 - Git, Bash, `ps`, and `lsof`. Confirm them with `node --version`,
   `npm --version`, `git --version`, and `lsof -v`.
-- Codex CLI/app-server `0.151.x` for Codex targets, live-verified with `0.151.0`
-  on 2026-09-01. Native surfaces were verified on 2026-09-02 with Codex Desktop
-  `26.825.51511` (`7377`), the Codex surface of the ChatGPT desktop app, and
-  ChatGPT for iOS `1.2026.230` (`32543289983`). Install and sign in using the
+- Codex CLI/app-server `0.151.x` for Codex targets, verified with `0.151.0`.
+  Attached live visibility is verified with Codex Desktop `26.901.20858`
+  (`7658`) and `26.825.51511` (`7377`), and mobile visibility with ChatGPT for
+  iOS `1.2026.230` (`32543289983`). Install and sign in using the
   [official Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
 - Standalone Codex tools are CI-tested on macOS and Linux; Windows is not a
   supported host in this release.
@@ -181,6 +178,11 @@ Desktop restart or update, rerun the doctor: a surviving independent runtime
 shows as unattached until Desktop is relaunched against it, while exact-owned
 recovery and retirement on that runtime remain available.
 
+The doctor also prints `setup.ownerActions`: every precondition only the owner
+can satisfy, such as a logged-out or unpinned Claude CLI, a Codex runtime that
+needs authorization, or a Codex Desktop relaunch, each with the exact command.
+An operator asks for those before spawning anything.
+
 The registry is private local control state. Transmogrify creates its
 directories with mode `0700` and JSON records with mode `0600`; existing state
 paths must retain those owner-only permissions.
@@ -197,42 +199,28 @@ machine owner authorizes this installation to own that runtime:
 "$SKILL_ROOT/scripts/runtime-up.sh"
 ```
 
-The launcher accepts loopback listeners only, refuses an occupied endpoint that
-does not complete the Codex initialize handshake, and captures and verifies
-exact process identity while launching or cleaning up its own child. A
-concurrent compatible listener is reused without killing it. Never use the
-launcher to replace or reconfigure a
-shared runtime owned by another program. A newly launched child also runs with
-`-c mcp_servers.codex_app={command="",enabled=false}`, which disables the
-Desktop-only `codex_app` MCP bridge on the runtime this installation owns; a
-reused listener is never reconfigured.
+The launcher accepts loopback listeners only, refuses an occupied endpoint
+that does not complete the Codex initialize handshake, reuses a compatible
+listener without touching it, and verifies the exact identity of any child it
+launches or cleans up. The child runs with
+`-c mcp_servers.codex_app={command="",enabled=false}` so the Desktop-only
+`codex_app` bridge stays off on a shared runtime, and it inherits only a
+bounded non-secret environment (`HOME`, `CODEX_HOME`, and the like), relying on
+the existing file-backed Codex login. Never use the launcher to replace or
+reconfigure a runtime owned by another program.
 
-The standalone launcher inherits only a bounded non-secret environment,
-including `HOME` and `CODEX_HOME`; it deliberately excludes ambient API keys,
-access tokens, proxy credentials, and `NODE_OPTIONS`. Use an existing Codex
-login stored under the selected home. On 2026-09-01, Codex CLI `0.151.0`
-reported `Logged in using ChatGPT` with only `HOME` and `PATH` present. An
-environment-only API-key login is outside the 0.2.x launcher contract.
-
-The launcher establishes only the standalone app-server contract. Codex
-Desktop adopts that runtime when it is launched with `CODEX_APP_SERVER_WS_URL`
-set to the endpoint, and `scripts/desktop-attach.js ensure` does that for you:
-it reuses an existing attachment, including one another operator set up,
-launches Desktop attached when it is not running, and quits and relaunches a
-running unattached Desktop only after the owner agrees (`--relaunch-desktop`
-for one run, or the standing `TRANSMOGRIFY_DESKTOP_RELAUNCH=auto`). It never
-relaunches from a session hosted inside the app, and it never touches the
-runtime. The variable is an observed launcher behavior on the tested Desktop
-builds (`26.825.51511` and `26.901.20858`), not a documented OpenAI contract;
-the receipt is measured on every check and every spawn, so a build that
-ignores it fails closed. See the
-[protocol receipts](docs/PROTOCOL.md#codex-lane-lifecycle).
-
-OpenAI separately documents Desktop-owned SSH projects that launch and manage
-an app-server on the remote host. Transmogrify will move native Desktop/mobile
-operation to that ownership direction only after the CLI-exposed,
-local-help-observed daemon/proxy path and safe second-client behavior pass the
-roadmap's live acceptance gate, and only if bootstrap stays turnkey.
+Codex Desktop adopts that runtime when the app is launched with
+`CODEX_APP_SERVER_WS_URL` set to the endpoint, and
+`scripts/desktop-attach.js ensure` does that for you: it reuses an existing
+attachment, including one another operator set up, launches Desktop attached
+when it is not running, and quits and relaunches a running unattached Desktop
+only after the owner agrees (`--relaunch-desktop` for one run, or the standing
+`TRANSMOGRIFY_DESKTOP_RELAUNCH=auto`). It never relaunches from a session
+hosted inside the app and never touches the runtime. The variable is an
+observed launcher behavior on the tested Desktop builds, not a documented
+OpenAI contract; because the receipt is measured on every check and every
+spawn, a build that ignores it fails closed. OpenAI's Desktop-owned SSH
+daemon/proxy surface is the roadmap candidate to replace this mechanism.
 
 ## Quick start
 
@@ -278,31 +266,17 @@ the requested outcome requires Desktop/mobile visibility; run
 `desktop-attach.js ensure` instead. Claude Code spawn does not use this flag;
 its pinned Remote Control adapter carries the native visibility receipt.
 
-Use `--target claude` to create a named Claude Code Remote Control lane. Omit
-`--cwd` to let the operator reserve and create a managed worktree under
-`WORKTREES`; pass an absolute `--cwd` to use an existing seat that the operator
-must preserve. An existing seat must be a Git worktree inside the configured
-`WORKTREES` root; set `--worktrees` or the `WORKTREES` environment variable to
-its parent when it is outside the default `<repo>/.worktrees` tree.
-If `WORKTREES` is inside the repository, Git must ignore that directory;
-Transmogrify checks this and refuses to create a seat when it is not ignored.
-An external root must be outside every Git worktree, not nested in an unrelated
-repository or an existing linked worktree.
-For managed-seat creation, the exact `WORKTREES` root must be owned by the
-current user with mode `0700`, and its nearest existing ancestor must not be
-group/world writable. Choose a new private root instead of changing permissions
-on a shared directory.
+Use `--target claude` for a named Claude Code Remote Control lane. Omit
+`--cwd` to get a managed worktree under `WORKTREES`, or pass an absolute
+`--cwd` to use an existing Git worktree inside that root, which is then
+preserved at retirement. The root rules (Git-ignored when inside the
+repository, outside every other worktree when external, owned by you with mode
+`0700`) are in [SKILL.md](SKILL.md#host-parameters).
 
-Both adapters accept provider-neutral `--intent`, plus explicit `--model`,
-`--effort`, and `--speed standard|fast` overrides. Fast is always explicit.
-Claude additionally accepts `--effort ultracode` as native shorthand for its
-typed Ultracode execution setting: resolved `xhigh` effort plus a request for
-dynamic-workflow planning on supported models. When workflows are unavailable
-for the current plan or configuration, Anthropic documents an `xhigh`-only
-fallback.
-Claude aliases such as `opus` are retained as requested input but compile to a
-versioned selector for spawn and recovery. Inspect the current matrix with
-`lane.js capabilities --target codex|claude`; the complete contract and model
+Both adapters accept a provider-neutral `--intent` plus explicit `--model`,
+`--effort`, and `--speed standard|fast` overrides; Fast is always explicit, and
+Claude's `--effort ultracode` selects its typed Ultracode setting. Inspect the
+live matrix with `lane.js capabilities --target codex|claude`; the contract and
 recommendations are in [Execution profiles](docs/EXECUTION-PROFILES.md).
 
 The first message is automatically prefixed with safe dispatch provenance, and
@@ -369,23 +343,17 @@ node "$SKILL_ROOT/scripts/lane.js" retire \
   --harvested-output-sha256 LOWERCASE_SHA256
 ```
 
-Retirement is provider-safe and ordered. A managed worktree must be clean at
-harvest and still clean and unchanged at cleanup. Because Claude documents
-`claude rm` as deleting a background session and its worktree, the adapter may
-run it only after its own guarded managed-seat removal has made the path absent;
-external and deferred seats leave local removal explicitly deferred. Any
-tracked, untracked, or ignored file counts as dirt; any observed dirt or
-changed HEAD permanently blocks automatic cleanup and preserves the seat. The full
-ordering is in [SKILL.md](SKILL.md#8-harvest-retirement-and-cleanup), with Claude
-receipts in [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#retirement-and-archive-boundary).
-Stop the owned lane before cleanup and keep other same-user processes from
-writing into its managed seat during retirement; Git cannot make the final
-file census and worktree removal one atomic operation.
-A transient local Git or filesystem failure after verified provider retirement
-returns `CLEANUP_RETRYABLE` with exit 2; retry the exact owned retirement or
-reconciliation without repeating the provider archive. It becomes
-`CLEANUP_BLOCKED` only when a cleanup invariant is unsafe.
-A complete packet, handback, digest, and retirement walkthrough is in
+Retirement is ordered and provider-safe: the managed worktree must be clean at
+harvest and unchanged at cleanup, any tracked, untracked, or ignored file
+counts as dirt, and observed dirt or a changed HEAD permanently blocks
+automatic cleanup and preserves the seat. Because `claude rm` can delete a
+background session and its worktree, the Claude adapter runs it only after its
+own guarded seat removal has made the path absent. A transient local failure
+after verified provider retirement returns `CLEANUP_RETRYABLE` (exit 2);
+`CLEANUP_BLOCKED` marks an unsafe invariant. The full ordering is in
+[SKILL.md](SKILL.md#8-harvest-retirement-and-cleanup), the Claude receipts in
+[docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#retirement-and-archive-boundary), and
+a complete packet, handback, digest, and retirement walkthrough in
 [Examples](examples/README.md).
 
 ## Tool reference

@@ -1,5 +1,12 @@
 'use strict';
 
+// Claude Code lane adapter: spawn, status, steer, stop, recover, retire, and
+// fleet reconciliation over the public CLI, the Remote Control bridge, and one
+// pinned private archival call. A lane's session, job, bridge, and worker
+// execution epoch form a single immutable identity, and every mutation is
+// journaled before dispatch and confirmed against that exact identity. It never
+// touches a session it does not own and never replays an unobserved delivery.
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -34,11 +41,15 @@ const {
 } = require('./worktree');
 
 const BACKEND = 'claude-code';
+// Retired lanes have released their provider and seat; retiring lanes are
+// mid-retirement. Neither accepts a new mutation.
 const RETIRED_STATES = new Set(['archivedVerified', 'cleanupEligible', 'worktreeRemoved']);
 const RETIRING_STATES = new Set(['retireRequested', 'archiveUnknown', 'localRemovalPending']);
 const NON_MUTABLE_STATES = new Set([...RETIRED_STATES, ...RETIRING_STATES]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
+// Adapter failure carrying a stable code. The code, not the message, drives the
+// CLI exit status and the public delivery projection.
 class ClaudeTransmogrifyError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -49,10 +60,38 @@ class ClaudeTransmogrifyError extends Error {
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+// A dispatched spawn whose job is missing from the census this long after the
+// launch finished is treated as gone rather than still registering.
+const SPAWN_ABSENCE_GRACE_MS = 60_000;
+const UNBOUND_PROVIDER_RECEIPT = Object.freeze({
+  unbound: true, stop: 'notAttempted', archive: 'notAttempted', localRemoval: 'notAttempted',
+});
+const OWNER_ACTIONS = new Map([
+  ['REMOTE_CONTROL_UNAVAILABLE',
+    'The session never registered Remote Control, usually because the Claude login broke at launch. ' +
+    'Run claude auth status and, if it is logged out, claude auth login. Then stop and remove that ' +
+    'exact session with claude stop and claude rm (claude agents --all lists it under this lane title), ' +
+    'run reconcile again so the lane settles, and retire the lane to free its seat.'],
+]);
+
+// The cause recorded when a spawn cannot be verified: the failing check's code
+// and its fixed message, never provider rows or paths.
+function spawnCause(error) {
+  return {
+    ...(typeof error?.code === 'string' ? { causeCode: error.code } : {}),
+    causeMessage: String(error?.message || 'unknown').slice(0, 300),
+  };
+}
+function ownerActionFor(causeCode) {
+  return OWNER_ACTIONS.get(causeCode) || null;
+}
 function commandDeadline(options) {
   return Number.isInteger(options.commandTimeoutMs)
     ? Date.now() + options.commandTimeoutMs : null;
 }
+// Time left in the aggregate command deadline. Exhaustion is TIMEOUT, so no
+// single provider call can spend an unbounded budget.
 function remainingCommandMs(deadline, minimum = 1) {
   if (deadline === null) return undefined;
   const remaining = Math.floor(deadline - Date.now());
@@ -64,10 +103,15 @@ function remainingCommandMs(deadline, minimum = 1) {
 function worktreesRoot(options, env) {
   return options.worktrees || env.WORKTREES || `${options.repoRoot}/.worktrees`;
 }
+// The runtime tuple with the prepared environment and org id stripped, so no
+// durable record carries account or environment material.
 function publicRuntime(runtime) {
   const { cleanEnv: _cleanEnv, orgId: _orgId, ...persisted } = runtime;
   return persisted;
 }
+// Recorded and current runtimes must agree on every key in both directions.
+// allowLegacyProjectsIdentity keeps a pre-0.2 receipt on a removed seat readable
+// without weakening the check on a live lane.
 function sameRuntime(recorded, actual, options = {}) {
   const current = publicRuntime(actual);
   if (!recorded) return false;
@@ -80,9 +124,13 @@ function sameRuntime(recorded, actual, options = {}) {
   return currentKeys.every((key) => recorded[key] === current[key]) &&
     Object.keys(recorded).every((key) => recorded[key] === current[key]);
 }
+// The runtime a lane executes on now: its newest verified CLI transition, or
+// the spawn runtime when no transition was ever recorded.
 function effectiveRuntime(lane) {
   return lane.providerIdentity?.runtimeEpochs?.at(-1)?.runtime || lane.runtime;
 }
+// The identity keys a CLI upgrade must not change. The build hash is excluded
+// because it is exactly what a transition rebinds.
 function sameRuntimeIdentity(left, right) {
   return [
     'protocolGeneration', 'platform', 'arch', 'configDir', 'configDevice',
@@ -90,6 +138,8 @@ function sameRuntimeIdentity(left, right) {
     'accountFingerprint',
   ].every((key) => left?.[key] === right?.[key]);
 }
+// The lifecycle semantics this adapter actually implements, recorded on every
+// lane so a caller never assumes Codex-shaped turn control.
 function capabilities() {
   return {
     steering: 'queuedSafePointPublicCli', stop: 'wholeSession', cancelTurnOnly: false,
@@ -103,6 +153,8 @@ function laneResult(operation, lane, extra = {}) {
     providerId: lane.providerId, state: lane.state, capabilities: lane.capabilities, ...extra,
   };
 }
+// The lane's immutable spawn intent and its journal must name the same model
+// selector; a disagreement is OWNERSHIP_MISMATCH before reconciliation acts.
 function assertSpawnSelection(lane, operation) {
   const intentSelector = lane.ownership?.spawnIntent?.modelSelector;
   const operationSelector = operation?.details?.modelSelector;
@@ -114,6 +166,8 @@ function assertSpawnSelection(lane, operation) {
   }
 }
 function surfaceFor(options) { return options.surface || createClaudeSurface(); }
+// Measure the Claude runtime tuple, projecting a surface failure as an adapter
+// error. It runs before any mutation, so a failure here changed nothing.
 function preflight(options, env, surface) {
   try { return surface.preflight(options, env); } catch (error) {
     if (error instanceof ClaudeTransmogrifyError) throw error;
@@ -130,6 +184,8 @@ function executionRequest(options) {
   ].filter(([, value]) => value !== undefined));
 }
 
+// Provenance for the pinned Claude capability catalog: the measured CLI build
+// plus the documentation the selection contract was derived from.
 function claudeCatalogSource(runtime) {
   return {
     kind: 'claude-cli+official-docs',
@@ -147,6 +203,8 @@ function claudeCatalogSource(runtime) {
   };
 }
 
+// Re-project an execution-profile failure as EXECUTION_PROFILE_UNSUPPORTED,
+// keeping the original profile code. Any other error rethrows.
 function profileFailure(error) {
   if (!(error instanceof ExecutionProfileError)) throw error;
   throw new ClaudeTransmogrifyError('EXECUTION_PROFILE_UNSUPPORTED', error.message, {
@@ -154,6 +212,8 @@ function profileFailure(error) {
   });
 }
 
+// Resolve the immutable execution profile against the pinned Claude catalog. A
+// supplied profile must resolve identically or it is refused as stale.
 function resolveSpawnProfile(options, runtime) {
   try {
     let supplied = null;
@@ -177,6 +237,10 @@ function resolveSpawnProfile(options, runtime) {
   } catch (error) { return profileFailure(error); }
 }
 
+// Compile a resolved profile into CLI arguments. Any control it cannot express
+// exactly, an unexpected speed control or an execution setting that is not the
+// ultracode/xhigh pair, is EXECUTION_PROFILE_UNSUPPORTED rather than a silently
+// dropped selection.
 function executionArgs(profile) {
   if (!profile) return {};
   const control = profile.resolved.speed.nativeControl;
@@ -210,6 +274,8 @@ function executionArgs(profile) {
   };
 }
 
+// Public capability report for Claude. Availability is documented rather than
+// observed: the account's real access is only proven at launch.
 function executionCapabilities(options = {}, env = process.env) {
   const surface = surfaceFor(options);
   const runtime = preflight(options, env, surface);
@@ -235,11 +301,16 @@ function executionCapabilities(options = {}, env = process.env) {
     catalog,
   };
 }
+// Re-verify the seat's recorded identity before a mutation; a replaced or moved
+// worktree is SEAT_MISMATCH.
 function assertSeat(options, lane) {
   try { return verifyLaneSeat(options.repoRoot, lane.seat); } catch (error) {
     throw new ClaudeTransmogrifyError('SEAT_MISMATCH', error.message);
   }
 }
+// Resolve the lane a command may act on. Another backend is ADAPTER_MISMATCH, a
+// retiring or retired lane refuses mutation as LANE_RETIRED, and an incomplete
+// session, job, or bridge identity is SPAWN_UNCERTAIN.
 function ownedLane(options, env, mutation = false) {
   if (!options.repoRoot || !path.isAbsolute(options.repoRoot)) {
     throw new ClaudeTransmogrifyError('USAGE_ERROR', 'repoRoot must be absolute');
@@ -257,6 +328,9 @@ function ownedLane(options, env, mutation = false) {
   }
   return lane;
 }
+// Measure the current runtime through the lane's own recorded CLI path and
+// require it to equal that lane's effective runtime. Drift in build, account,
+// or config identity is RUNTIME_MISMATCH before anything is dispatched.
 function runtimeForLane(options, lane, env, surface) {
   const expected = effectiveRuntime(lane);
   const runtime = preflight({
@@ -273,6 +347,9 @@ function runtimeForLane(options, lane, env, surface) {
 function latestEpoch(lane) {
   return lane.providerIdentity.executionEpochs[lane.providerIdentity.executionEpochs.length - 1] || null;
 }
+// The live worker must be the exact journaled execution epoch: same pid, process
+// birth, and control socket identity. Anything else is EXECUTION_EPOCH_UNBOUND
+// and no command is sent to that process.
 function ensureLatestEpoch(lane, execution) {
   const epoch = latestEpoch(lane);
   if (!epoch || epoch.pid !== execution.pid || epoch.processBirth !== execution.processBirth) {
@@ -296,6 +373,8 @@ function epochFromDiscovery(discovery, epochId = crypto.randomUUID()) {
     socket: discovery.socket, observedAt: new Date().toISOString(),
   };
 }
+// Collapse a listed agent row into one phase. A null pid is stopped, and an
+// explicit waitingFor wins over any reported running state.
 function phaseForAgent(agent) {
   const observedState = agent.status || agent.state || (agent.pid ? 'running' : 'stopped');
   const phase = agent.pid === null ? 'stopped' :
@@ -305,6 +384,9 @@ function phaseForAgent(agent) {
   return { phase };
 }
 function runningLaneState(agent) { return phaseForAgent(agent).phase === 'working' ? 'active' : 'idle'; }
+// Move a lane to the state its live agent implies, stepping through
+// recoverRequested or deliveryUnknown first where the lifecycle has no direct
+// edge out of stopped or stopRequested.
 function updateRunningLane(repoRoot, lane, agent, env, patch = {}) {
   const target = runningLaneState(agent);
   let current = lane;
@@ -320,6 +402,9 @@ function updateRunningLane(repoRoot, lane, agent, env, patch = {}) {
   }
   return current;
 }
+// Poll the agent listing for a predicate within bounded attempts and the command
+// deadline. Returns null on exhaustion; the caller decides whether that is a
+// refusal or an unknown.
 async function pollAgents(surface, runtime, predicate, options = {}) {
   const attempts = options.attempts ?? 30;
   const delayMs = options.delayMs ?? 100;
@@ -340,6 +425,8 @@ async function pollAgents(surface, runtime, predicate, options = {}) {
   }
   return null;
 }
+// Resume the lane's pending operation when it is this type, otherwise open a new
+// journal. A different pending type is PENDING_OPERATION and nothing is sent.
 function operationForType(repoRoot, lane, type, env, details) {
   const pending = pendingOperationForLane(repoRoot, lane.laneId, env);
   if (pending) {
@@ -364,9 +451,13 @@ function updatePending(repoRoot, laneId, operation, patch, env) {
 function completePending(repoRoot, laneId, operation, patch, env) {
   return completeLaneOperation(repoRoot, laneId, operation.operationId, patch, env);
 }
+// Whether this operation still owns the lane's pending pointer. An emergency
+// stop journal runs beside a preserved pointer and must not clear it.
 function operationUsesPendingPointer(repoRoot, laneId, operation, env) {
   return requireOwnedLane(repoRoot, laneId, env).pendingOperationId === operation.operationId;
 }
+// Patch through the lane pointer when this operation owns it and directly
+// otherwise, so an emergency stop cannot settle another operation's pointer.
 function updateOperationJournal(repoRoot, laneId, operation, patch, env) {
   return operationUsesPendingPointer(repoRoot, laneId, operation, env)
     ? updatePending(repoRoot, laneId, operation, patch, env)
@@ -377,6 +468,8 @@ function completeOperationJournal(repoRoot, laneId, operation, patch, env) {
     ? completePending(repoRoot, laneId, operation, patch, env)
     : updateOperation(repoRoot, operation.operationId, { ...patch, state: patch.state || 'complete' }, env);
 }
+// Record a durable stop observation, leaving an already-stopped lane unchanged
+// so a repeat observation cannot invent a second receipt.
 function observedStop(repoRoot, lane, operation, env, receipt = {}) {
   if (lane.state === 'stopped') return lane;
   return observeLaneStopped(repoRoot, lane.laneId, {
@@ -388,6 +481,9 @@ function observedStop(repoRoot, lane, operation, env, receipt = {}) {
     },
   }, env);
 }
+// Dispatch the Remote Control deep link so the lane is visible natively.
+// Presentation is best effort: a failure records dispatchUnknown visibility and
+// never fails the surrounding lifecycle operation.
 async function presentLane(options, env, surface, runtime, lane) {
   const attemptedAt = new Date().toISOString();
   try {
@@ -417,6 +513,8 @@ async function presentLane(options, env, surface, runtime, lane) {
     };
   }
 }
+// The immutable creation receipt: the attributed session, its realpath cwd, the
+// launch stdout digest, the transcript proof, and the worker identity.
 function creationReceipt(candidate, jobId, discovery, stdout, runtime, transcript) {
   return {
     sessionId: candidate.sessionId, jobId, bridgeId: discovery.bridgeId, name: candidate.name,
@@ -431,6 +529,10 @@ function bridgeReceipt(discovery) {
     processBirth: discovery.processBirth, observedAt: new Date().toISOString(),
   };
 }
+// The single new agent row this launch produced: exact job id, the lane's
+// display name, a cwd resolving to the owned seat, a start time inside the
+// dispatch window, and absence from the preflight census. Anything other than
+// one exact match returns null, so an ambiguous spawn is never adopted.
 function candidateFromJob(agents, jobId, intent, seat, dispatchStartedAt, dispatchFinishedAt) {
   const candidates = agents.filter((agent) => {
     if (typeof agent?.id !== 'string' || agent.id.toLowerCase() !== jobId ||
@@ -445,6 +547,9 @@ function candidateFromJob(agents, jobId, intent, seat, dispatchStartedAt, dispat
   });
   return candidates.length === 1 ? candidates[0] : null;
 }
+// Read the launch stdout receipt for an unbound spawn. The path must be the one
+// this operation journaled, and a symlink, foreign owner, writable mode, or
+// oversized file is SPAWN_UNCERTAIN. Absence returns null.
 function readDurableSpawnReceipt(repoRoot, lane, env) {
   const paths = projectPaths(repoRoot, env);
   const expected = path.join(paths.operations, `${lane.operationId}.spawn.stdout`);
@@ -463,6 +568,9 @@ function readDurableSpawnReceipt(repoRoot, lane, env) {
   }
   return { stdout: fs.readFileSync(expected, 'utf8'), modifiedAt: stat.mtimeMs };
 }
+// Delete the stdout and stderr receipts once the spawn is bound or proven not
+// delivered, under the same path and safety checks used to read them. Anything
+// unexpected is SPAWN_UNCERTAIN and the files are left in place.
 function removeDurableSpawnReceipts(repoRoot, lane, env) {
   const paths = projectPaths(repoRoot, env);
   for (const [suffix, recorded] of [
@@ -492,6 +600,11 @@ function removeDurableSpawnReceipts(repoRoot, lane, env) {
     fs.unlinkSync(expected);
   }
 }
+// Attribute a launched job to one exact session and bind it: verify the
+// transcript nonce and prompt digests, discover the worker and bridge, bind
+// session, job, bridge, and first execution epoch in one write, then present the
+// lane and close the journal. Failing to attribute exactly one session is
+// SPAWN_UNCERTAIN and leaves the lane delivery-unknown.
 async function finalizeSpawn(options, env, surface, runtime, lane, operation, jobId, stdout,
   deadline = null) {
   const dispatchStartedAt = operation.details.dispatchStartedAt;
@@ -540,6 +653,11 @@ async function finalizeSpawn(options, env, surface, runtime, lane, operation, jo
   return { lane, discovery, presentation: presented.presentation };
 }
 
+// Create an exact-owned Claude lane. The immutable spawn intent, its nonce,
+// prompt digests, preflight session census, and capture paths, is journaled
+// before the CLI is launched so the resulting session can be attributed without
+// guessing. ENOENT or EACCES is proven NOT_DELIVERED; every other launch or
+// attribution failure is SPAWN_UNCERTAIN and the launch is never repeated.
 async function spawnLane(options, env = process.env) {
   if (!options.repoRoot || !path.isAbsolute(options.repoRoot) ||
       typeof options.name !== 'string' || !options.name ||
@@ -688,15 +806,18 @@ async function spawnLane(options, env = process.env) {
     if (options.onLaunch) options.onLaunch(finalized.lane);
   } catch (error) {
     const current = requireOwnedLane(options.repoRoot, lane.laneId, env);
+    const cause = spawnCause(error);
     if (current.pendingOperationId === operation.operationId) {
-      updatePending(options.repoRoot, lane.laneId, operation, { state: 'spawnUnknown' }, env);
+      updatePending(options.repoRoot, lane.laneId, operation, {
+        state: 'spawnUnknown', details: { ...operation.details, ...cause },
+      }, env);
       if (current.state === 'planned' || current.state === 'created') {
         updateLane(options.repoRoot, lane.laneId, { state: 'deliveryUnknown' }, env);
       }
     }
     throw new ClaudeTransmogrifyError('SPAWN_UNCERTAIN', error.message, {
-      laneId: lane.laneId, providerId: current.providerId,
-      ...(error.code ? { causeCode: error.code } : {}),
+      laneId: lane.laneId, providerId: current.providerId, ...cause,
+      ...(ownerActionFor(cause.causeCode) ? { ownerAction: ownerActionFor(cause.causeCode) } : {}),
     });
   }
   if (options.dispatch) {
@@ -737,6 +858,9 @@ async function spawnLane(options, env = process.env) {
   });
 }
 
+// Read one lane. A retiring or retired lane answers from durable state without
+// touching the provider; otherwise the exact agent row is required and its
+// worker must still be the journaled execution epoch.
 async function status(options, env = process.env) {
   const deadline = commandDeadline(options);
   let lane = ownedLane(options, env, false);
@@ -785,6 +909,9 @@ async function status(options, env = process.env) {
   });
 }
 
+// Settle a pending steer from its transcript delivery receipt. An observed
+// receipt completes the journal and restores the pre-dispatch lane state; an
+// unobservable one leaves the operation unknown and the lane delivery-unknown.
 async function reconcileSteer(options, env, surface, runtime, lane, operation, deadline = null) {
   let receipt;
   try {
@@ -821,6 +948,11 @@ async function reconcileSteer(options, env, surface, runtime, lane, operation, d
   }
   return { complete: true, receipt, lane: current };
 }
+// Queue a follow-up on an exact-owned running session through Remote Control.
+// The message is framed with a delivery token and must be observed in that
+// session's transcript before the operation completes. A refused write is
+// NOT_DELIVERED; a queued but unobserved write is DELIVERY_UNCERTAIN and is
+// never resent, because the provider may already hold it.
 async function steer(options, env = process.env) {
   if (typeof options.message !== 'string' || !options.message) {
     throw new ClaudeTransmogrifyError('USAGE_ERROR', 'steer requires a non-empty message');
@@ -946,6 +1078,10 @@ async function exactAgent(surface, runtime, lane, options = {}) {
     name: lane.displayName, cwd: lane.seat.path,
   });
 }
+// Stop the whole owned session and verify its worker is gone. The exact agent is
+// re-read immediately before dispatch, so a changed worker is STOP_UNCERTAIN
+// rather than a stop aimed at a stranger. A non-planned operation is never
+// replayed, and an unverified stop leaves the lane delivery-unknown.
 async function stopOwnedLane(options, env, surface, runtime, lane, operation, allowMutation = true) {
   let agent = await exactAgent(surface, runtime, lane, options);
   if (agent.pid === null) {
@@ -1005,6 +1141,8 @@ async function stopOwnedLane(options, env, surface, runtime, lane, operation, al
   lane = observedStop(options.repoRoot, lane, operation, env, { stopVerified: true });
   return { lane, alreadyStopped: false };
 }
+// The one unresolved emergency stop journal for a lane, if any. More than one is
+// STOP_UNCERTAIN and blocks any further mutation.
 function unresolvedEmergencyStop(repoRoot, laneId, env) {
   const unfinished = listOperations(repoRoot, env).filter((operation) =>
     operation.laneId === laneId && operation.type === 'stop' &&
@@ -1019,6 +1157,9 @@ function unresolvedEmergencyStop(repoRoot, laneId, env) {
   }
   return unfinished[0] || null;
 }
+// Operator stop. When another operation type is already pending it opens a
+// separate emergency stop journal beside the preserved pointer, so stopping a
+// lane never destroys the record of what was in flight.
 async function stop(options, env = process.env) {
   let lane = ownedLane(options, env, false);
   if (RETIRED_STATES.has(lane.state)) {
@@ -1060,6 +1201,9 @@ async function stop(options, env = process.env) {
   }, env);
 }
 
+// Sessions a recovery dispatch may have forked: the lane's display name and
+// seat, started inside the dispatch window, absent from the baseline census, and
+// not the owned session. Their existence stops recovery; none is ever touched.
 function correlatedRecoveryCopies(agents, lane, operation) {
   const baseline = new Set(operation.details.baselineSessionIds || []);
   const started = operation.details.dispatchStartedAt;
@@ -1073,6 +1217,10 @@ function correlatedRecoveryCopies(agents, lane, operation) {
       startedAt >= started - 5000 && startedAt <= notAfter;
   });
 }
+// Verify that recovery resumed the exact same session: no correlated fork, an
+// unchanged bridge id, and a live worker whose new execution epoch is appended
+// before the lane is marked running. A correlated fork is FORKED_COPY and a
+// different bridge is RECOVERY_UNCERTAIN.
 async function observeRecovery(options, env, surface, runtime, lane, operation, deadline = null) {
   const located = await pollAgents(surface, runtime, (agents) => {
     const copies = correlatedRecoveryCopies(agents, lane, operation);
@@ -1126,6 +1274,10 @@ async function observeRecovery(options, env, surface, runtime, lane, operation, 
   }, env);
   return { lane, presentation: presented.presentation };
 }
+// Resume a stopped lane as the same session with its pinned execution profile.
+// It refuses a lane that is already running, journals the baseline session census
+// and dispatch window before dispatch, and treats any unverified outcome as
+// RECOVERY_UNCERTAIN rather than launching again.
 async function recover(options, env = process.env) {
   let lane = ownedLane(options, env, false);
   assertSeat(options, lane);
@@ -1229,6 +1381,8 @@ async function recover(options, env = process.env) {
   }, env);
 }
 
+// The one local row for the owned session, or null when it is absent. A
+// duplicated session id is OWNERSHIP_MISMATCH.
 function exactLocalAgentOrAbsent(surface, agents, lane) {
   const matches = agents.filter((agent) => agent?.sessionId === lane.providerId);
   if (matches.length === 0) return null;
@@ -1239,6 +1393,8 @@ function exactLocalAgentOrAbsent(surface, agents, lane) {
     name: lane.displayName, cwd: lane.seat.path,
   });
 }
+// Retirement requires the owned session to be already stopped. A still-running
+// worker is STOP_UNCERTAIN, and this path never issues a second stop.
 async function verifyRetirementStopped(options, env, surface, runtime, lane, operation) {
   let agents = await surface.agents(runtime);
   let agent = exactLocalAgentOrAbsent(surface, agents, lane);
@@ -1263,6 +1419,9 @@ async function verifyRetirementStopped(options, env, surface, runtime, lane, ope
   }
   return operation;
 }
+// The exact stopped local record to remove once the seat is gone: matching
+// session, job, name, and recorded seat path, a unique short job id, and stable
+// across the confirm and remove pair. Any drift is OWNERSHIP_MISMATCH.
 function exactLocalRecordAfterSeatRemoval(agents, lane, expected = null) {
   const matches = agents.filter((agent) => agent?.sessionId === lane.providerId);
   if (matches.length === 0) return null;
@@ -1295,6 +1454,8 @@ function localRemovalTarget(lane, agent) {
     cwd: path.resolve(agent.cwd),
   };
 }
+// The identity check failed before local removal was attempted. Stop, archive,
+// and cleanup stay reported as verified; localRemoval is notAttempted.
 function localRemovalIdentityFailure(error, lane) {
   return new ClaudeTransmogrifyError(error.code || 'OWNERSHIP_MISMATCH', error.message, {
     providerMutation: 'verified',
@@ -1306,6 +1467,8 @@ function localRemovalIdentityFailure(error, lane) {
     localRemoval: 'notAttempted',
   });
 }
+// Local removal failed after it began. The earlier verified phases are still
+// reported honestly and providerMutation follows the removal's own certainty.
 function localRemovalStageFailure(error, lane, localRemoval) {
   return new ClaudeTransmogrifyError(error.code || 'OPERATOR_ERROR', error.message, {
     ...(error.details || {}),
@@ -1319,7 +1482,131 @@ function localRemovalStageFailure(error, lane, localRemoval) {
     localRemoval,
   });
 }
+// Retire a Claude lane in a fixed order: harvest receipt, stop, remote archive,
+// managed worktree removal, then local record removal. Remote archive uses the
+// pinned private API and requires explicit owner authorization. Each phase is
+// reported separately on failure, and a permanent cleanup block stays blocked
+// until an owner acknowledges the manual seat removal.
+// A lane whose spawn never bound a provider identity has nothing to stop,
+// archive, or remove on the provider side. Retirement of such a lane only
+// records the harvest and cleans its managed seat. A still-open spawn journal
+// must be settled by reconcile first.
+function unboundFailedLane(options, env) {
+  if (!options.repoRoot || !path.isAbsolute(options.repoRoot)) return null;
+  const lane = requireOwnedLane(options.repoRoot, options.laneId, env);
+  if (lane.backend !== BACKEND || lane.providerId) return null;
+  const pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+  if (pending?.type === 'spawn') {
+    throw new ClaudeTransmogrifyError(
+      'PENDING_OPERATION',
+      `lane ${lane.laneId} has an unresolved spawn; run reconcile first`,
+    );
+  }
+  if (!['failed', 'cleanupEligible', 'worktreeRemoved'].includes(lane.state)) return null;
+  return lane;
+}
+async function retireUnboundLane(options, env, initial) {
+  return withLaneLease(options.repoRoot, initial.laneId, async () => {
+    let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
+    let pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+    if (pending && pending.type !== 'retire') {
+      throw new ClaudeTransmogrifyError('PENDING_OPERATION', `lane ${lane.laneId} has unresolved ${pending.type} operation`);
+    }
+    if (lane.state === 'worktreeRemoved' && !pending) {
+      return laneResult('retire', lane, { receipt: { retired: true, alreadyRetired: true } });
+    }
+    if (!pending) {
+      if (!SHA256_PATTERN.test(options.harvestedOutputSha256 || '')) {
+        throw new ClaudeTransmogrifyError(
+          'HARVEST_REQUIRED', 'Claude retirement requires a durable lowercase harvestedOutputSha256',
+        );
+      }
+      const harvestReceipt = lane.seat
+        ? captureHarvestReceipt(options.repoRoot, lane.seat, options.harvestedOutputSha256)
+        : { version: 1, outputSha256: options.harvestedOutputSha256, seat: null };
+      pending = beginLaneOperation(options.repoRoot, lane.laneId, {
+        type: 'retire', providerId: null,
+        details: {
+          target: 'claude', ordering: 'harvest-worktree', unbound: true, harvestReceipt,
+          provider: { ...UNBOUND_PROVIDER_RECEIPT },
+        },
+      }, env);
+    } else if (options.harvestedOutputSha256 !== undefined &&
+        pending.details.harvestReceipt?.outputSha256 !== options.harvestedOutputSha256) {
+      throw new ClaudeTransmogrifyError('HARVEST_MISMATCH', 'retirement harvest digest does not match its durable receipt');
+    }
+    const harvestReceipt = pending.details.harvestReceipt;
+    const finish = (cleanup) => {
+      completePending(options.repoRoot, lane.laneId, pending, {
+        state: 'complete', details: { ...pending.details, cleanup },
+      }, env);
+      lane = requireOwnedLane(options.repoRoot, lane.laneId, env);
+      return laneResult('retire', lane, {
+        operationId: pending.operationId,
+        receipt: {
+          provider: { ...UNBOUND_PROVIDER_RECEIPT },
+          harvestedOutputSha256: harvestReceipt.outputSha256, worktree: cleanup,
+        },
+      });
+    };
+    if (!lane.seat || lane.seat.managed !== true) {
+      if (lane.state !== 'worktreeRemoved') {
+        lane = updateLane(options.repoRoot, lane.laneId, { state: 'worktreeRemoved' }, env);
+      }
+      return finish({ attempted: false, removed: false, external: true });
+    }
+    if (lane.state === 'worktreeRemoved') {
+      return finish(pending.details.cleanup || { attempted: true, removed: true, recoveredAfterRemoval: true });
+    }
+    if (options.cleanupWorktree === false) {
+      pending = updatePending(options.repoRoot, lane.laneId, pending, {
+        state: 'cleanupDeferred', details: { ...pending.details, cleanupDeferred: true },
+      }, env);
+      return laneResult('retire', lane, {
+        operationId: pending.operationId,
+        receipt: {
+          provider: { ...UNBOUND_PROVIDER_RECEIPT },
+          harvestedOutputSha256: harvestReceipt.outputSha256,
+          worktree: { attempted: false, removed: false, deferred: true },
+        },
+      });
+    }
+    if (lane.state === 'failed') {
+      lane = updateLane(options.repoRoot, lane.laneId, { state: 'cleanupEligible' }, env);
+    }
+    const cleanup = { attempted: true, removed: false };
+    try {
+      const result = removeManagedSeat(options.repoRoot, lane.laneId, harvestReceipt, env);
+      lane = result.lane;
+      cleanup.removed = true;
+    } catch (error) {
+      if (!isPermanentCleanupError(error)) {
+        updatePending(options.repoRoot, lane.laneId, pending, {
+          state: 'providerRetiredCleanupDeferred',
+          details: { ...pending.details, cleanupRetryable: true },
+        }, env);
+        throw new ClaudeTransmogrifyError(
+          'CLEANUP_RETRYABLE',
+          'the unbound Claude lane has no provider state; managed worktree cleanup failed locally and is safe to retry',
+          { laneId: lane.laneId },
+        );
+      }
+      updatePending(options.repoRoot, lane.laneId, pending, {
+        state: 'providerRetiredCleanupBlocked',
+        details: { ...pending.details, cleanupBlocked: true },
+      }, env);
+      throw new ClaudeTransmogrifyError('CLEANUP_BLOCKED', error.message, { laneId: lane.laneId });
+    }
+    pending = updatePending(options.repoRoot, lane.laneId, pending, {
+      state: 'worktreeRemoved', details: { ...pending.details, cleanup },
+    }, env);
+    return finish(cleanup);
+  }, env);
+}
+
 async function retire(options, env = process.env) {
+  const unbound = unboundFailedLane(options, env);
+  if (unbound) return retireUnboundLane(options, env, unbound);
   let lane = ownedLane(options, env, false);
   const existingRetirement = pendingOperationForLane(options.repoRoot, lane.laneId, env);
   if (lane.state === 'worktreeRemoved' && !existingRetirement) {
@@ -1682,6 +1969,10 @@ async function retire(options, env = process.env) {
   }, env);
 }
 
+// Settle a spawn journal without relaunching. A bound lane is verified and
+// presented; an unbound one is bound from the durable stdout receipt when it
+// exists, reported not delivered only when the launch provably never started,
+// and otherwise left spawnUnknown.
 async function reconcilePendingSpawn(options, env, surface, runtime, lane, operation,
   deadline = null) {
   assertSpawnSelection(lane, operation);
@@ -1734,14 +2025,83 @@ async function reconcilePendingSpawn(options, env, surface, runtime, lane, opera
     options.repoRoot, lane.laneId, operation,
     { state: operation.state, details: { ...operation.details, dispatchFinishedAt: receipt.modifiedAt } }, env,
   );
-  const finalized = await finalizeSpawn(
-    options, env, surface, runtime, lane, normalized, jobId, receipt.stdout, deadline,
-  );
+  const absence = await observeSpawnJobAbsence(options, surface, runtime, lane, normalized, jobId, deadline);
+  if (absence) return settleAbsentSpawn(options, env, lane, normalized, jobId, absence);
+  let finalized;
+  try {
+    finalized = await finalizeSpawn(
+      options, env, surface, runtime, lane, normalized, jobId, receipt.stdout, deadline,
+    );
+  } catch (error) {
+    const cause = spawnCause(error);
+    try {
+      updatePending(options.repoRoot, lane.laneId, normalized, {
+        state: normalized.state, details: { ...normalized.details, ...cause },
+      }, env);
+    } catch {}
+    throw new ClaudeTransmogrifyError('SPAWN_UNCERTAIN', error.message, {
+      laneId: lane.laneId, ...cause,
+      ...(ownerActionFor(cause.causeCode) ? { ownerAction: ownerActionFor(cause.causeCode) } : {}),
+    });
+  }
   return {
     lane: finalized.lane, outcome: 'spawnBoundFromDurableReceipt',
     presentation: finalized.presentation.state,
   };
 }
+
+// Whether the dispatched job has vanished from the provider census. Only an
+// old dispatch counts, and only when every poll agrees, so a job that is still
+// registering is never mistaken for a dead one. Never mutates the provider.
+async function observeSpawnJobAbsence(options, surface, runtime, lane, operation, jobId, deadline) {
+  const finishedAt = operation.details.dispatchFinishedAt;
+  const graceMs = options.spawnAbsenceGraceMs ?? SPAWN_ABSENCE_GRACE_MS;
+  if (!Number.isInteger(graceMs) || graceMs < 0) {
+    throw new ClaudeTransmogrifyError('USAGE_ERROR', 'spawnAbsenceGraceMs must be a non-negative integer');
+  }
+  if (!Number.isFinite(finishedAt) || Date.now() - finishedAt < graceMs) return null;
+  const attempts = Math.max(1, options.discoveryAttempts ?? 3);
+  const delayMs = options.discoveryDelayMs ?? 1000;
+  let seat = null;
+  try { seat = lane.seat ? fs.realpathSync(lane.seat.path) : null; } catch { seat = null; }
+  const preflight = lane.ownership?.spawnIntent?.preflightSessionIds || [];
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const agents = await surface.agents(runtime, deadline === null ? {} : {
+      commandTimeoutMs: remainingCommandMs(deadline, 100),
+    });
+    const present = agents.some((agent) => {
+      if (typeof agent?.id === 'string' && agent.id.toLowerCase() === jobId) return true;
+      if (agent?.name !== lane.displayName) return false;
+      if (typeof agent.sessionId === 'string' && preflight.includes(agent.sessionId.toLowerCase())) return false;
+      if (!seat || typeof agent.cwd !== 'string') return false;
+      try { return fs.realpathSync(agent.cwd) === seat; } catch { return false; }
+    });
+    if (present) return null;
+    if (attempt + 1 < attempts) await sleep(delayMs);
+  }
+  return { observedAbsentAt: new Date().toISOString(), attempts };
+}
+
+// Close a spawn journal whose job is provably gone: the lane fails, the raw
+// capture files go (their digests stay in the operation), and the operation
+// records the absence. The parent's wait loop turns the terminal spawn into a
+// child.failed event; retire can then free the seat.
+function settleAbsentSpawn(options, env, lane, operation, jobId, absence) {
+  let settled = lane.state === 'failed'
+    ? lane : updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
+  removeDurableSpawnReceipts(options.repoRoot, settled, env);
+  completePending(options.repoRoot, settled.laneId, operation, {
+    state: 'failed',
+    details: {
+      ...operation.details, outcome: 'spawnJobAbsent', jobId,
+      observedAbsentAt: absence.observedAbsentAt, absenceAttempts: absence.attempts,
+    },
+  }, env);
+  settled = requireOwnedLane(options.repoRoot, settled.laneId, env);
+  return { lane: settled, outcome: 'spawnJobAbsent' };
+}
+// Settle a pending stop by observation only. stopOwnedLane runs with mutation
+// disabled, so a still-running lane stays pending rather than being stopped again.
 async function reconcilePendingStop(options, env, surface, runtime, lane, operation, deadline = null) {
   const result = await stopOwnedLane(deadline === null ? options : {
     ...options,
@@ -1751,6 +2111,10 @@ async function reconcilePendingStop(options, env, surface, runtime, lane, operat
   completePending(options.repoRoot, lane.laneId, operation, { state: 'complete' }, env);
   return { lane: result.lane, outcome: 'stoppedObserved' };
 }
+// Record a verified CLI upgrade on a running lane: the account, config, and
+// platform identity must be unchanged, the bridge id must match, and a live
+// worker must supply the new execution epoch. A stopped lane cannot prove a
+// transition and is RUNTIME_MISMATCH.
 async function bindRuntimeTransition(options, env, surface, runtime, initial, deadline = null) {
   let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
   const previousRuntime = effectiveRuntime(lane);
@@ -1795,6 +2159,9 @@ async function bindRuntimeTransition(options, env, surface, runtime, initial, de
   lane = updateRunningLane(options.repoRoot, lane, agent, env, { lastVerifiedAt: observedAt });
   return lane;
 }
+// Observe a fully bound lane: a stopped lane gets a durable stop receipt, and a
+// running lane must present the same bridge id, gaining a new execution epoch
+// and a deep-link presentation when either is missing.
 async function reconcileBoundLane(options, env, surface, runtime, initial, deadline = null) {
   let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
   assertSeat(options, lane);
@@ -1838,6 +2205,9 @@ async function reconcileBoundLane(options, env, surface, runtime, initial, deadl
     outcome: repaired.length ? 'repaired' : 'verified', repaired,
   };
 }
+// Fleet reconciliation for one lane or every Claude lane. It settles pending
+// journals by observation, records verified runtime transitions, and reports
+// each lane's outcome without replaying any provider mutation.
 async function reconcile(options, env = process.env) {
   if (!options.repoRoot || !path.isAbsolute(options.repoRoot)) {
     throw new ClaudeTransmogrifyError('USAGE_ERROR', 'reconcile requires absolute repoRoot');
@@ -2047,9 +2417,12 @@ async function reconcile(options, env = process.env) {
         });
         continue;
       }
+      const causeCode = error.details?.causeCode;
       results.push({
         laneId: initial.laneId, providerId: initial.providerId, state: initial.state,
         outcome: 'uncertain', code: error.code || 'RECONCILIATION_UNCERTAIN', error: error.message,
+        ...(causeCode ? { causeCode } : {}),
+        ...(ownerActionFor(causeCode) ? { ownerAction: ownerActionFor(causeCode) } : {}),
       });
     }
   }

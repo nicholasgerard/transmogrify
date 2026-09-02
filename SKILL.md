@@ -4,11 +4,11 @@ description: Operate exact-owned, worktree-seated Codex and Claude Code lanes wi
 license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
-  version: "0.2.1"
+  version: "0.2.2"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server 0.151.x"
-  verified_codex_desktop: "26.825.51511 (7377)"
+  verified_codex_desktop: "26.901.20858 (7658)"
   verified_codex_mobile: "ChatGPT for iOS 1.2026.230 (32543289983)"
   verified_claude_cli: "2.1.258"
   verified_claude_desktop: "1.40609.1"
@@ -43,32 +43,25 @@ The hosting operator supplies or confirms these values before lane work:
 | MAILBOX_DIR | Durable directives and acknowledgments, outside the repository | `${XDG_STATE_HOME:-~/.local/state}/transmogrify/mailboxes/<repo>/` |
 | THREAD_NAME_FORMAT | Native lane naming convention | `::: <summary>` |
 
-These are host-workflow parameters, not all environment variables consumed by
-the Node tools. `REPO_ROOT` and `WORKTREES` are recognized directly;
-`RUNTIME_URL` resolves through the documented flag and `TRANSMOGRIFY_*`
-environment variables. `CLAUDE_BIN` is optional unless the host selects an
-explicit executable instead of pinned `PATH` discovery. `MAILBOX_DIR` and
-`THREAD_NAME_FORMAT` remain host policy for the descriptive summary. The
-literal `::: ` ownership marker is fixed across providers. `lane.js spawn`
-canonicalizes every requested name to exactly one leading marker before it
-reserves state or calls a provider; do not add a provider or maintainer label.
-When a host uses `XDG_STATE_HOME` to derive `MAILBOX_DIR`, it must be absolute;
-otherwise use the absolute `$HOME/.local/state` fallback before creating files.
+`REPO_ROOT` and `WORKTREES` are read directly; `RUNTIME_URL` resolves through
+the `--url` flag and the `TRANSMOGRIFY_*` variables; `CLAUDE_BIN` is needed
+only to select an explicit executable instead of pinned `PATH` discovery.
+`MAILBOX_DIR` and `THREAD_NAME_FORMAT` are host policy, and `MAILBOX_DIR` must
+be an absolute path. The `::: ` ownership marker is fixed across providers:
+`lane.js spawn` canonicalizes every requested name to exactly one leading
+marker, so never add a provider or maintainer label such as `[codex]`.
 
-`REPO_ROOT/.claude/worktrees` is a supported host override, not the portable
-default. `TRANSMOGRIFY_STATE_DIR` may override the ownership-registry root but must
-be absolute and outside both the repository and Git common directory.
-When `WORKTREES` is inside `REPO_ROOT`, its root must be ignored by Git;
-otherwise managed-seat creation refuses before provider mutation. An external
-root needs no ignore rule, but must be outside every Git worktree so
-Transmogrify cannot dirty another repository. Never nest a managed root inside
-an existing linked worktree.
+Root rules:
 
-Existing state directories must be current-user-owned and mode `0700`; JSON
-state records must be mode `0600`. Managed-seat creation likewise requires the
-exact `WORKTREES` root to be current-user-owned and mode `0700`. The nearest
-existing ancestor of either configured root must not be group/world writable.
-Choose a fresh private root rather than changing a shared directory.
+- A `WORKTREES` root inside `REPO_ROOT` must be ignored by Git, or managed-seat
+  creation refuses before any provider mutation. An external root must sit
+  outside every Git worktree and never inside a linked worktree.
+  `REPO_ROOT/.claude/worktrees` is a supported override, not the default.
+- `TRANSMOGRIFY_STATE_DIR` may relocate the ownership registry; it must be
+  absolute and outside both the repository and its Git common directory.
+- State directories and the `WORKTREES` root must be owned by the current user
+  with mode `0700`, state records mode `0600`, and no group- or world-writable
+  ancestor. Choose a fresh private root rather than changing a shared one.
 
 ## 1. Bootstrap every operator session
 
@@ -101,19 +94,14 @@ Interpret the result as follows:
    survived, the receipt goes false by itself; continue to reconcile only the
    exact lanes already owned by the surviving runtime and re-attach before
    new dispatches.
-2. If a Codex runtime is unavailable, do not start one unless the owner has
-   authorized this installation to own it. When authorized, run
-   `"$SKILL_ROOT/scripts/runtime-up.sh"`; it reuses a verified existing listener
-   and refuses an occupied non-Codex endpoint.
-   If the doctor reports `boundary:sandbox-loopback-denied`, obtain one scoped
-   host authorization for the doctor and exact provider-control commands, or
-   use a same-provider native channel only when it satisfies the complete
-   lifecycle contract below. Do not report the provider ready until the probe
-   succeeds through the selected channel.
-   A newly launched Codex runtime receives only the bounded non-secret
-   environment documented in Troubleshooting. It relies on the existing
-   file-backed Codex login selected by `HOME`/`CODEX_HOME`; do not expect
-   ambient API-key or proxy credential inheritance.
+2. If no Codex runtime is available, start one only when the owner has
+   authorized this installation to own it: `"$SKILL_ROOT/scripts/runtime-up.sh"`
+   reuses a verified listener, refuses an occupied non-Codex endpoint, and
+   launches a detached child with a bounded non-secret environment that relies
+   on the file-backed Codex login under `HOME`/`CODEX_HOME`. If the doctor
+   reports `boundary:sandbox-loopback-denied`, obtain one scoped host
+   authorization for the doctor and the exact provider-control commands; do
+   not report the provider ready until the probe succeeds.
 3. Never kill, restart, or reconfigure a runtime that may host another
    orchestrator's lanes. `runtime-up.sh` creates or reuses a standalone
    protocol runtime, and Codex Desktop adopts it only when the app is launched
@@ -121,13 +109,21 @@ Interpret the result as follows:
    below does that. OpenAI's Desktop-owned SSH daemon/proxy surface is the
    roadmap candidate to replace this mechanism once it passes the live
    acceptance gate.
-4. Execute only the doctor's printed maintenance commands, or an equally
-   narrow exact-lane command, after checking that the host policy authorizes
-   provider reads at startup. Every printed command includes the verified Codex
-   URL. A Claude command relies on pinned `PATH` discovery unless the doctor was
-   given an explicit CLI, in which case bind `CLAUDE_BIN` to that same absolute
-   executable before executing it.
+4. Run only the doctor's printed maintenance commands, or an equally narrow
+   exact-lane command. They carry the verified Codex URL; when the doctor was
+   given an explicit CLI, bind `CLAUDE_BIN` to that same executable first.
 5. Reconcile installation-owned pending operations before creating new work.
+
+### Setup the doctor asks for
+
+The doctor's `setup.ownerActions` lists every precondition that only the owner
+can satisfy: a Claude CLI that is logged out or unpinned, a Codex runtime that
+needs authorization, a Codex Desktop relaunch. For each entry, do what the
+operator may do itself (launch Desktop, reuse a listed runtime), then ask the
+owner in one plain message for the rest, quoting the exact command from
+`ownerAction`, and rerun the doctor until `setup.ready` is true. Never spawn a
+lane on a provider that still has an open owner action, and never work around
+a failed precondition through a private path.
 
 ### Attach Codex Desktop (macOS)
 
@@ -262,48 +258,38 @@ printf '%s\n' "$KICKOFF" | node "$SKILL_ROOT/scripts/lane.js" spawn \
   --input-file -
 ```
 
-Codex spawn measures the Desktop attachment at dispatch time and records the
-lane `desktopAttached` with the connection receipt. Without that receipt it
-refuses with `NATIVE_VISIBILITY_REQUIRED` and names the Desktop state it saw;
-add `--allow-protocol-only` only for a deliberately unattached lane, never
-when native-app visibility is part of the requested result. Replace `codex`
-with `claude` for a receipt-gated Claude Code Remote Control lane, which needs
-no attachment. Omit `--cwd` for a
-managed seat or pass an authorized absolute seat. Choose execution through
-`--intent`, with optional explicit `--model`, `--effort`, and
-`--speed standard|fast`. Run `capabilities --target <provider>` first when an
-explicit override is needed. Fast must always be explicit. Claude aliases are
-kept in the requested receipt but compile to a versioned selector for spawn and
-recovery. For a substantive Claude task that genuinely benefits from dynamic
-workflow orchestration, `--effort ultracode` selects the typed Ultracode setting
-and resolves model effort to `xhigh`; never treat `ultracode` as a model effort.
-Follow [docs/EXECUTION-PROFILES.md](docs/EXECUTION-PROFILES.md); do
-not invent a selector, infer account availability, or silently fall back.
+- Codex spawn measures the Desktop attachment at dispatch time and records the
+  lane `desktopAttached` with the connection receipt. Without that receipt it
+  refuses with `NATIVE_VISIBILITY_REQUIRED` and names the Desktop state it
+  saw; add `--allow-protocol-only` only for a deliberately unattached lane.
+- `--target claude` creates a receipt-gated Claude Code Remote Control lane; it
+  needs no attachment.
+- Omit `--cwd` for a managed seat, or pass an authorized absolute seat.
+- Choose execution with `--intent`, plus explicit `--model`, `--effort`, or
+  `--speed standard|fast` when needed; run `capabilities --target <provider>`
+  first. Fast is always explicit. Claude aliases compile to a versioned
+  selector; `--effort ultracode` selects the typed Ultracode setting with
+  `xhigh` model effort and is not a model effort itself. Never invent a
+  selector or silently fall back; see
+  [docs/EXECUTION-PROFILES.md](docs/EXECUTION-PROFILES.md).
 
-Spawn automatically canonicalizes the task title to `::: <summary>` and puts a
-safe ASCII provenance block before the first user message. Do not add a
-bracketed pseudo-owner prefix such as `[codex]`; spawn strips those before
-the marker.
+Spawn canonicalizes the task title to `::: <summary>` and puts the versioned
+provenance block before the first user message; it strips bracketed
+pseudo-owner prefixes such as `[codex]`.
 
 Treat the returned `laneId` as the only public lifecycle handle. Persist it in
 the host's durable execution record together with the returned `dispatchId`.
 Do not persist provider secrets or expose provider IDs in routine logs.
 
-Codex spawn is `thread/start`, exact provider-seat verification, then
-seat-pinned `turn/start`, exact input-receipt verification, and
-`thread/name/set` with an exact read-back over an initialized client. Receipt
-verification accepts the schema-shaped response marker or the same exact
-marker/content/turn from `thread/items/list`; see
-[docs/PROTOCOL.md](docs/PROTOCOL.md#codex-lane-lifecycle). Claude spawn is an
-exact named background Remote Control session whose CLI result, agent row,
-prompt marker, transcript, worker process, local socket, bridge ID, and first
-execution epoch must all agree before the lane becomes active. A Claude
-deep-link failure affects presentation only; it does not justify respawning the
-lane.
-
-Standalone Codex turns use the fixed `workspace-write` sandbox with approval
-policy `never`. Treat approval-required actions as host handback; do not weaken
-this policy through an alternate channel.
+A lane becomes active only when every spawn receipt agrees: for Codex, the
+`thread/start` seat, the seat-pinned `turn/start` input receipt, and the
+`thread/name/set` read-back ([docs/PROTOCOL.md](docs/PROTOCOL.md#codex-lane-lifecycle));
+for Claude, the CLI result, agent row, prompt marker, transcript, worker
+process, local socket, bridge ID, and first execution epoch
+([docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md)). A Claude deep-link failure is
+presentation only and never justifies a respawn. Codex turns run with the
+fixed `workspace-write` sandbox and approval policy `never`; approval-required
+actions return to the host rather than widening the lane's authority.
 
 ## 5. Steer, status, and stop
 
@@ -424,6 +410,15 @@ decides to abandon the lane, run its exact `retire` command: it re-inspects
 the thread, refuses while a turn is active, closes the spawn journal as failed
 when no receipt exists, and archives the empty thread.
 
+A Claude spawn that returns `SPAWN_UNCERTAIN` with
+`causeCode: REMOTE_CONTROL_UNAVAILABLE` started a session that never
+registered Remote Control, almost always because the Claude login broke at
+launch. Follow the printed `ownerAction`: restore the login, stop and remove
+that exact session by its short job id, run `reconcile` so the lane settles
+as `spawnJobAbsent`, `retire` it to free its seat, then spawn again. A
+dispatched spawn whose job is absent from every census after a grace period
+settles the same way on its own.
+
 ## 8. Harvest, retirement, and cleanup
 
 Retirement is automatic only after the host has durably harvested the lane's
@@ -469,7 +464,7 @@ untracked, and ignored files, and every observed ignored artifact blocks
 automatic cleanup. Stop the exact owned lane before removal and ensure no other
 same-user process writes into the managed seat during retirement. Git cannot
 atomically combine the final census with worktree removal, so a file created in
-that interval is outside the 0.2.x isolation boundary.
+that interval is outside the isolation boundary.
 
 `CLEANUP_RETRYABLE` means provider retirement is already verified but a local
 Git or filesystem operation failed without violating a cleanup invariant.
@@ -493,12 +488,12 @@ or prune a provider row merely because it looks stale.
 ## 9. Codex runtime and protocol rules
 
 - OpenAI labels app-server WebSocket transport experimental and unsupported for
-  production. Treat this release's WebSocket path as a pinned loopback protocol
-  surface, not a production support promise.
+  production. Treat the WebSocket path as a pinned loopback protocol surface,
+  not a production support promise.
 - Transmogrify accepts a root-path loopback app-server endpoint and does not
   configure WebSocket authentication for that local mode. Treat the accepted
   configuration as an unauthenticated local control plane; authenticated
-  non-loopback transports are outside this release.
+  non-loopback transports are not supported.
 - Send one headerless JSON-RPC message per WebSocket text frame.
 - Handshake: `initialize` with `capabilities.experimentalApi:true`, then the
   `initialized` notification.

@@ -27,21 +27,16 @@ support.
 ## Current state
 
 The canonical support matrix is in [README.md](README.md#support-matrix). The
-standalone adapters implement both target providers on the pinned compatibility
-tuple. Claude Desktop/mobile visibility, mobile-originated input, and native
-archive behavior are live-verified on the recorded build tuple. Codex mobile
-visibility is also live-verified on its recorded build tuple, but Desktop
-attachment is not implied by a successful app-server handshake. A Desktop
-update or restart can leave an independently managed `0.151.x` runtime alive
-while the app starts a distinct bundled runtime. Tasks on the surviving runtime
-can remain controllable there yet appear in Desktop as controlled from another
-app, without live activity. Since 0.2.1 that attachment is measured per
-dispatch: `desktop-attach.js` reports whether Desktop holds a live connection
-to the selected runtime and can launch or, with owner authorization, relaunch
-the app attached; a lane spawned with that receipt is recorded
-`desktopAttached`, and a lane without it is recorded protocol-only only with
-`--allow-protocol-only`. After a Desktop lifecycle change, run
-`desktop-attach.js ensure` before new cross-host Codex dispatches.
+standalone adapters implement both target providers on the pinned
+compatibility tuple. Claude Desktop/mobile visibility, mobile-originated
+input, and native archive behavior are live-verified on the recorded build
+tuple. Codex Desktop and mobile visibility are live-verified with the app
+attached to the shared runtime: `desktop-attach.js` measures that attachment
+on every check and every dispatch, launches or (with owner authorization)
+relaunches the app attached, and a lane without the receipt is recorded
+protocol-only only with `--allow-protocol-only`. A Desktop restart or update
+drops the attachment; run `desktop-attach.js ensure` before new cross-host
+Codex dispatches.
 
 Managed dispatch now has two provider-neutral contracts. Execution profiles
 resolve a task intent or explicit override to an immutable model, effort, and
@@ -80,7 +75,10 @@ provider claim:
 - Restart each desktop host while its separately managed runtime survives;
   record whether mobile reattaches to the exact lane without changing project
   identity or routing to another app-server process. Codex pre-restart lane
-  reattachment remains a known limitation in 0.2.x.
+  reattachment is a known limitation.
+- Break each setup precondition in turn (logged-out Claude CLI, unattached
+  Codex Desktop, missing runtime) and confirm the doctor names the owner action
+  and that spawn fails closed with that reason rather than an unknown outcome.
 - Leave a dirty managed worktree and confirm cleanup blocks without data loss.
 - Seed foreign sessions with colliding names and short IDs and confirm no
   mutation reaches them.

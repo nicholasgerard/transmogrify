@@ -1,5 +1,12 @@
 'use strict';
 
+// Managed Git worktree seats: planning an immutable seat intent, materializing
+// it, verifying a recorded seat's identity, capturing the pre-retirement harvest
+// receipt, and removing a seat only after provider retirement is verified. A
+// seat must be a real, owner-controlled, symlink-free worktree of this exact
+// repository. Cleanup never removes a seat that is dirty, whose HEAD moved, or
+// that Git still lists, and an unsafe observation blocks it permanently.
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -7,6 +14,9 @@ const { execFileSync } = require('node:child_process');
 const { sanitizedGitEnv } = require('./git-env');
 const { mutateLane, resolveProject } = require('./state');
 
+// A permanent cleanup refusal: observed dirt, a changed HEAD, or an inconsistent
+// Git view. Once raised, automatic cleanup stays blocked pending manual review;
+// later cleanliness does not make the seat eligible again.
 class UnsafeCleanupStateError extends Error {
   constructor(message) {
     super(message);
@@ -15,6 +25,8 @@ class UnsafeCleanupStateError extends Error {
   }
 }
 
+// The seat is not the exact recorded worktree, or its ancestry is not
+// owner-controlled. Always raised before any provider mutation.
 class SeatIdentityError extends Error {
   constructor(message) {
     super(message);
@@ -31,10 +43,14 @@ function seatIdentity(message) {
   return new SeatIdentityError(message);
 }
 
+// Separates a permanent unsafe-state refusal from a transient local failure,
+// which callers report as retryable with no further provider mutation.
 function isPermanentCleanupError(error) {
   return error?.code === 'UNSAFE_CLEANUP_STATE';
 }
 
+// One Git invocation in the sanitized environment. A non-zero exit throws with
+// the child's stderr and is never read as an empty result.
 function git(repoRoot, args, options = {}) {
   try {
     const { env = process.env, ...safeOptions } = options;
@@ -50,11 +66,15 @@ function git(repoRoot, args, options = {}) {
   }
 }
 
+// True only when child is strictly inside parent. Equality and traversal both
+// return false, so a seat can never claim its own root.
 function containsPath(parent, child) {
   const relative = path.relative(parent, child);
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
+// A real directory owned by this user with no group or world write bits.
+// Anything else is a seat identity refusal.
 function requireOwnerControlledDirectory(directory, label) {
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() ||
@@ -64,6 +84,7 @@ function requireOwnerControlledDirectory(directory, label) {
   }
 }
 
+// A managed WORKTREES root must be 0700; any group or world access is refused.
 function requirePrivateManagedRoot(directory) {
   const stat = fs.lstatSync(directory);
   if ((stat.mode & 0o077) !== 0) {
@@ -71,6 +92,8 @@ function requirePrivateManagedRoot(directory) {
   }
 }
 
+// A WORKTREES root inside the repository must be ignored by Git, so managed
+// seats can never be staged or committed. A root outside it is unaffected.
 function requireIgnoredManagedRoot(projectRoot, worktreesRoot) {
   if (!containsPath(projectRoot, worktreesRoot)) return;
   const directoryForm = `${worktreesRoot}${path.sep}`;
@@ -89,6 +112,8 @@ function requireIgnoredManagedRoot(projectRoot, worktreesRoot) {
   }
 }
 
+// An external WORKTREES root must not sit inside any other Git worktree,
+// including a linked one. A path in no repository at all is accepted.
 function requireExternalManagedRootOutsideGit(projectRoot, worktreesRoot) {
   let ancestor = worktreesRoot;
   while (!fs.existsSync(ancestor)) {
@@ -122,6 +147,8 @@ function requireExternalManagedRootOutsideGit(projectRoot, worktreesRoot) {
   }
 }
 
+// Parse the NUL-delimited porcelain worktree listing into one record per
+// worktree, keyed by its first field.
 function parseWorktreeList(raw) {
   const records = [];
   let current = null;
@@ -140,6 +167,8 @@ function parseWorktreeList(raw) {
   return records;
 }
 
+// Resolve a path that may not exist yet, requiring its nearest existing ancestor
+// to be owner-controlled and the resolved result to contain no symlink.
 function canonicalFuturePath(repoRoot, candidate) {
   if (!candidate || !path.isAbsolute(candidate)) {
     throw new Error(`path must be absolute: ${candidate || '(missing)'}`);
@@ -167,6 +196,11 @@ function canonicalFuturePath(repoRoot, candidate) {
   return canonical;
 }
 
+// Prove that a path is a usable lane seat: no symlink traversal, inside an
+// owner-controlled WORKTREES root that lies outside the Git common directory and
+// is ignored where it is in-repository, a Git-recognized worktree of this exact
+// repository checked out on a local branch, and never the operator checkout.
+// Returns the seat identity including its device and inode receipt.
 function verifySeat(repoRoot, seatPath, worktreesRoot) {
   if (!seatPath || !path.isAbsolute(seatPath)) {
     throw seatIdentity(`lane seat must be an absolute path: ${seatPath || '(missing)'}`);
@@ -233,11 +267,16 @@ function verifySeat(repoRoot, seatPath, worktreesRoot) {
   };
 }
 
+// Plan and materialize a managed seat in one step. Spawn paths split the two so
+// the intent becomes durable before anything is created.
 function createManagedSeat(repoRoot, worktreesRoot, laneId, options = {}) {
   const intent = planManagedSeat(repoRoot, worktreesRoot, laneId, options);
   return materializeManagedSeat(repoRoot, intent);
 }
 
+// Reserve the immutable seat intent before anything is created: seat path,
+// branch ref, and base commit. A branch of that name already existing is
+// refused, so a fresh managed seat never adopts unrelated history.
 function planManagedSeat(repoRoot, worktreesRoot, laneId, options = {}) {
   if (!/^[0-9a-f-]{36}$/.test(laneId || '')) {
     throw new Error(`managed worktree requires a UUID lane id: ${laneId || '(missing)'}`);
@@ -283,6 +322,9 @@ function planManagedSeat(repoRoot, worktreesRoot, laneId, options = {}) {
   };
 }
 
+// Re-prove a durable seat intent against the current repository before
+// materializing it: same Git common directory, same canonical WORKTREES root,
+// and the lane's own path directly under that root.
 function verifyManagedSeatIntent(repoRoot, intent) {
   if (!intent || intent.version !== 1 || intent.managed !== true ||
       !/^[0-9a-f-]{36}$/.test(intent.laneId || '') ||
@@ -309,6 +351,10 @@ function verifyManagedSeatIntent(repoRoot, intent) {
   return { project, intent };
 }
 
+// Create the worktree the intent reserved, or adopt an existing seat that
+// matches it exactly. A path or branch collision is refused, as is a branch
+// whose commit no longer equals the reserved base, so recovery can re-run this
+// without silently binding a different tree.
 function materializeManagedSeat(repoRoot, intent) {
   const verified = verifyManagedSeatIntent(repoRoot, intent);
   const { project } = verified;
@@ -353,6 +399,8 @@ function materializeManagedSeat(repoRoot, intent) {
   return { ...seat, managed: true };
 }
 
+// A managed lane's recorded seat must still verify with the same path, root,
+// repository, branch, device, and inode.
 function verifyRecordedSeat(repoRoot, recorded) {
   if (!recorded || recorded.managed !== true) {
     throw seatIdentity('lane seat is not operator-managed');
@@ -366,6 +414,8 @@ function verifyRecordedSeat(repoRoot, recorded) {
   return { ...current, managed: true };
 }
 
+// The seat check every mutation runs first, for managed and external seats
+// alike. Any drift is SEAT_IDENTITY_MISMATCH before a provider is contacted.
 function verifyLaneSeat(repoRoot, recorded) {
   if (!recorded) throw seatIdentity('lane has no recorded seat');
   if (recorded.managed === true) return verifyRecordedSeat(repoRoot, recorded);
@@ -378,6 +428,9 @@ function verifyLaneSeat(repoRoot, recorded) {
   return current;
 }
 
+// The durable pre-retirement receipt: the caller's harvested output digest plus
+// the seat's branch, HEAD, and a digest of its complete visible and ignored file
+// census. Cleanup is later checked against exactly this receipt.
 function captureHarvestReceipt(repoRoot, recorded, outputSha256) {
   if (!/^[0-9a-f]{64}$/.test(outputSha256 || '')) {
     throw new Error('harvested output digest must be a lowercase SHA-256');
@@ -398,6 +451,8 @@ function captureHarvestReceipt(repoRoot, recorded, outputSha256) {
   };
 }
 
+// The seat's full working-tree census: tracked changes, untracked files, and
+// ignored files. Clean means all three are empty.
 function cleanupStatus(seatPath) {
   const visible = git(seatPath, ['status', '--porcelain=v1', '--untracked-files=all']);
   const ignored = git(seatPath, [
@@ -410,6 +465,9 @@ function cleanupStatus(seatPath) {
   };
 }
 
+// Removal is permitted only when the seat was clean at harvest, its identity
+// still verifies, its HEAD is unchanged, and its census is still clean. Every
+// failure is UNSAFE_CLEANUP_STATE and permanently blocks automatic cleanup.
 function verifyHarvestedSeatForCleanup(repoRoot, recorded, harvestReceipt) {
   if (!harvestReceipt || harvestReceipt.version !== 1 ||
       !/^[0-9a-f]{64}$/.test(harvestReceipt.outputSha256 || '') ||
@@ -446,6 +504,11 @@ function pathEntryExists(targetPath) {
   }
 }
 
+// Remove a managed seat inside a lane mutation, and only after provider
+// retirement is verified. An already-absent seat is accepted only with its exact
+// harvest receipt, no surviving Git worktree row, and the preserved branch still
+// at the harvested HEAD. After removal it re-checks that Git neither keeps the
+// path nor moved the branch, restoring the worktree if the branch changed.
 function removeManagedSeat(repoRoot, laneId, harvestReceipt, env = process.env) {
   return mutateLane(repoRoot, laneId, (lane) => {
     if (!['archivedVerified', 'cleanupEligible'].includes(lane.state)) {
