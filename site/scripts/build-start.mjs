@@ -42,7 +42,9 @@ replace it with a branch, tag, or different revision.
    \`\`\`
 
    Keep \`REPO_ROOT\` and \`WORKTREES\` unchanged for the rest of the workflow.
-   Pass both to every managed lane lifecycle call.
+   Pass \`REPO_ROOT\` to repository-bound lifecycle calls. Pass \`WORKTREES\`
+   when spawning a managed lane; later calls recover the exact seat from its
+   durable lane record.
 2. Create a fresh scratch directory outside the target repository, fetch only
    the pinned release commit, and verify the checked-out object and version:
 
@@ -50,6 +52,10 @@ replace it with a branch, tag, or different revision.
    export TRANSMOGRIFY_RELEASE_COMMIT=${releaseCommit}
    export TRANSMOGRIFY_RELEASE_VERSION=${version}
    export TRANSMOGRIFY_SCRATCH="$(mktemp -d)"
+   cleanup_transmogrify_scratch() {
+     test -n "\${TRANSMOGRIFY_SCRATCH:-}" && rm -rf -- "$TRANSMOGRIFY_SCRATCH"
+   }
+   trap cleanup_transmogrify_scratch EXIT HUP INT TERM
    git -C "$TRANSMOGRIFY_SCRATCH" init
    git -C "$TRANSMOGRIFY_SCRATCH" remote add origin https://github.com/nicholasgerard/transmogrify.git
    git -C "$TRANSMOGRIFY_SCRATCH" fetch --depth 1 origin "$TRANSMOGRIFY_RELEASE_COMMIT"
@@ -60,33 +66,75 @@ replace it with a branch, tag, or different revision.
 
    Report the verified version and commit before installation. If either check
    fails, stop; never fall back to the repository default branch.
-3. From the verified scratch checkout, run \`npm ci --ignore-scripts\`,
-   \`./install.sh --dry-run\`, and then \`./install.sh\` only if the preview is
-   safe. Do not replace an unrelated occupied skill directory.
+3. Select exactly one current-host profile. A Codex host uses:
+
+   \`\`\`bash
+   export TRANSMOGRIFY_INSTALL_TARGET=codex
+   export TRANSMOGRIFY_HOST_PROVIDER=codex
+   export TRANSMOGRIFY_HOST_APP=codex-desktop
+   export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
+   \`\`\`
+
+   A Claude Code host uses:
+
+   \`\`\`bash
+   export TRANSMOGRIFY_INSTALL_TARGET=claude
+   export TRANSMOGRIFY_HOST_PROVIDER=claude
+   export TRANSMOGRIFY_HOST_APP=claude-desktop
+   export SKILL_ROOT="$HOME/.claude/skills/transmogrify"
+   \`\`\`
+
+   Do not select a provider merely because its desktop app is installed. Install
+   dependencies and run the installer by absolute path inside the verified
+   scratch checkout, then remove that checkout:
+
+   \`\`\`bash
+   npm --prefix "$TRANSMOGRIFY_SCRATCH" ci --ignore-scripts
+   "$TRANSMOGRIFY_SCRATCH/install.sh" --target "$TRANSMOGRIFY_INSTALL_TARGET" --dry-run
+   "$TRANSMOGRIFY_SCRATCH/install.sh" --target "$TRANSMOGRIFY_INSTALL_TARGET"
+   cleanup_transmogrify_scratch
+   trap - EXIT HUP INT TERM
+   unset -f cleanup_transmogrify_scratch
+   unset TRANSMOGRIFY_SCRATCH
+   \`\`\`
+
+   Do not replace an unrelated occupied skill directory. On a deliberately
+   dual-host machine, update the other host only after this current-host check
+   passes; \`--target all\` is the explicit dual-install option.
 4. Open and follow the installed \`SKILL.md\` completely. Treat its ownership,
    runtime, worktree, receipt, and recovery rules as the operating contract.
    Use the external \`WORKTREES\` root established above instead of the
    inside-repository default.
-5. Use the shared installation as the command root, then run the read-only
-   doctor against the target repository:
+5. Choose target providers independently from the host installation. For
+   turnkey bidirectional operation on a compatible Apple Silicon macOS host,
+   inspect both. A deliberately single-provider host may select only the target
+   it can satisfy:
 
    \`\`\`bash
-   export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
-   node "$SKILL_ROOT/scripts/doctor.js" \\
-     --repo-root "$REPO_ROOT" \\
-     --target codex
+   export TRANSMOGRIFY_DOCTOR_TARGET=all  # or: codex | claude
    \`\`\`
 
-   On a supported Apple Silicon macOS host with the pinned, authenticated
-   Claude Code and Claude Desktop versions, use \`--target all\` so both provider
-   surfaces are checked.
+   Use the selected installation as the command root, then run the read-only
+   doctor against the target repository and selected providers:
+
+   \`\`\`bash
+   node "$SKILL_ROOT/scripts/doctor.js" \\
+     --repo-root "$REPO_ROOT" \\
+     --target "$TRANSMOGRIFY_DOCTOR_TARGET"
+   \`\`\`
+
 6. Reuse a compatible runtime that the doctor verifies. Never kill, restart,
    reconfigure, steer, interrupt, archive, or adopt a runtime or lane that this
    Transmogrify installation does not exactly own. If no compatible Codex
    runtime is available, ask before starting one.
-7. Reconcile only exact-owned pending operations, report the doctor result and
-   any release-gate limitation, then continue with the user's requested work
-   through the installed skill.
+7. Reconcile only exact-owned pending operations. Before the first managed
+   spawn, create or recover the current task's durable parent context with
+   \`TRANSMOGRIFY_HOST_PROVIDER\` and \`TRANSMOGRIFY_HOST_APP\` as specified in
+   \`SKILL.md\`; pass its absolute context file to every spawn and
+   remain in the documented bounded wait/acknowledgement loop until all of its
+   children are handled. Report the doctor result and any release-gate
+   limitation, then continue with the user's requested work through the
+   installed skill.
 
 Transmogrify does not use GUI automation as a lifecycle control channel.
 `;

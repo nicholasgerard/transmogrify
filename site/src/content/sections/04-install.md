@@ -32,10 +32,10 @@ steps:
       Fetch https://transmogrify.sh/start and follow its instructions.
   - title: Point at the installed skill
     body: >-
-      The installer copies the complete skill and tools to Claude's and Codex's
-      documented personal skill locations, moving any existing installation to a
-      timestamped backup outside scanned skill directories. Keep the absolute
-      root it reports.
+      The one-line bootstrap installs the complete skill and tools into the
+      selected host's personal skill location. An explicit dual-host install can
+      populate both. Existing Transmogrify installs move to timestamped backups
+      outside scanned skill directories. Keep the absolute root it reports.
     code: |
       export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
   - title: Run the read-only doctor
@@ -47,28 +47,44 @@ steps:
     code: |
       node "$SKILL_ROOT/scripts/doctor.js" \
         --repo-root "$REPO_ROOT" \
-        --target codex
-  - title: Reuse a runtime before you provision one
+        --target all
+  - title: Reuse a runtime; provision only after authorization
     body: >-
-      If a verified Codex runtime is already listening, use it. Start one only
-      when the machine's owner has authorized this installation to own it — the
-      launcher accepts loopback listeners only, refuses an occupied endpoint
-      that fails the Codex handshake, and reuses a compatible listener instead
-      of killing it.
+      A compatible Codex listener may be reused for protocol control. Native app
+      visibility is a separate current-launch check; a surviving runtime may no
+      longer be attached after Desktop restarts. Start a runtime only when the
+      machine's owner authorizes this installation to own it — never replace an
+      occupied endpoint or another program's runtime. The safe command below
+      only shows the launcher contract; run it without `--help` only after that
+      explicit authorization.
     code: |
-      "$SKILL_ROOT/scripts/runtime-up.sh"
+      "$SKILL_ROOT/scripts/runtime-up.sh" --help
   - title: Open the lane
     body: >-
-      Pass prompt text through stdin so it never appears in the operator
-      command's arguments. The result carries an installation-scoped `laneId` —
-      the only handle you should persist or pass to later operations.
+      Create or recover one durable parent context, then pass prompt text
+      through stdin so it never appears in the operator command's arguments.
+      The result carries installation-scoped `laneId` and `dispatchId` values;
+      persist those exact handles and keep listening until the child returns.
+      The example explicitly creates a protocol-only Codex lane; it does not
+      claim current Desktop/mobile attachment.
     code: |
+      export HOST_PROVIDER=codex       # or: claude
+      export HOST_APP=codex-desktop    # or: claude-desktop
+      PARENT_JSON=$(node "$SKILL_ROOT/scripts/lane.js" parent-init \
+        --host-provider "$HOST_PROVIDER" \
+        --host-app "$HOST_APP" \
+        --name 'Repository operator')
+      export PARENT_CONTEXT=$(printf '%s' "$PARENT_JSON" | node -e \
+        'const fs=require("node:fs");process.stdout.write(JSON.parse(fs.readFileSync(0,"utf8")).contextFile)')
       printf '%s\n' 'Inspect the failing tests and report the smallest safe fix.' |
         node "$SKILL_ROOT/scripts/lane.js" spawn \
           --repo-root "$REPO_ROOT" \
           --worktrees "$WORKTREES" \
           --target codex \
-          --name '[codex] tests: diagnose failure' \
+          --name 'tests: diagnose failure' \
+          --parent-context-file "$PARENT_CONTEXT" \
+          --intent balanced \
+          --allow-protocol-only \
           --input-file -
 footnote: >-
   Every advertised tool accepts `--help`. Standalone Codex turns run with the
@@ -79,6 +95,7 @@ footnote: >-
 
 Before you begin, confirm the requirements: Git, Bash, `ps`, and `lsof`; a
 target repository that is its exact absolute Git worktree root with at least
-one commit; and — because the Codex app-server socket is an unauthenticated
-local control plane — the understanding that every local client on that machine
-is inside the trust boundary.
+one commit; and — because Transmogrify's accepted root-path loopback Codex
+configuration does not use WebSocket authentication — the understanding that
+every local client on that machine is inside that configuration's trust
+boundary.

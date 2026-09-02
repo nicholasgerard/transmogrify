@@ -52,8 +52,15 @@ describe('the start prompt', () => {
   });
 
   test('installs without lifecycle scripts and previews first', () => {
-    assert.match(remotePrompt, /npm ci\s+--ignore-scripts/);
-    assert.match(remotePrompt, /\.\/install\.sh --dry-run/);
+    assert.match(
+      remotePrompt,
+      /npm --prefix "\$TRANSMOGRIFY_SCRATCH" ci --ignore-scripts/,
+    );
+    assert.match(
+      remotePrompt,
+      /"\$TRANSMOGRIFY_SCRATCH\/install\.sh" --target "\$TRANSMOGRIFY_INSTALL_TARGET" --dry-run/,
+    );
+    assert.match(remotePrompt, /cleanup_transmogrify_scratch/);
   });
 
   test('pins and verifies one exact public release commit', () => {
@@ -76,7 +83,10 @@ describe('the start prompt', () => {
   });
 
   test('names both host targets so it works pasted into either agent', () => {
-    assert.match(remotePrompt, /--target codex/);
+    assert.match(remotePrompt, /TRANSMOGRIFY_INSTALL_TARGET=codex/);
+    assert.match(remotePrompt, /TRANSMOGRIFY_INSTALL_TARGET=claude/);
+    assert.match(remotePrompt, /\.agents\/skills\/transmogrify/);
+    assert.match(remotePrompt, /\.claude\/skills\/transmogrify/);
     assert.match(remotePrompt, /--target all/);
     assert.match(remotePrompt, /Codex or Claude Code/);
   });
@@ -120,6 +130,17 @@ describe('the rendered install sequence', () => {
     assert.match(source, /scripts\/doctor\.js[\s\S]*--repo-root "\$REPO_ROOT"/);
     assert.match(source, /scripts\/lane\.js[\s\S]*--repo-root "\$REPO_ROOT"/);
     assert.match(source, /--worktrees "\$WORKTREES"/);
+  });
+
+  test('creates a durable parent and dispatches with lineage and an execution intent', () => {
+    assert.match(source, /lane\.js" parent-init/);
+    assert.match(source, /HOST_PROVIDER=codex/);
+    assert.match(source, /HOST_APP=codex-desktop/);
+    assert.match(source, /--host-provider "\$HOST_PROVIDER"/);
+    assert.match(source, /--host-app "\$HOST_APP"/);
+    assert.match(source, /--parent-context-file "\$PARENT_CONTEXT"/);
+    assert.match(source, /--intent balanced/);
+    assert.match(source, /persist those exact handles and keep listening until the child returns/i);
   });
 });
 

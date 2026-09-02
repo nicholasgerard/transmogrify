@@ -24,9 +24,10 @@ ledger:
   - term: Native app visibility
     tone: affirm
     detail: >-
-      Managed lanes use the provider's native Code surfaces. Current support,
-      dated observations, client-build limits, and release gates come from the
-      repository support matrix and protocol receipts rendered below.
+      Managed lanes use the provider's native Code surfaces only when the
+      current host-integration receipt passes. Dated observations, client-build
+      limits, and release gates come from the repository support matrix and
+      protocol receipts rendered below.
   - term: GUI automation
     tone: deny
     detail: >-

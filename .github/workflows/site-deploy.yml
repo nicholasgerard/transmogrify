@@ -1,7 +1,7 @@
 name: Site deploy
 
-# Prepared but inert until the repository variable below is set to `true`.
-# The repository contains no Cloudflare account identifier or deployment token.
+# Production deploys remain gated by the repository variable and protected
+# environment; credentials are stored only in GitHub configuration.
 on:
   push:
     branches: [main]
@@ -44,9 +44,42 @@ jobs:
           fi
         working-directory: .
 
+  runtime:
+    name: release runtime gate
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install runtime from lockfile
+        run: npm ci --ignore-scripts
+        working-directory: .
+
+      - name: Test, syntax-check, and audit runtime package
+        shell: bash
+        run: |
+          npm test
+          for file in scripts/*.js scripts/lib/*.js test/*.js test/helpers/*.js; do
+            node --check "$file"
+          done
+          for file in scripts/*.sh install.sh; do
+            bash -n "$file"
+          done
+          npm pack --dry-run
+        working-directory: .
+
   deploy:
     name: verified production deploy
-    needs: gate
+    needs: [gate, runtime]
     if: needs.gate.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -308,10 +308,9 @@ job verifies that object before building. Credentials are released only through
 the protected `production` environment. Wrangler and every GitHub Action are
 pinned.
 
-Production deployment for this repository was activated on 2026-09-02. The
-environment accepts only `main`, the Cloudflare credential is restricted to The
-Brooklyn App Company account and the `transmogrify.sh` zone, and analytics
-remains unset.
+Production deployment is live as of 2026-09-02. The protected environment
+accepts only `main`, its Cloudflare credential is restricted to the deployment
+account and the `transmogrify.sh` zone, and analytics remains unset.
 
 Cloudflare receipts, verified 2026-09-01:
 

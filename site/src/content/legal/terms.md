@@ -60,9 +60,10 @@ The site's content is available under the terms described in section 6.
 ## 4. The documentation is descriptive, not a guarantee
 
 This site summarises what Transmogrify does. The authoritative statements live
-in the repository: `SKILL.md`, `docs/PROTOCOL.md`, `docs/CLAUDE-CODE.md`, and
-`SECURITY.md`. Where this website and those documents disagree, **the
-repository is correct** and the website is out of date.
+in the repository: `SKILL.md`, `docs/PROTOCOL.md`, `docs/CLAUDE-CODE.md`,
+`docs/EXECUTION-PROFILES.md`, `docs/DISPATCH.md`, and `SECURITY.md`. Where this
+website and those documents disagree, **the repository is correct** and the
+website is out of date.
 
 Compatibility claims on this site are tied to specific, named versions of
 third-party tools and were verified on a stated date. Software you install

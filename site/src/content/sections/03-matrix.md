@@ -15,9 +15,10 @@ gated:
     builds outside the exact live-verified tuple recorded in the skill and
     Claude integration contract.
   - >-
-    Reliable mobile execution is not yet claimed for a Codex lane created
-    before ChatGPT Desktop restarts. A fresh post-restart lane succeeds, but
-    exact pre-restart reattachment remains a documented 0.1.0 limitation.
+    A compatible Codex app-server handshake does not prove that the current
+    ChatGPT Desktop launch or paired mobile app is attached to that runtime.
+    After a Desktop restart or update, pause new cross-host dispatches until a
+    disposable exact-owned lane visibly streams in the current app.
   - >-
     Claude lifecycle mutations run only on Apple Silicon macOS with the pinned
     Claude Code CLI, a first-party `claude.ai` account, and the default config
@@ -43,10 +44,12 @@ footnote: >-
   on this page as implemented and verified, treat it as unavailable.
 ---
 
-Both orchestrators can create Codex lanes that render in the Codex and ChatGPT
-desktop and mobile apps. The Claude adapter creates named local Claude Code
-Remote Control sessions, which execute on your machine and connect outward
-through Anthropic over TLS.
+On the recorded compatibility tuple, both orchestrators created Codex lanes
+that rendered in the Codex and ChatGPT desktop and mobile apps. A current-launch
+visibility receipt remains required because the app can own a different runtime
+after restart. The Claude adapter creates named local Claude Code Remote Control
+sessions, which execute on your machine and connect outward through Anthropic
+over TLS.
 
 A same-provider orchestrator may prefer its own built-in task tool — but only
 when that tool exposes the full contract: exact identity, native visibility,

@@ -21,8 +21,23 @@ describe('renderStart', () => {
     assert.match(source, /export WORKTREES=/);
     assert.match(source, /createHash\("sha256"\)/);
     assert.match(source, /install -d -m 700 "\$WORKTREES"/);
-    assert.ok(source.indexOf('export WORKTREES=') < source.indexOf('npm ci --ignore-scripts'));
-    assert.match(source, /Pass both to every managed lane lifecycle call/);
+    const npmInstall = 'npm --prefix "$TRANSMOGRIFY_SCRATCH" ci --ignore-scripts';
+    assert.ok(source.indexOf('export WORKTREES=') < source.indexOf(npmInstall));
+    assert.match(source, /"\$TRANSMOGRIFY_SCRATCH\/install\.sh" --target/);
+    assert.ok(source.indexOf(npmInstall) < source.indexOf('install.sh" --target'));
+    assert.match(source, /cleanup_transmogrify_scratch/);
+    assert.match(source, /Pass `REPO_ROOT` to repository-bound lifecycle calls/);
+    assert.match(source, /Pass `WORKTREES`[\s\S]*when spawning a managed lane/);
+    assert.match(source, /TRANSMOGRIFY_INSTALL_TARGET=codex/);
+    assert.match(source, /TRANSMOGRIFY_INSTALL_TARGET=claude/);
+    assert.match(source, /TRANSMOGRIFY_HOST_PROVIDER=codex/);
+    assert.match(source, /TRANSMOGRIFY_HOST_PROVIDER=claude/);
+    assert.match(source, /TRANSMOGRIFY_DOCTOR_TARGET=all/);
+    assert.match(source, /\.agents\/skills\/transmogrify/);
+    assert.match(source, /\.claude\/skills\/transmogrify/);
+    assert.match(source, /--target "\$TRANSMOGRIFY_DOCTOR_TARGET"/);
+    assert.match(source, /create or recover the current task's durable parent context/);
+    assert.match(source, /bounded wait\/acknowledgement loop/);
     assert.doesNotMatch(source, /git clone|origin main/);
   });
 

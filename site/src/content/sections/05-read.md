@@ -29,6 +29,16 @@ docs:
       spawn correlation works, the safe-point steering receipt, and exactly
       where the pinned private archive boundary sits.
     path: docs/CLAUDE-CODE.md
+  - title: Execution profiles
+    detail: >-
+      Provider-neutral task intents, exact model selectors and aliases, effort
+      guidance, Standard/Fast controls, immutable receipts, and recovery rules.
+    path: docs/EXECUTION-PROFILES.md
+  - title: Dispatch and parent notification
+    detail: >-
+      Durable parent identity, child lineage, the visible provenance block,
+      at-least-once events, acknowledgement, and restart-safe waiting.
+    path: docs/DISPATCH.md
   - title: Security policy
     detail: >-
       Trust boundaries, the ownership rules, credential handling for the gated
