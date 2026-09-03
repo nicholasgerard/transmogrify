@@ -56,6 +56,9 @@ const onLanding = Astro.url.pathname === '/' || Astro.url.pathname === '';
   .brand {
     display: inline-flex;
     align-items: center;
+    /* Keeps the home link at or above the 24px minimum target size even once
+       the version chip is hidden at phone widths. */
+    min-block-size: 2.75rem;
     gap: var(--s-2);
     text-decoration: none;
     flex: none;

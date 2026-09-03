@@ -9,28 +9,28 @@ lede: >-
   to the other and watch it run.
 module: ledger
 ledger:
-  - term: Either app drives either agent
+  - term: Work in either direction
     tone: affirm
     detail: >-
       Claude Code can hand a job to Codex, and Codex can hand one back. The
       commands are the same in either direction.
-  - term: Every job gets its own worktree
+  - term: A separate worktree per job
     tone: affirm
     detail: >-
       Jobs run in separate checkouts, so two agents never edit the same files.
       A worktree is removed only if nothing changed in it after you collected
       the work.
-  - term: You can watch it in the app
+  - term: Named sessions you can watch
     tone: affirm
     detail: >-
       Jobs show up as named sessions in Codex Desktop, the ChatGPT app, and
       Claude's Remote Control, on your laptop or your phone.
-  - term: Work outlives the session that started it
+  - term: Jobs that outlive their operator
     tone: affirm
     detail: >-
       Close the agent that kicked a job off and the job keeps running under the
       same name. Pick it up again whenever you want.
-  - term: No server, no account, no telemetry
+  - term: A server, an account, or telemetry
     tone: deny
     detail: >-
       A skill and a few Node scripts on your machine. Nothing phones home, and

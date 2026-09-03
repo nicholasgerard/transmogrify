@@ -68,11 +68,28 @@ const [rowHeader, ...columnHeaders] = headers;
 </div>
 
 <style>
+  /*
+   * The table scrolls inside this wrapper rather than widening the page. The
+   * four background layers are the classic pure-CSS scroll shadow: the two
+   * `local` gradients travel with the content and mask the shadows at the ends,
+   * so an edge shadow appears only while there is more table in that
+   * direction. No script, and nothing to keep in sync.
+   */
   .table-wrap {
     overflow-x: auto;
+    overscroll-behavior-x: contain;
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    background: var(--bg-raised);
+    background:
+      linear-gradient(to right, var(--bg-raised) 30%, transparent),
+      linear-gradient(to left, var(--bg-raised) 30%, transparent),
+      radial-gradient(farthest-side at 0 50%, var(--scroll-shade), transparent),
+      radial-gradient(farthest-side at 100% 50%, var(--scroll-shade), transparent)
+      var(--bg-raised);
+    background-position: 0 0, 100% 0, 0 0, 100% 0;
+    background-repeat: no-repeat;
+    background-size: 3rem 100%, 3rem 100%, 0.85rem 100%, 0.85rem 100%;
+    background-attachment: local, local, scroll, scroll;
   }
 
   table {
@@ -195,6 +212,7 @@ const [rowHeader, ...columnHeaders] = headers;
       border-radius: 0;
       background: transparent;
     }
+
 
     table,
     thead,

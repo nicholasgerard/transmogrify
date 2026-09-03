@@ -35,6 +35,7 @@
   --warn-wash: rgba(232, 184, 75, 0.1);
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 18px 46px -28px rgba(0, 0, 0, 0.9);
   --grid-line: rgba(87, 224, 143, 0.055);
+  --scroll-shade: rgb(0 0 0 / 32%);
 }
 
 @media (prefers-color-scheme: light) {
@@ -59,6 +60,7 @@
     --warn-wash: rgba(122, 78, 5, 0.08);
     --shadow: 0 1px 0 rgba(255, 255, 255, 0.7), 0 16px 40px -30px rgba(8, 21, 14, 0.45);
     --grid-line: rgba(10, 109, 61, 0.035);
+    --scroll-shade: rgb(8 21 14 / 14%);
   }
 }
 
@@ -83,6 +85,7 @@
   --warn-wash: rgba(122, 78, 5, 0.08);
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.7), 0 16px 40px -30px rgba(8, 21, 14, 0.45);
   --grid-line: rgba(10, 109, 61, 0.035);
+  --scroll-shade: rgb(8 21 14 / 14%);
 }
 
 :root {
@@ -112,6 +115,13 @@
   --radius-sm: 3px;
   --radius: 6px;
   --radius-lg: 10px;
+
+  /* One easing curve and three durations, so every transition on the site
+     feels like it came from the same hand. */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-1: 120ms;
+  --dur-2: 220ms;
+  --dur-3: 420ms;
 
   --measure: 68ch;
   --shell: 76rem;
@@ -177,7 +187,7 @@ a {
   text-decoration-thickness: 1px;
   text-underline-offset: 0.22em;
   text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
-  transition: color 120ms ease, text-decoration-color 120ms ease;
+  transition: color var(--dur-1) var(--ease), text-decoration-color var(--dur-1) var(--ease);
 }
 
 a:hover {
@@ -246,7 +256,7 @@ table {
   font-weight: 600;
   border-radius: var(--radius);
   transform: translateY(calc(-100% - 1.5rem));
-  transition: transform 140ms ease;
+  transition: transform var(--dur-2) var(--ease);
   text-decoration: none;
 }
 
@@ -332,7 +342,10 @@ table {
   background: var(--bg-inset);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 0.1em 0.35em;
+  padding: 0.08em 0.3em;
+  /* The chip is wider than its glyphs, which leaves a visible gap before a
+     following period. Pull the box back by roughly its own padding. */
+  margin-inline: -0.06em;
   color: var(--text);
   overflow-wrap: anywhere;
 }
@@ -364,6 +377,96 @@ table {
 
 /* ---------------------------------------------------------------- motion -- */
 
+/*
+ * Three kinds of movement, all of them optional:
+ *
+ *   1. a one-time entrance for the hero, so the first screen assembles rather
+ *      than appears;
+ *   2. a scroll-linked reveal for each section, driven entirely by
+ *      `animation-timeline: view()` — no observer, no script, and no chance of
+ *      content being stranded invisible in a browser that lacks it;
+ *   3. a cross-fade between pages via cross-document view transitions, with
+ *      the masthead and footer held still across the navigation.
+ *
+ * Every one of them is inside `prefers-reduced-motion: no-preference` or is
+ * cancelled below, and none of them moves layout, so nothing here can cost a
+ * layout shift.
+ */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero-inner > * {
+    animation: rise var(--dur-3) var(--ease) both;
+  }
+
+  .hero-inner > :nth-child(2) {
+    animation-delay: 60ms;
+  }
+
+  .hero-inner > :nth-child(3) {
+    animation-delay: 120ms;
+  }
+
+  .hero-inner > :nth-child(4) {
+    animation-delay: 180ms;
+  }
+
+  .hero-inner > :nth-child(5) {
+    animation-delay: 240ms;
+  }
+
+  .hero-inner > :nth-child(6) {
+    animation-delay: 300ms;
+  }
+
+  @supports (animation-timeline: view()) {
+    .section {
+      animation: rise linear both;
+      animation-timeline: view();
+      animation-range: entry 12% cover 22%;
+    }
+
+    /* The masthead earns its edge only once the page has moved under it. */
+    .site-header {
+      animation: masthead-edge linear both;
+      animation-timeline: scroll();
+      animation-range: 0 5rem;
+    }
+
+    @keyframes masthead-edge {
+      to {
+        box-shadow: 0 1px 0 var(--line), 0 10px 30px -24px rgb(0 0 0 / 55%);
+      }
+    }
+  }
+}
+
+/* Cross-document transitions: supported browsers cross-fade the page body and
+   keep the masthead and footer in place; the rest get an ordinary navigation. */
+@view-transition {
+  navigation: auto;
+}
+
+.site-header {
+  view-transition-name: masthead;
+}
+
+.site-footer {
+  view-transition-name: colophon;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: var(--dur-2);
+  animation-timing-function: var(--ease);
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
@@ -376,6 +479,14 @@ table {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* `*` does not reach the view-transition pseudo-elements, so they are
+     cancelled by name. */
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
   }
 }
 
