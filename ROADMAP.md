@@ -164,6 +164,13 @@ project on the same machine (reported to the owner).
 
 ## Priority 1: compatibility and acceptance hardening
 
+- Onboarding that works wherever the start prompt lands: compatibility by
+  range and measurement instead of exact pins, host context detection, a
+  doctor that explains its plan in plain words, guided installs with
+  consent, one install for both hosts, and a rewritten start handoff. The
+  brief, specification, and implementation plan are in
+  [docs/ONBOARDING.md](docs/ONBOARDING.md); queued for a Codex worker.
+
 - Claude resume lineage. On CLI `2.1.258` a background resume of a stopped
   job forks a new session; the adapter stops that fork and leaves the lane
   stopped. Plan: (1) measure on a disposable lane what the CLI produces on
