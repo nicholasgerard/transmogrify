@@ -96,6 +96,7 @@ const SCHEMAS = Object.freeze({
   }, { turn: { status: true }, rawState: { type: true, activeFlags: true }, waiting: true }),
   steer: laneShape({
     mode: true, observation: true, observedAtOffset: true, deliveryTokenSha256: true,
+    expectedTurnId: true, turnId: true,
   }),
   interrupt: laneShape({ reconciled: true }),
   stop: laneShape({ mode: true, alreadyStopped: true }),

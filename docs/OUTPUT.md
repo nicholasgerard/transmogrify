@@ -71,7 +71,8 @@ Lane envelope plus `turn` (`status`), `rawState` (`type`, `activeFlags`),
 ### `steer`
 
 Lane envelope. `receipt`: `mode`, `observation`, `observedAtOffset`,
-`deliveryTokenSha256`.
+`deliveryTokenSha256` (Claude); `expectedTurnId`, `turnId` (Codex, the turn
+the steer was addressed to and the turn the runtime confirmed).
 
 ### `interrupt`
 
