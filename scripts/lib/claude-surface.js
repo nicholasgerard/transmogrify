@@ -921,17 +921,34 @@ function createClaudeSurface(dependencies = {}) {
 
   // Whether a record is this exact content queued for the session or already
   // consumed by it.
+  // The framed content ends with a unique delivery marker, so it is matched
+  // as a substring: the CLI wraps a peer follow-up with its own prefix and
+  // trailing guidance before the session sees it.
+  function carriesFramedContent(text, content) {
+    return typeof text === 'string' && (text === content || text.includes(content));
+  }
   function transcriptObservation(record, sessionId, content) {
     if (record?.type === 'queue-operation' && record.operation === 'enqueue' &&
-        record.sessionId === sessionId && record.content === content &&
+        record.sessionId === sessionId && carriesFramedContent(record.content, content) &&
         typeof record.timestamp === 'string') {
       return 'queuedObserved';
     }
-    if (transcriptContent(record) === content &&
+    if (carriesFramedContent(transcriptContent(record), content) &&
         (record.sessionId === undefined || record.sessionId === sessionId)) {
       return 'consumedObserved';
     }
     return null;
+  }
+  // The message that precedes a delivery marker, with the CLI's peer-message
+  // prefix removed when present. Returns every candidate the caller may hash.
+  const PEER_MESSAGE_PREFIX = /^Another Claude session sent a message:\s*/u;
+  function framedMessageCandidates(content, suffix) {
+    if (typeof content !== 'string') return [];
+    const first = content.indexOf(suffix);
+    if (first < 0 || first !== content.lastIndexOf(suffix)) return [];
+    const segment = content.slice(0, first);
+    const stripped = segment.replace(PEER_MESSAGE_PREFIX, '');
+    return stripped === segment ? [segment] : [segment, stripped];
   }
 
   // Open the transcript with O_NOFOLLOW and require the descriptor's device and
@@ -1054,6 +1071,11 @@ function createClaudeSurface(dependencies = {}) {
         const originalPrompt = content.slice(0, -suffix.length);
         if (sha256(originalPrompt) === expected.promptSha256) matches += 1;
       }
+      if (matches === 0) {
+        // The session may not have written its first message yet; the caller
+        // retries inside a bounded window before treating this as uncertain.
+        throw new ClaudeSurfaceError('TRANSCRIPT_RECEIPT_PENDING', 'Claude spawn prompt is not receipted in the transcript yet');
+      }
       if (matches !== 1) {
         throw new ClaudeSurfaceError('SPAWN_UNCERTAIN', 'Claude spawn prompt is not uniquely receipted');
       }
@@ -1102,9 +1124,8 @@ function createClaudeSurface(dependencies = {}) {
         const isQueued = record?.type === 'queue-operation' && record.operation === 'enqueue' &&
           record.sessionId === sessionId && typeof record.content === 'string';
         const content = isQueued ? record.content : transcriptContent(record);
-        if (typeof content !== 'string' || !content.endsWith(suffix)) continue;
-        const message = content.slice(0, -suffix.length);
-        if (sha256(message) !== expected.messageSha256) continue;
+        const candidates = framedMessageCandidates(content, suffix);
+        if (!candidates.some((message) => sha256(message) === expected.messageSha256)) continue;
         if (isQueued) queued += 1;
         else consumed += 1;
       }

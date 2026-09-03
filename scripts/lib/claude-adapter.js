@@ -64,6 +64,15 @@ function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 // A dispatched spawn whose job is missing from the census this long after the
 // launch finished is treated as gone rather than still registering.
 const SPAWN_ABSENCE_GRACE_MS = 60_000;
+// A freshly launched session writes its transcript and registers Remote
+// Control a few seconds after the CLI returns. Spawn verification retries
+// those two receipts inside this window instead of declaring the spawn
+// uncertain on the first read.
+const SPAWN_VERIFY_TIMEOUT_MS = 30_000;
+const SPAWN_VERIFY_DELAY_MS = 500;
+const RETRYABLE_SPAWN_RECEIPT_CODES = new Set([
+  'TRANSCRIPT_RECEIPT_PENDING', 'REMOTE_CONTROL_UNAVAILABLE', 'DELIVERY_UNCERTAIN',
+]);
 const UNBOUND_PROVIDER_RECEIPT = Object.freeze({
   unbound: true, stop: 'notAttempted', archive: 'notAttempted', localRemoval: 'notAttempted',
 });
@@ -620,14 +629,7 @@ async function finalizeSpawn(options, env, surface, runtime, lane, operation, jo
     throw new ClaudeTransmogrifyError('SPAWN_UNCERTAIN', 'spawned Claude job could not be attributed to one exact session');
   }
   const candidate = located.result;
-  const transcript = surface.verifySpawnTranscript(runtime, candidate.sessionId, {
-    spawnNonce: lane.ownership.spawnIntent.spawnNonce,
-    promptSha256: lane.ownership.spawnIntent.promptSha256,
-    promptMarkerSha256: lane.ownership.spawnIntent.promptMarkerSha256,
-  });
-  const discovery = surface.discoverExecution(runtime, {
-    sessionId: candidate.sessionId, jobId, name: lane.displayName, cwd: lane.seat.path,
-  }, candidate, deadline === null ? {} : { timeoutMs: remainingCommandMs(deadline) });
+  const { transcript, discovery } = await awaitSpawnReceipts(options, surface, runtime, lane, jobId, candidate, deadline);
   lane = bindClaudeSpawnObservation(options.repoRoot, lane.laneId, {
     sessionId: candidate.sessionId, jobId, bridgeId: discovery.bridgeId,
     creationReceipt: creationReceipt(candidate, jobId, discovery, stdout, runtime, transcript),
@@ -2048,6 +2050,41 @@ async function reconcilePendingSpawn(options, env, surface, runtime, lane, opera
     lane: finalized.lane, outcome: 'spawnBoundFromDurableReceipt',
     presentation: finalized.presentation.state,
   };
+}
+
+// Read the transcript receipt and the worker identity, retrying only the
+// "not yet" failures (transcript not written, bridge not registered) inside a
+// bounded window. Any other failure, and the last failure once the window
+// closes, propagates with its own code so the journal records the cause.
+async function awaitSpawnReceipts(options, surface, runtime, lane, jobId, candidate, deadline) {
+  const timeoutMs = options.spawnVerifyTimeoutMs ?? SPAWN_VERIFY_TIMEOUT_MS;
+  const delayMs = options.spawnVerifyDelayMs ?? SPAWN_VERIFY_DELAY_MS;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || !Number.isInteger(delayMs) || delayMs < 0) {
+    throw new ClaudeTransmogrifyError('USAGE_ERROR', 'spawn verification window must be non-negative integers');
+  }
+  const windowEnd = Date.now() + timeoutMs;
+  const expectation = {
+    spawnNonce: lane.ownership.spawnIntent.spawnNonce,
+    promptSha256: lane.ownership.spawnIntent.promptSha256,
+    promptMarkerSha256: lane.ownership.spawnIntent.promptMarkerSha256,
+  };
+  const expected = {
+    sessionId: candidate.sessionId, jobId, name: lane.displayName, cwd: lane.seat.path,
+  };
+  let transcript = null;
+  for (;;) {
+    try {
+      if (!transcript) transcript = surface.verifySpawnTranscript(runtime, candidate.sessionId, expectation);
+      const discovery = surface.discoverExecution(runtime, expected, candidate,
+        deadline === null ? {} : { timeoutMs: remainingCommandMs(deadline) });
+      return { transcript, discovery };
+    } catch (error) {
+      const retryable = RETRYABLE_SPAWN_RECEIPT_CODES.has(error?.code);
+      const remaining = Math.min(windowEnd - Date.now(), deadline === null ? Infinity : deadline - Date.now() - 100);
+      if (!retryable || remaining <= 0) throw error;
+      await sleep(Math.min(delayMs, Math.max(0, remaining)));
+    }
+  }
 }
 
 // Whether the dispatched job has vanished from the provider census. Only an

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.3
+
+- Wait for a Claude session's first receipts: spawn retries the transcript
+  receipt and the Remote Control bridge inside a 30 s window instead of
+  declaring the spawn uncertain on the first read, and the public refusal
+  now carries `causeCode`, `causeMessage`, and `ownerAction`.
+- Match a Claude delivery receipt anywhere in the record: the CLI wraps a
+  peer follow-up as "Another Claude session sent a message: …" with guidance
+  appended after the marker, which made every delivered steer report as
+  unknown.
+- Reword the provenance block (version 3) to say the task comes from the
+  user's own session and that the child works within its normal permissions,
+  after an acceptance probe read the anonymous dispatch banner as a takeover
+  attempt and declined.
+
 ## 0.2.2
 
 - Name the failing check when a Claude spawn cannot be verified: the refusal

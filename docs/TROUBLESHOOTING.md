@@ -36,6 +36,7 @@ Add `--url` only to Codex commands when the runtime is not the default
 | `NO_ACTIVE_TURN`, unmarked or foreign native rows | [Codex lane and native row symptoms](#codex-lane-and-native-row-symptoms) |
 | Mobile task fails after a Desktop restart | [Codex mobile Remote access](#codex-mobile-remote-access) |
 | Claude CLI, account, Desktop, or Keychain refusal | [Claude compatibility or authentication problems](#claude-compatibility-or-authentication-problems) |
+| `SPAWN_UNCERTAIN` with `causeCode` `TRANSCRIPT_RECEIPT_PENDING` or `REMOTE_CONTROL_UNAVAILABLE`, `spawnJobAbsent` | [Claude spawn did not verify](#claude-spawn-did-not-verify) |
 | `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
 | `CLEANUP_RETRYABLE`, `CLEANUP_BLOCKED` | [Cleanup is blocked](#cleanup-is-blocked) |
 
@@ -309,6 +310,21 @@ setup or a compatibility refresh, not a blind retry. If the exact stop was
 already verified, the error receipt says so separately. An auth/trust failure
 before archive dispatch leaves archive not attempted; the same failure after
 POST dispatch is archive-unknown and requires observation, not replay.
+
+## Claude spawn did not verify
+
+A Claude spawn returns `SPAWN_UNCERTAIN` when the session launched but one of
+its receipts could not be verified. The refusal and the lane's journal carry
+`causeCode` and `causeMessage`:
+
+| Cause | Meaning | Repair |
+| --- | --- | --- |
+| `TRANSCRIPT_RECEIPT_PENDING` | The session had not written its first message inside the 30 s verification window | Run `reconcile --target claude --lane <laneId>`; it binds the lane from the durable receipt once the transcript has caught up |
+| `REMOTE_CONTROL_UNAVAILABLE` | The worker never registered Remote Control, almost always because the Claude login broke at launch (`claude auth status` shows logged out, the session log shows `/rc failed`) | Restore the login with `claude auth login`; the lane cannot be bound. Stop and remove that exact session (`claude agents --all` lists it under the lane title), run `reconcile` so the lane settles as `spawnJobAbsent`, then `retire` it with a harvest digest to free its seat |
+| `spawnJobAbsent` (reconcile outcome) | The dispatched job is absent from every census more than a minute after launch | Nothing to repair: the journal is closed, the parent receives `child.failed`, and `retire` frees the managed seat without any provider mutation |
+
+Reconcile never replays a spawn. A lane whose job is still listed keeps its
+journal open and repeats the cause and the owner action on every reconcile.
 
 ## Pending or uncertain operation
 

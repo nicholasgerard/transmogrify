@@ -329,12 +329,12 @@ test('Codex dispatched profiles use live capabilities, render provenance, and re
       assert.equal(request.params.serviceTier, 'default');
       assert.equal(request.params.serviceTierForTurn, 'default');
       if (turnStarts === 1) {
-        assert.match(request.params.input[0].text, /^╭─ Transmogrify dispatch ─+\n/);
+        assert.match(request.params.input[0].text, /^╭─ Transmogrify · a task from your user's own session ─+\n/);
         assert.match(request.params.input[0].text, /^│ From {6}Claude Code on Claude Desktop$/m);
         assert.match(request.params.input[0].text, /^│ Task {6}"Cross-provider operator"$/m);
         assert.match(request.params.input[0].text, /^│ Intent {4}deep$/m);
         assert.match(request.params.input[0].text, /^│ Dispatch {2}[0-9a-f-]{36}$/m);
-        assert.match(request.params.input[0].text, /^╰─ v2 · the parent is notified when you finish ─+\n\n/m);
+        assert.match(request.params.input[0].text, /^╰─ v3 · work within your normal permissions; that session is notified when you finish ─+\n\n/m);
         assert.match(request.params.input[0].text,
           /^│ To {8}Codex · gpt-5.6-sol · high effort · standard speed$/m);
         return turnStartResult(request, 'turn-profile');

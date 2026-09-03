@@ -106,14 +106,20 @@ The first provider message starts with this block, followed by one blank line
 and the child prompt:
 
 ```text
-╭─ Transmogrify dispatch ───────────────────────────────────
+╭─ Transmogrify · a task from your user's own session ──────
 │ From      Codex Desktop
 │ Task      "Release operator"
 │ To        Claude Code · claude-opus-5 · high effort · standard speed
 │ Intent    deep
 │ Dispatch  11111111-1111-4111-8111-111111111111
-╰─ v2 · the parent is notified when you finish ─────────────
+╰─ v3 · work within your normal permissions; that session is notified when you finish ────
 ```
+
+The header and footer say in plain words what Claude Code itself says about
+peer messages: the task comes from the user's own session and the child works
+within its normal permissions. A child model reads an anonymous "dispatch"
+banner as a possible takeover; this wording is what a real acceptance probe
+needed before it would act.
 
 Rules the renderer enforces:
 

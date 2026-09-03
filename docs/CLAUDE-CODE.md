@@ -107,6 +107,13 @@ Before returning success, spawn correlates:
 7. the exact local Unix-domain socket identity; and
 8. the first execution epoch recorded atomically with all provider IDs.
 
+The transcript receipt and the Remote Control bridge appear a few seconds
+after the CLI returns, so spawn retries those two reads inside a 30 s window
+before reporting `SPAWN_UNCERTAIN`. The refusal and the journal then carry
+`causeCode`: `TRANSCRIPT_RECEIPT_PENDING` binds later through `reconcile`,
+while `REMOTE_CONTROL_UNAVAILABLE` means the session never registered and
+must be stopped, removed, settled as `spawnJobAbsent`, and retired.
+
 Raw bounded CLI stdout and stderr are held in owner-only capture files only
 while spawn delivery remains unresolved. Confirmed and proven-not-delivered
 terminal paths remove those exact files once durable SHA-256 and identity
@@ -132,7 +139,10 @@ and journals the operation as possibly delivered. It accepts only an exact
 JSON acknowledgment for that bridge, and that acknowledgment is not the final
 delivery receipt: success requires the owned transcript to contain the unique
 queued or consumed marker. The reported semantic is `queuedSafePointPublicCli`,
-so delivery may wait for a running tool call to reach a safe point. An
+so delivery may wait for a running tool call to reach a safe point. The CLI
+presents the follow-up to the session as "Another Claude session sent a
+message: …" with its own peer guidance appended, so the receipt matches the
+framed message and its marker anywhere in that record. An
 interrupted or ambiguous dispatch is observed and reconciled, never replayed.
 
 The worker's Unix-domain socket, process birth, device, inode, owner, mode,

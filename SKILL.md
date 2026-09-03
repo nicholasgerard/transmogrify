@@ -4,7 +4,7 @@ description: Operate exact-owned, worktree-seated Codex and Claude Code lanes wi
 license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
-  version: "0.2.2"
+  version: "0.2.3"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server 0.151.x"

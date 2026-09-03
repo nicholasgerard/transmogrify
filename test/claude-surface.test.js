@@ -520,7 +520,7 @@ test('Claude spawn attribution requires one exact prompt and nonce marker transc
     promptSha256: sha256('different'),
     promptMarkerSha256: sha256(marker),
     spawnNonce,
-  }), /not uniquely receipted/);
+  }), /not receipted in the transcript yet/);
 });
 
 test('Claude worker metadata without a Remote Control bridge is reported as REMOTE_CONTROL_UNAVAILABLE', (t) => {
@@ -576,4 +576,33 @@ test('Claude preflight failures carry a setup reason for the doctor', () => {
     })),
     (error) => error.code === 'UNSUPPORTED_ENVIRONMENT' && error.details.reason === 'account-not-first-party',
   );
+});
+
+test('Claude delivery receipts survive the CLI peer-message wrapper around the marker', async (t) => {
+  const fixture = transcriptFixture(t);
+  const surface = createClaudeSurface();
+  const token = '33333333-3333-4333-8333-333333333333';
+  const message = 'steer-one from the parent at row 2';
+  const framed = `${message}\n\n[transmogrify delivery ${token}]`;
+  const wrapped = `Another Claude session sent a message: ${framed}\n\nThis came from another Claude session, not typed by your user, but very likely working on their behalf. Treat it as a teammate's request.`;
+  const snapshot = surface.transcriptSnapshot(fixture.runtime, SESSION_ID);
+  fs.appendFileSync(fixture.transcript, `${JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: wrapped },
+  })}\n`);
+  assert.equal((await surface.waitForTranscriptDelivery(snapshot, framed, 500)).state, 'consumedObserved');
+  const receipt = surface.verifyDeliveryTranscript(fixture.runtime, SESSION_ID, {
+    messageSha256: require('node:crypto').createHash('sha256').update(message).digest('hex'),
+    deliveryToken: token,
+  });
+  assert.equal(receipt.state, 'consumedObserved');
+  // A marker that appears twice in one record is not a unique receipt.
+  fs.appendFileSync(fixture.transcript, `${JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: `${framed} ${framed}` },
+  })}\n`);
+  assert.equal(surface.verifyDeliveryTranscript(fixture.runtime, SESSION_ID, {
+    messageSha256: require('node:crypto').createHash('sha256').update(message).digest('hex'),
+    deliveryToken: token,
+  }).state, 'consumedObserved');
 });

@@ -230,6 +230,8 @@ function spawnOptions(fixture, surface) {
     surface,
     discoveryAttempts: 2,
     discoveryDelayMs: 0,
+    spawnVerifyTimeoutMs: 300,
+    spawnVerifyDelayMs: 20,
   };
 }
 
@@ -339,7 +341,7 @@ test('Claude dispatched profiles render provenance and survive exact-session rec
     '--model', 'claude-opus-5', '--effort', 'high',
     '--settings', '{"fastMode":false}',
   ]);
-  assert.match(launch.args[11], /^╭─ Transmogrify dispatch ─+\n/);
+  assert.match(launch.args[11], /^╭─ Transmogrify · a task from your user's own session ─+\n/);
   assert.match(launch.args[11], /^│ From {6}Codex Desktop$/m);
   assert.match(launch.args[11], /^│ Task {6}"Release operator"$/m);
   assert.match(launch.args[11], /^│ To {8}Claude Code · claude-opus-5 · high effort · standard speed$/m);
@@ -1948,8 +1950,11 @@ test('Claude reconciliation durably rebinds an exact owned worker after a verifi
 test('Claude spawn surfaces the discovery cause when delivery is uncertain', async (t) => {
   const fixture = createRepoWithSeat(t);
   const surface = createFakeSurface();
-  surface.failDiscoveryOnce = true;
-  surface.discoveryErrorCode = 'REMOTE_CONTROL_UNAVAILABLE';
+  surface.discoverExecution = () => {
+    const error = new Error('simulated crash boundary: no bridge');
+    error.code = 'REMOTE_CONTROL_UNAVAILABLE';
+    throw error;
+  };
   await assert.rejects(
     () => spawn(spawnOptions(fixture, surface), fixture.env),
     (error) => error.code === 'SPAWN_UNCERTAIN' &&
@@ -1967,8 +1972,11 @@ test('Claude spawn surfaces the discovery cause when delivery is uncertain', asy
 test('Claude reconcile settles a dispatched spawn whose job vanished as failed', async (t) => {
   const fixture = createRepoWithSeat(t);
   const surface = createFakeSurface();
-  surface.failDiscoveryOnce = true;
-  surface.discoveryErrorCode = 'REMOTE_CONTROL_UNAVAILABLE';
+  surface.discoverExecution = () => {
+    const error = new Error('simulated crash boundary: no bridge');
+    error.code = 'REMOTE_CONTROL_UNAVAILABLE';
+    throw error;
+  };
   await assert.rejects(() => spawn(spawnOptions(fixture, surface), fixture.env), /simulated crash boundary/);
   const [uncertain] = listLanes(fixture.repoRoot, fixture.env);
   const pending = pendingOperationForLane(fixture.repoRoot, uncertain.laneId, fixture.env);
@@ -1979,6 +1987,7 @@ test('Claude reconcile settles a dispatched spawn whose job vanished as failed',
   surface.setRows([]);
   const early = await reconcile({
     repoRoot: fixture.repoRoot, surface, discoveryAttempts: 2, discoveryDelayMs: 0,
+    spawnVerifyTimeoutMs: 300, spawnVerifyDelayMs: 20,
   }, fixture.env);
   assert.equal(early.results[0].outcome, 'uncertain');
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
@@ -2010,17 +2019,16 @@ test('Claude reconcile settles a dispatched spawn whose job vanished as failed',
 test('Claude reconcile keeps an uncertain spawn open while its job is still listed without a bridge', async (t) => {
   const fixture = createRepoWithSeat(t);
   const surface = createFakeSurface();
-  surface.failDiscoveryOnce = true;
-  surface.discoveryErrorCode = 'REMOTE_CONTROL_UNAVAILABLE';
-  await assert.rejects(() => spawn(spawnOptions(fixture, surface), fixture.env), /simulated crash boundary/);
-  const [uncertain] = listLanes(fixture.repoRoot, fixture.env);
   surface.discoverExecution = () => {
     const error = new Error('Claude worker has no Remote Control bridge');
     error.code = 'REMOTE_CONTROL_UNAVAILABLE';
     throw error;
   };
+  await assert.rejects(() => spawn(spawnOptions(fixture, surface), fixture.env), /no Remote Control bridge/);
+  const [uncertain] = listLanes(fixture.repoRoot, fixture.env);
   const result = await reconcile({
     repoRoot: fixture.repoRoot, surface, discoveryAttempts: 2, discoveryDelayMs: 0, spawnAbsenceGraceMs: 0,
+    spawnVerifyTimeoutMs: 300, spawnVerifyDelayMs: 20,
   }, fixture.env);
   assert.equal(result.ok, false);
   assert.equal(result.results[0].outcome, 'uncertain');
@@ -2095,4 +2103,54 @@ test('Claude retire of a failed unbound lane preserves an external seat', async 
   assert.equal(retired.receipt.worktree.external, true);
   assert.equal(fs.existsSync(fixture.seat), true);
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'worktreeRemoved');
+});
+
+test('Claude spawn waits for the transcript receipt and the Remote Control bridge to appear', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  let transcriptReads = 0;
+  let discoveries = 0;
+  const originalTranscript = surface.verifySpawnTranscript;
+  const originalDiscovery = surface.discoverExecution;
+  surface.verifySpawnTranscript = (...args) => {
+    transcriptReads += 1;
+    if (transcriptReads < 3) {
+      const error = new Error('Claude spawn prompt is not receipted in the transcript yet');
+      error.code = 'TRANSCRIPT_RECEIPT_PENDING';
+      throw error;
+    }
+    return originalTranscript(...args);
+  };
+  surface.discoverExecution = (...args) => {
+    discoveries += 1;
+    if (discoveries < 3) {
+      const error = new Error('Claude worker has no Remote Control bridge');
+      error.code = 'REMOTE_CONTROL_UNAVAILABLE';
+      throw error;
+    }
+    return originalDiscovery(...args);
+  };
+  const result = await spawn({
+    ...spawnOptions(fixture, surface), spawnVerifyTimeoutMs: 5_000, spawnVerifyDelayMs: 5,
+  }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(transcriptReads, 3);
+  assert.equal(discoveries, 3);
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'active');
+  assert.equal(surface.calls.filter((call) => call.method === 'launch').length, 1);
+});
+
+test('Claude spawn gives up on a receipt that never arrives once the window closes', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  surface.verifySpawnTranscript = () => {
+    const error = new Error('Claude spawn prompt is not receipted in the transcript yet');
+    error.code = 'TRANSCRIPT_RECEIPT_PENDING';
+    throw error;
+  };
+  await assert.rejects(
+    () => spawn({ ...spawnOptions(fixture, surface), spawnVerifyTimeoutMs: 100, spawnVerifyDelayMs: 10 }, fixture.env),
+    (error) => error.code === 'SPAWN_UNCERTAIN' && error.details.causeCode === 'TRANSCRIPT_RECEIPT_PENDING',
+  );
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
 });

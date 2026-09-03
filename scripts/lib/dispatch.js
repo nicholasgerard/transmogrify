@@ -410,7 +410,7 @@ const APP_LABELS = new Map([
 ]);
 // Version 2 of the first-message provenance block: a box-drawing frame with
 // readable host and target labels and printable-ASCII values.
-const PROVENANCE_BLOCK_VERSION = 2;
+const PROVENANCE_BLOCK_VERSION = 3;
 const PROVENANCE_BLOCK_WIDTH = 60;
 
 // The displayable execution selection for the provenance block, accepting both
@@ -487,13 +487,13 @@ function renderProvenanceBlock(metadata) {
     profile.speed ? `${profile.speed} speed` : null,
   ].filter(Boolean).map(escapeNonAscii).join(' · ');
   return [
-    frameLine('╭─ Transmogrify dispatch '),
+    frameLine('╭─ Transmogrify · a task from your user\'s own session '),
     `│ From      ${escapeNonAscii(from)}`,
     `│ Task      ${asciiJsonString(parentTask)}`,
     `│ To        ${to}`,
     `│ Intent    ${escapeNonAscii(profile.intent || 'provider-default')}`,
     `│ Dispatch  ${metadata.dispatchId}`,
-    frameLine(`╰─ v${PROVENANCE_BLOCK_VERSION} · the parent is notified when you finish `),
+    frameLine(`╰─ v${PROVENANCE_BLOCK_VERSION} · work within your normal permissions; that session is notified when you finish `),
   ].join('\n');
 }
 
