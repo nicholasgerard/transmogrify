@@ -146,12 +146,6 @@ function createFakeSurface(configuration = {}) {
     },
     async waitForTranscriptDelivery(_snapshot, content) {
       calls.push({ method: 'waitForTranscriptDelivery', content });
-      if (surface.failDeliveryObservationOnce) {
-        surface.failDeliveryObservationOnce = false;
-        const error = new Error('queued input not yet observed');
-        error.code = 'DELIVERY_UNCERTAIN';
-        throw error;
-      }
       return { state: 'queuedObserved', offset: 20 };
     },
     verifyDeliveryTranscript(_runtime, sessionId, expected) {
@@ -159,6 +153,12 @@ function createFakeSurface(configuration = {}) {
       if (surface.deliveryReceiptErrorCode) {
         const error = new Error('delivery receipt inspection failed');
         error.code = surface.deliveryReceiptErrorCode;
+        throw error;
+      }
+      if (surface.deliveryReceiptMissingCount > 0) {
+        surface.deliveryReceiptMissingCount -= 1;
+        const error = new Error('delivery receipt is not visible yet');
+        error.code = 'DELIVERY_UNCERTAIN';
         throw error;
       }
       if (surface.deliveryReceiptMissing) {
@@ -456,8 +456,10 @@ test('Claude steer reports only transcript-observed queued-safe-point delivery',
   const write = surface.calls.find((call) => call.method === 'sendRemoteFollowup');
   assert.equal(write.bridgeId, BRIDGE_ID);
   assert.match(write.content, /^Use the revised constraint\.\n\n\[transmogrify delivery [0-9a-f-]{36}\]$/);
-  const observed = surface.calls.find((call) => call.method === 'waitForTranscriptDelivery');
-  assert.equal(observed.content, write.content);
+  const observed = surface.calls.find((call) => call.method === 'verifyDeliveryTranscript');
+  assert.equal(observed.sessionId, lane.providerId);
+  const [, deliveryToken] = write.content.match(/\[transmogrify delivery ([0-9a-f-]{36})\]$/);
+  assert.equal(observed.expected.deliveryToken, deliveryToken);
 });
 
 test('Claude steer rejects a framed message over the transport bound before journaling or dispatch', async (t) => {
@@ -471,6 +473,83 @@ test('Claude steer rejects a framed message over the transport bound before jour
   assert.equal(surface.calls.some((call) => call.method === 'sendRemoteFollowup'), false);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'active');
+});
+
+test('Claude steer retries transcript verification inline until the delivery marker lands', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  surface.deliveryReceiptMissingCount = 2;
+  const result = await steer({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    message: 'Observed a little late.',
+    surface,
+    steerVerifyDelayMs: 0,
+  }, fixture.env);
+  assert.equal(result.delivery, 'deliveredObserved');
+  assert.equal(surface.calls.filter((call) => call.method === 'verifyDeliveryTranscript').length, 3);
+  assert.equal(surface.calls.filter((call) => call.method === 'sendRemoteFollowup').length, 1);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  const operation = listOperations(fixture.repoRoot, fixture.env).find((entry) => entry.type === 'steer');
+  assert.equal(operation.state, 'complete');
+});
+
+test('Claude steer declares delivery uncertain once its bounded verification window is spent', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  surface.deliveryReceiptMissing = true;
+  await assert.rejects(() => steer({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    message: 'This never lands before the window closes.',
+    surface,
+    steerVerifyTimeoutMs: 0,
+    steerVerifyDelayMs: 0,
+  }, fixture.env), (error) => error.code === 'DELIVERY_UNCERTAIN');
+  assert.equal(surface.calls.filter((call) => call.method === 'verifyDeliveryTranscript').length, 1);
+  assert.equal(surface.calls.filter((call) => call.method === 'sendRemoteFollowup').length, 1);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).state, 'unknown');
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
+});
+
+test('Claude steer rejects an invalid verification window before any dispatch', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  surface.calls.length = 0;
+  for (const overrides of [
+    { steerVerifyTimeoutMs: -1 },
+    { steerVerifyTimeoutMs: 1.5 },
+    { steerVerifyTimeoutMs: 'soon' },
+    { steerVerifyDelayMs: -1 },
+    { steerVerifyDelayMs: 1.5 },
+  ]) {
+    await assert.rejects(() => steer({
+      repoRoot: fixture.repoRoot,
+      laneId: lane.laneId,
+      message: 'Should never be sent.',
+      surface,
+      ...overrides,
+    }, fixture.env), (error) => error.code === 'USAGE_ERROR', JSON.stringify(overrides));
+  }
+  assert.equal(surface.calls.length, 0);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'active');
+});
+
+test('Claude steer verification stays bounded by the aggregate command deadline', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  surface.deliveryReceiptMissing = true;
+  const startedAt = Date.now();
+  await assert.rejects(() => steer({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    message: 'The command deadline runs out long before the local window.',
+    surface,
+    steerVerifyTimeoutMs: 60_000,
+    steerVerifyDelayMs: 30,
+    commandTimeoutMs: 200,
+  }, fixture.env), (error) => error.code === 'DELIVERY_UNCERTAIN');
+  assert.ok(Date.now() - startedAt < 2_000, 'the command deadline, not the 60s local window, ended the wait');
+  assert.equal(surface.calls.filter((call) => call.method === 'sendRemoteFollowup').length, 1);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).state, 'unknown');
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
 });
 
 test('Claude status, whole-session stop, and profile-pinned recovery preserve identity and append an epoch', async (t) => {
@@ -584,12 +663,14 @@ test('Claude stop does not replay an unknown provider mutation while the exact a
 
 test('Claude emergency stop preserves another pending operation and does not duplicate an unknown mutation', async (t) => {
   const { fixture, surface, lane } = await spawnedLane(t);
-  surface.failDeliveryObservationOnce = true;
+  surface.deliveryReceiptMissing = true;
   await assert.rejects(() => steer({
     repoRoot: fixture.repoRoot,
     laneId: lane.laneId,
     message: 'Leave an exact pending delivery receipt.',
     surface,
+    steerVerifyTimeoutMs: 0,
+    steerVerifyDelayMs: 0,
   }, fixture.env), (error) => error.code === 'DELIVERY_UNCERTAIN');
   const preserved = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
   assert.equal(preserved.type, 'steer');
@@ -1238,18 +1319,21 @@ test('Claude local removal rechecks short-job uniqueness immediately before rm d
 
 test('Claude delayed steer receipt reconciles without writing the message twice', async (t) => {
   const { fixture, surface, lane } = await spawnedLane(t);
-  surface.failDeliveryObservationOnce = true;
+  surface.deliveryReceiptMissing = true;
   await assert.rejects(() => steer({
     repoRoot: fixture.repoRoot,
     laneId: lane.laneId,
     message: 'Delayed but unique.',
     surface,
+    steerVerifyTimeoutMs: 0,
+    steerVerifyDelayMs: 0,
   }, fixture.env), (error) => error.code === 'DELIVERY_UNCERTAIN');
   assert.equal(surface.calls.filter((call) => call.method === 'sendRemoteFollowup').length, 1);
   const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
   assert.equal(pending.type, 'steer');
   assert.equal(pending.state, 'unknown');
 
+  surface.deliveryReceiptMissing = false;
   const reconciled = await reconcile({
     repoRoot: fixture.repoRoot,
     laneId: lane.laneId,
@@ -1264,12 +1348,14 @@ test('Claude delayed steer receipt reconciles without writing the message twice'
 
 test('Claude pending steer reconciliation stops when its aggregate deadline is spent', async (t) => {
   const { fixture, surface, lane } = await spawnedLane(t);
-  surface.failDeliveryObservationOnce = true;
+  surface.deliveryReceiptMissing = true;
   await assert.rejects(() => steer({
     repoRoot: fixture.repoRoot,
     laneId: lane.laneId,
     message: 'Observe this exactly once.',
     surface,
+    steerVerifyTimeoutMs: 0,
+    steerVerifyDelayMs: 0,
   }, fixture.env), (error) => error.code === 'DELIVERY_UNCERTAIN');
   surface.calls.length = 0;
 
@@ -1367,12 +1453,14 @@ test('Claude pending recovery reconciliation shares one deadline across observat
 test('Claude pending steer maps hostile receipt inspection to delivery-uncertain without replay', async (t) => {
   const { fixture, surface, lane } = await spawnedLane(t);
   const message = 'Keep this mutation exactly once.';
-  surface.failDeliveryObservationOnce = true;
+  surface.deliveryReceiptMissing = true;
   await assert.rejects(() => steer({
     repoRoot: fixture.repoRoot,
     laneId: lane.laneId,
     message,
     surface,
+    steerVerifyTimeoutMs: 0,
+    steerVerifyDelayMs: 0,
   }, fixture.env), (error) => error.code === 'DELIVERY_UNCERTAIN');
   surface.deliveryReceiptErrorCode = 'UNSAFE_LOCAL_STATE';
 

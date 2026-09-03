@@ -85,6 +85,12 @@ const SPAWN_VERIFY_DELAY_MS = 500;
 const RETRYABLE_SPAWN_RECEIPT_CODES = new Set([
   'TRANSCRIPT_RECEIPT_PENDING', 'REMOTE_CONTROL_UNAVAILABLE', 'DELIVERY_UNCERTAIN',
 ]);
+// A queued steer follow-up lands in the owned transcript a few seconds after
+// the write returns. Steer verification retries the same transcript check
+// reconcile uses inside this window, so the common case observes delivery
+// without a second command.
+const STEER_VERIFY_TIMEOUT_MS = 20_000;
+const STEER_VERIFY_DELAY_MS = 500;
 const UNBOUND_PROVIDER_RECEIPT = Object.freeze({
   unbound: true, stop: 'notAttempted', archive: 'notAttempted', localRemoval: 'notAttempted',
 });
@@ -939,6 +945,30 @@ async function reconcileSteer(options, env, surface, runtime, lane, operation, d
   }
   return { complete: true, receipt, lane: current };
 }
+// Poll the same transcript receipt reconcile uses until the marker is
+// observed or the verification window (bounded by the aggregate command
+// deadline too) runs out. Only "not yet visible" retries; any other failure,
+// including the deadline itself, stops immediately so the caller can mark
+// the delivery unknown exactly as it does when nothing was ever observed.
+async function awaitSteerDelivery(options, surface, runtime, lane, operation, timeoutMs, delayMs, deadline) {
+  const windowEnd = nowMs(options) + timeoutMs;
+  for (;;) {
+    try {
+      if (deadline !== null) remainingCommandMs(deadline);
+      return surface.verifyDeliveryTranscript(runtime, lane.providerId, {
+        messageSha256: operation.details.messageSha256,
+        deliveryToken: operation.details.deliveryToken,
+      });
+    } catch (error) {
+      const remaining = Math.min(
+        windowEnd - nowMs(options),
+        deadline === null ? Infinity : deadline - Date.now() - 100,
+      );
+      if (error.code !== 'DELIVERY_UNCERTAIN' || remaining <= 0) throw error;
+      await sleep(Math.min(delayMs, Math.max(0, remaining)));
+    }
+  }
+}
 // Queue a follow-up on an exact-owned running session through Remote Control.
 // The message is framed with a delivery token and must be observed in that
 // session's transcript before the operation completes. A refused write is
@@ -953,6 +983,13 @@ async function steer(options, env = process.env) {
         options.writeTimeoutMs > 120_000)) {
     throw new ClaudeTransmogrifyError('USAGE_ERROR', 'invalid Claude follow-up timeout');
   }
+  const steerVerifyTimeoutMs = options.steerVerifyTimeoutMs ?? STEER_VERIFY_TIMEOUT_MS;
+  const steerVerifyDelayMs = options.steerVerifyDelayMs ?? STEER_VERIFY_DELAY_MS;
+  if (!Number.isInteger(steerVerifyTimeoutMs) || steerVerifyTimeoutMs < 0 ||
+      !Number.isInteger(steerVerifyDelayMs) || steerVerifyDelayMs < 0) {
+    throw new ClaudeTransmogrifyError('USAGE_ERROR', 'steer verification window must be non-negative integers');
+  }
+  const deadline = commandDeadline(options);
   let lane = ownedLane(options, env, true);
   assertSeat(options, lane);
   const surface = surfaceFor(options);
@@ -1039,8 +1076,8 @@ async function steer(options, env = process.env) {
       );
     }
     try {
-      const observed = await surface.waitForTranscriptDelivery(
-        snapshot, framed, options.deliveryObserveTimeoutMs,
+      const observed = await awaitSteerDelivery(
+        options, surface, runtime, lane, operation, steerVerifyTimeoutMs, steerVerifyDelayMs, deadline,
       );
       completePending(options.repoRoot, lane.laneId, operation, {
         state: 'complete', details: { ...operation.details, observation: observed },

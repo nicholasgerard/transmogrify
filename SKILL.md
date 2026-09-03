@@ -236,10 +236,11 @@ node "$SKILL_ROOT/scripts/lane.js" status --repo-root "$REPO_ROOT" --lane "$LANE
   orphaned older turns may remain `inProgress`; never treat them as active
   when a newer turn exists.
 - Claude `steer` sends one marked follow-up through the public
-  `claude -p --cloud` command for the exact bridge and reports delivery only
-  after the owned transcript shows the marker. `DELIVERY_UNCERTAIN` means the
-  transcript had not caught up: run `reconcile --lane` and it settles as
-  `steerDeliveredObserved`, never re-send.
+  `claude -p --cloud` command for the exact bridge and retries the transcript
+  check for up to 20 s before reporting delivery. `DELIVERY_UNCERTAIN` means
+  the transcript still had not caught up when that window closed: run
+  `reconcile --lane` and it settles as `steerDeliveredObserved`, never
+  re-send.
 - Codex `interrupt` cancels the newest exact active turn. Claude `stop` ends
   the whole exact session; there is no turn-only cancellation for Claude.
 

@@ -331,8 +331,10 @@ nothing:
 ## Claude steer delivery is uncertain
 
 `DELIVERY_UNCERTAIN` after a Claude `steer` means the public CLI accepted the
-follow-up but the owned transcript had not shown its marker inside the
-verification window; the lane moves to `deliveryUnknown`. Do not re-send.
+follow-up but the owned transcript still had not shown its marker after the
+command retried verification for up to 20 s (`steerVerifyTimeoutMs`, polled
+every `steerVerifyDelayMs`, both within the command deadline); the lane
+moves to `deliveryUnknown`. Do not re-send.
 Run `reconcile --target claude --lane <laneId>`: it verifies the transcript
 and settles the journal as `steerDeliveredObserved`, restoring the lane
 state, or keeps it open as `steerUnknown` for the next observation.
