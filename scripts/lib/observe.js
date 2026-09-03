@@ -10,9 +10,32 @@ const {
   EVENT_KINDS, kindForEvent, kindSatisfies, listDispatches, recordEvent, recordObservation,
 } = require('./dispatch');
 const {
-  listOperations, pendingOperationForLane, requireOwnedLane, settleTerminalLaneOperationPointer,
+  listOperations, pendingOperationForLane, processMatches, requireOwnedLane, settleTerminalLaneOperationPointer,
   withLaneLease,
 } = require('./state');
+
+// Spawn journal states before the provider request has gone out. Only these
+// are settled by the crash repair, so only these can be raced by a launcher
+// that is still running; once the request is out, reconciliation settles from
+// provider evidence and is safe to run beside the launcher.
+const PRE_DISPATCH_SPAWN_STATES = new Set([
+  'planned', 'seatReady', 'dispatching', 'providerRequestDispatched', 'providerCreated',
+]);
+// A pre-dispatch journal younger than this, with no recorded spawner process
+// to check, is assumed to be in flight.
+const SPAWN_IN_FLIGHT_GRACE_MS = 5 * 60 * 1000;
+
+// True while the process that reserved a spawn may still be driving it
+// through its pre-dispatch states. A continuous observer (the watcher, a
+// background wait) must leave such a journal alone: the crash repair exists
+// for a spawner that died, never for one that is still running.
+function spawnInFlight(pending, dependencies = {}) {
+  if (!pending || pending.type !== 'spawn' || !PRE_DISPATCH_SPAWN_STATES.has(pending.state)) return false;
+  const spawner = pending.details?.spawner;
+  if (spawner && Number.isInteger(spawner.pid)) return processMatches(spawner, dependencies);
+  const createdAtMs = Date.parse(pending.createdAt || '');
+  return Number.isFinite(createdAtMs) && Date.now() - createdAtMs < SPAWN_IN_FLIGHT_GRACE_MS;
+}
 const { providerForBackend, providerForTarget } = require('./providers');
 
 function repositoryUnavailable(error) {
@@ -163,7 +186,7 @@ function localEventForLane(dispatch, lane, env) {
 // replaying the launch. Returns the refreshed lane.
 async function reconcilePendingSpawnDispatch(dispatch, lane, values, env, timeoutMs) {
   const pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
-  if (pending?.type !== 'spawn') return lane;
+  if (pending?.type !== 'spawn' || spawnInFlight(pending, values.processDependencies)) return lane;
   const options = {
     repoRoot: dispatch.child.repoRoot,
     laneId: lane.laneId,
@@ -254,6 +277,12 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
   let localEvent = localEventForLane(dispatch, lane, env);
   if (localEvent) return { lane, event: localEvent, phase: localEvent.data?.state ?? null };
   let pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
+  if (pending?.type === 'spawn' && spawnInFlight(pending, values.processDependencies)) {
+    // The launching command is still writing this journal; report nothing
+    // until it finishes or dies. Its own spawn event arrives through the
+    // completed journal, and a dead spawner is repaired on the next pass.
+    return { lane, event: null, phase: 'spawning' };
+  }
   if (pending?.type === 'spawn') {
     const spawnRemainingMs = deadline - Date.now();
     if (spawnRemainingMs < 100) return { lane, event: null, phase: null };
@@ -342,7 +371,9 @@ async function observeParentChildren(context, values, env, deadline) {
 
 module.exports = {
   EVENT_KINDS,
+  SPAWN_IN_FLIGHT_GRACE_MS,
   classifyObservation,
+  spawnInFlight,
   kindForEvent,
   kindSatisfies,
   localEventForLane,

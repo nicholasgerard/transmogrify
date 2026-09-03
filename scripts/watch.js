@@ -40,6 +40,7 @@ options:
   --idle-exit-ms <ms>           exit after this long with no outstanding child (default ${DEFAULT_IDLE_EXIT_MS})
   --detach                      start a detached watcher for this parent and return
   --status                      report whether a watcher is running for this parent
+  --stop                        stop the watcher recorded for this parent (owner action)
 
 The watcher observes every outstanding child of the parent, records the same
 durable events wait records, and wakes the parent through its recorded wake
@@ -111,6 +112,28 @@ function ensureWatcher(parentContextFile, options = {}, env = process.env, depen
 }
 
 const SETTLED_LANE_STATES = new Set(['archivedVerified', 'cleanupEligible', 'worktreeRemoved', 'failed', 'stopped']);
+
+// Stop the watcher recorded for a parent. The pid is signalled only when its
+// recorded process birth still matches, so a recycled pid is never touched.
+async function stopWatcher(parentContextFile, env = process.env, dependencies = {}) {
+  const loaded = loadParentContext(parentContextFile, env);
+  const running = runningWatcher(loaded.parent.parentRef, env, dependencies);
+  const paths = watcherPaths(loaded.parent.parentRef, env);
+  if (!running) {
+    try { fs.unlinkSync(paths.record); } catch { /* nothing recorded */ }
+    return { running: false, stopped: false, pid: null };
+  }
+  const signal = dependencies.kill || process.kill.bind(process);
+  try { signal(running.pid, 'SIGTERM'); } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+  const wait = dependencies.sleep || sleep;
+  for (let attempt = 0; attempt < 20 && runningWatcher(loaded.parent.parentRef, env, dependencies); attempt += 1) {
+    await wait(100);
+  }
+  try { fs.unlinkSync(paths.record); } catch { /* removed by the watcher itself */ }
+  return { running: false, stopped: true, pid: running.pid };
+}
 
 // Children that still need the parent: any dispatch with an unacknowledged
 // event, or whose lane is neither retired nor ended. A retired, failed, or
@@ -186,7 +209,13 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
   const maxRounds = dependencies.maxRounds ?? Infinity;
   let idleSince = null;
   let outcome = 'idleExit';
-  while (state.rounds < maxRounds) {
+  let stopping = false;
+  const onSignal = () => { stopping = true; };
+  if (!dependencies.noSignals) {
+    process.once('SIGTERM', onSignal);
+    process.once('SIGINT', onSignal);
+  }
+  while (state.rounds < maxRounds && !stopping) {
     try {
       context = loadParentContext(options.parentContextFile, env);
     } catch (error) {
@@ -217,7 +246,12 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
     }
     await (dependencies.sleep || sleep)(pass.working ? ACTIVE_POLL_MS : QUIET_POLL_MS);
   }
-  if (state.rounds >= maxRounds) outcome = 'roundsExhausted';
+  if (stopping) outcome = 'signalled';
+  else if (state.rounds >= maxRounds) outcome = 'roundsExhausted';
+  if (!dependencies.noSignals) {
+    process.off('SIGTERM', onSignal);
+    process.off('SIGINT', onSignal);
+  }
   appendLog(paths, `stop ${outcome} rounds=${state.rounds} wakes=${state.wakes}`);
   try { if (readRecord(paths.record)?.pid === process.pid) fs.unlinkSync(paths.record); } catch { /* already gone */ }
   return { version: 1, ok: true, operation: 'watch', outcome, rounds: state.rounds, wakes: state.wakes };
@@ -237,6 +271,7 @@ function parseWatchArgs(argv, env = process.env) {
       'idle-exit-ms': { type: 'string' },
       detach: { type: 'boolean' },
       status: { type: 'boolean' },
+      stop: { type: 'boolean' },
     },
   });
   const values = parsed.values;
@@ -258,6 +293,7 @@ function parseWatchArgs(argv, env = process.env) {
     idleExitMs,
     detach: values.detach === true,
     status: values.status === true,
+    stop: values.stop === true,
   };
 }
 
@@ -268,6 +304,10 @@ async function main(argv = process.argv.slice(2), env = process.env, dependencie
     const loaded = loadParentContext(options.parentContextFile, env);
     const running = runningWatcher(loaded.parent.parentRef, env, dependencies);
     return { version: 1, ok: true, operation: 'watch', outcome: running ? 'running' : 'stopped', pid: running?.pid ?? null };
+  }
+  if (options.stop) {
+    const stopped = await stopWatcher(options.parentContextFile, env, dependencies);
+    return { version: 1, ok: true, operation: 'watch', outcome: stopped.stopped ? 'stopped' : 'notRunning', pid: stopped.pid };
   }
   if (options.detach) {
     const ensured = ensureWatcher(options.parentContextFile, options, env, dependencies);
@@ -299,6 +339,7 @@ module.exports = {
   parseWatchArgs,
   runWatcher,
   runningWatcher,
+  stopWatcher,
   watchOnce,
   watcherPaths,
 };

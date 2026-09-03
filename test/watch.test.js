@@ -143,3 +143,26 @@ test('runWatcher records itself, runs bounded rounds, and reports through --stat
   assert.equal(status.outcome, 'stopped');
   await assert.rejects(() => main(['--parent-context-file', 'relative/path'], fixture.env), (error) => error.code === 'USAGE_ERROR');
 });
+
+test('--stop signals only a watcher whose recorded birth still matches and clears its record', async (t) => {
+  const { fixture, context } = parentWithChild(t);
+  const paths = watcherPaths(context.parent.parentRef, fixture.env);
+  require('node:fs').mkdirSync(paths.root, { recursive: true, mode: 0o700 });
+  require('node:fs').writeFileSync(paths.record, JSON.stringify({ pid: 4343, processBirth: 'birth', parentRef: context.parent.parentRef }));
+  const signals = [];
+  const alive = new Set([4343]);
+  const deps = {
+    kill: (pid, signal) => {
+      if (!alive.has(pid)) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      if (signal === 'SIGTERM') { signals.push(pid); alive.delete(pid); }
+    },
+    processBirth: () => 'birth',
+    sleep: async () => {},
+  };
+  const stopped = await main(['--parent-context-file', context.file, '--stop'], fixture.env, deps);
+  assert.deepEqual([stopped.outcome, stopped.pid], ['stopped', 4343]);
+  assert.deepEqual(signals, [4343]);
+  assert.equal(require('node:fs').existsSync(paths.record), false);
+  const again = await main(['--parent-context-file', context.file, '--stop'], fixture.env, deps);
+  assert.equal(again.outcome, 'notRunning');
+});

@@ -153,8 +153,9 @@ never printed.
 
 ### `watch`
 
-`outcome` (`started`, `alreadyRunning`, `running`, `stopped`, `idleExit`,
-`parentContextGone`, `roundsExhausted`), `pid`, `rounds`, `wakes`.
+`outcome` (`started`, `alreadyRunning`, `running`, `stopped`, `notRunning`,
+`idleExit`, `parentContextGone`, `signalled`, `roundsExhausted`), `pid`,
+`rounds`, `wakes`.
 
 ### `maintain`
 

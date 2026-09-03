@@ -344,3 +344,39 @@ test('parent wait observes first, returns old and new events together, and honou
   assert.equal(children.children[0].latestEventKind, 'complete');
   assert.equal(children.unacknowledgedEvents, 2);
 });
+
+test('observation leaves an in-flight spawn journal alone until its spawner is gone', async (t) => {
+  const { spawnInFlight } = require('../scripts/lib/observe');
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'claude', hostApp: 'claude-code', displayName: 'In-flight parent',
+  }, fixture.env);
+  const laneId = crypto.randomUUID();
+  const operationId = crypto.randomUUID();
+  const reserved = reserveDispatch({
+    parentContext, repoRoot: fixture.repoRoot, laneId, targetProvider: 'codex',
+    backend: 'codex-app-server', displayName: '::: in-flight child', prompt: 'Work.',
+  }, fixture.env);
+  reserveSpawn(fixture.repoRoot, {
+    operation: { operationId, type: 'spawn', laneId, details: { dispatchId: reserved.dispatch.dispatchId } },
+    lane: {
+      laneId, backend: 'codex-app-server', target: 'codex', displayName: '::: in-flight child',
+      state: 'planned', operationId, runtime: runtimeFor('ws://127.0.0.1:1/'), seat: null, lineage: reserved.lineage,
+    },
+  }, fixture.env);
+  const pending = pendingOperationForLane(fixture.repoRoot, laneId, fixture.env);
+  assert.equal(spawnInFlight(pending), true, 'a fresh journal without a spawner record is in flight');
+  assert.equal(spawnInFlight({ ...pending, createdAt: new Date(Date.now() - 6 * 60_000).toISOString() }), false);
+  const alive = { ...pending, details: { ...pending.details, spawner: { pid: process.pid, processBirth: 'x' } } };
+  assert.equal(spawnInFlight(alive, { processBirth: () => 'x' }), true, 'a live spawner keeps it in flight regardless of age');
+  const dead = { ...pending, details: { ...pending.details, spawner: { pid: 999999, processBirth: 'x' } } };
+  assert.equal(spawnInFlight(dead, { kill: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); } }), false);
+
+  // A wait during the in-flight window records nothing for that child and does
+  // not settle its journal; the lane stays planned for the launcher.
+  await assert.rejects(() => main([
+    'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '300',
+  ], fixture.env), (error) => error.code === 'NO_EVENT');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env).state, 'planned');
+  assert.equal(listLanes(fixture.repoRoot, fixture.env).find((lane) => lane.laneId === laneId).state, 'planned');
+});
