@@ -126,6 +126,26 @@ text. Observed twice: a Claude steer reported `DELIVERY_UNCERTAIN` inside
 its verification window and settled as `steerDeliveredObserved` on the next
 reconcile.
 
+2026-09-03, wave 0.4 (0.3.1), unattended maintainer run with disposable
+probes on the shared runtime from a Claude Code host. Exercised and green:
+turnkey wakes in real time for every child transition (spawned, completed,
+attention, stopped, failed, retired) through the parent's own Remote
+Control bridge, for Codex and Claude children; Codex spawn, boundary
+recover with input, mid-turn steer, interrupt, archive; Claude spawn,
+steer verified in the command (`consumedObserved`), whole-session stop,
+private-archive retirement; both providers' reconcile in the unified
+shape; a runtime endpoint move is unit-tested only. Found and fixed during
+the run: a spawn that failed before reserving a lane left the parent a
+dispatch it was asked to attend forever (now settled as `failed` with one
+terminal event); the CLI's follow-up acknowledgement URL form (a
+`session_` prefix plus a query string) made every landed Claude steer
+`DELIVERY_UNCERTAIN`, which is the cause of the earlier observations
+above; a Claude stop failed after the worker exit when the watcher had
+recorded the same exit first; retired Claude lanes on an older runtime
+reported `differentRuntime` on every reconcile. Not exercised live: a
+Codex host acting as the parent end to end (its mechanisms are verified
+individually), and the two owner-present rows below.
+
 ## Priority 1: compatibility and acceptance hardening
 
 - Claude resume lineage. On CLI `2.1.258` a background resume of a stopped
