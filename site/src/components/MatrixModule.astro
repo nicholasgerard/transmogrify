@@ -17,8 +17,8 @@ const [rowHeader, ...columnHeaders] = headers;
   <div class="table-wrap">
     <table>
       <caption class="sr-only">
-        Which orchestrator can drive which target provider. Rendered from the
-        support matrix in the repository README.
+        Which app can drive which agent. Generated from the support matrix in
+        the repository README.
       </caption>
       <thead>
         <tr>
@@ -45,10 +45,9 @@ const [rowHeader, ...columnHeaders] = headers;
   </div>
 
   <p class="source">
-    Source of truth:
+    Generated from
     <a href={docUrl(facts.repositoryUrl, 'README.md')} rel="noopener noreferrer external">
-      README.md<span class="sr-only"> (opens on github.com)</span></a>. This table is
-    generated from it at build time.
+      README.md<span class="sr-only"> (opens on github.com)</span></a> when the site builds.
   </p>
 
   {

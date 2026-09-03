@@ -56,7 +56,9 @@ const columns = [
         <Wordmark />
         <p>{SITE_TAGLINE}</p>
         <p class="pins">
-          v{facts.packageVersion} · Node {facts.nodeEngine}+ · verified {facts.pins.verifiedDate}
+          <span>v{facts.packageVersion}</span> ·
+          <span>Node {facts.nodeEngine}+</span> ·
+          <span>verified {facts.pins.verifiedDate}</span>
         </p>
       </div>
 
@@ -84,7 +86,9 @@ const columns = [
 
     <div class="baseline">
       <p>
-        © {year} Transmogrify contributors. Released under the
+        © {year}
+        <a href="https://thebkapp.co" rel="noopener noreferrer external">The Brooklyn App Company</a>.
+        Released under the
         <a href={docUrl(facts.repositoryUrl, 'LICENSE')} rel="noopener noreferrer external">MIT License</a>.
       </p>
       <p class="privacy-control">
@@ -122,11 +126,18 @@ const columns = [
     max-inline-size: 38ch;
   }
 
-  .pins {
+  .identity .pins {
     font-family: var(--mono);
-    font-size: var(--step--2) !important;
+    font-size: var(--step--2);
     color: var(--faint);
     letter-spacing: 0.04em;
+    /* Wider than the tagline measure so the version line stays on one row;
+       if it ever has to break it breaks between segments, never inside one. */
+    max-inline-size: none;
+  }
+
+  .pins span {
+    white-space: nowrap;
   }
 
   h2 {

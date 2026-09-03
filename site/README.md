@@ -46,7 +46,7 @@ Other commands:
 
 | Command | What it does |
 | --- | --- |
-| `npm run build` | Production build into `dist/`, then generates `/start` and `dist/_headers` |
+| `npm run build` | Production build into `dist/`, minifies the HTML, then generates `/start` and `dist/_headers` |
 | `npm run preview` | Serve the built `dist/` locally |
 | `npm run check` | `astro check` — Astro, TypeScript, and content-schema diagnostics |
 | `npm test` | Unit tests for the pure logic and the content guarantees |

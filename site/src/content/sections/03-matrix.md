@@ -5,21 +5,21 @@ label: How it works
 number: '02'
 title: How it works
 lede: >-
-  Each provider keeps its own native channel. What they share is the lifecycle,
-  so a job looks the same whichever agent is running it.
+  Codex and Claude Code talk over completely different channels. Transmogrify
+  keeps both and puts one set of commands on top.
 module: matrix
 ---
 
-Transmogrify installs as a skill. When your agent needs another agent, it calls
-a handful of local Node scripts: one to open a lane, one to steer it, one to
-collect what came back.
+Transmogrify installs as a skill. When your agent needs another agent, it runs
+a few Node scripts on your machine: one opens a lane, one sends it
+instructions, one collects the result.
 
-Underneath, nothing is faked. Codex lanes speak JSON-RPC to a shared
-`codex app-server`; Claude lanes run as named Remote Control sessions on your
-machine. That is why the work shows up in the real apps instead of a hidden
-terminal — and why a lane can survive the agent that started it.
+Those scripts use each provider's own interface. Codex lanes go over JSON-RPC
+to a shared `codex app-server`. Claude lanes run as named Remote Control
+sessions. Because they are real sessions, they appear in the apps you already
+have open, and they keep running after the agent that started them is gone.
 
-Before it touches a provider, Transmogrify writes down exactly which lane,
-which seat, and which operation it is about to run. Every later command
-re-resolves that exact record. A session with the right name in the right
-directory is not good enough: an ambiguous match is a refusal, not a guess.
+Before it starts anything, Transmogrify writes down which lane, which worktree,
+and which operation it is about to run. Later commands look that record up
+again rather than searching for a session that looks about right. If two
+sessions could match, it stops and tells you.
