@@ -31,7 +31,9 @@
   `lib/codex-adapter.js`; `lib/claude-runtime.js`, `lib/claude-spawn.js`,
   `lib/claude-retire.js`, and `lib/claude-recover.js` beside
   `lib/claude-adapter.js`. Pure moves; the adapters' public surfaces are
-  unchanged.
+  unchanged. Codex recovery is further decomposed into one function per
+  phase (seat and provider binding, retirement states, pending mutation
+  settlement, bound-lane observation) with one entry builder.
 
 ## 0.3.1
 

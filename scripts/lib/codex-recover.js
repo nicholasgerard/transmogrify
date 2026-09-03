@@ -118,6 +118,301 @@ function remainingRecoveryMs(deadline) {
 // when it was skipped rather than observed (differentRuntime), when its own
 // error could not be classified further (uncertain), or when it carries a
 // surfaced provider or local code at all -- a settled receipt never does.
+// One reconcile entry for a lane: its identity plus the outcome fields.
+function laneEntry(lane, fields) {
+  return { laneId: lane.laneId, providerId: lane.providerId ?? null, state: lane.state, ...fields };
+}
+
+// Recover one lane under its lease against the connected runtime, in the
+// order the journal allows: bind a seat the crash left unbound, bind a
+// journaled provider id or report the spawn unknown, settle a retirement
+// state, settle a pending mutation from its receipt, and otherwise observe
+// the bound lane. Every branch returns one reconcile entry.
+async function recoverProviderLane(options, env, client, initialized, operations, initial) {
+  let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
+  let pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+  let operation = pending || operations.get(lane.operationId);
+  if (!lane.seat && lane.seatIntent && operation?.type === 'spawn') {
+    const seat = materializeManagedSeat(options.repoRoot, lane.seatIntent);
+    lane = bindLaneSeat(options.repoRoot, lane.laneId, operation.operationId, seat, env);
+    pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+    operation = pending;
+  }
+  assertSeatIdentity(options, lane, env);
+  if (!lane.providerId) {
+    const bound = await bindJournaledProvider(options, env, client, initialized, lane, operation);
+    if (bound.entry) return bound.entry;
+    lane = bound.lane;
+  } else {
+    assertRuntimeIdentity(lane, client);
+  }
+  const retirement = await settleRetirementState(options, env, client, lane, operation);
+  if (retirement) return retirement;
+  if (pending && ['steer', 'interrupt', 'resume'].includes(pending.type)) {
+    return settlePendingMutation(options, env, client, lane, pending);
+  }
+  return observeBoundLane(options, env, client, lane, operation);
+}
+
+// A lane whose journal names a provider id it never bound: the thread is
+// read at the reserved seat and bound with a recovered creation receipt. A
+// journal without a provider id leaves the spawn unknown.
+async function bindJournaledProvider(options, env, client, initialized, lane, operation) {
+  if (!operation?.providerId) {
+    return {
+      entry: laneEntry(lane, { outcome: 'spawnUnknown', delivery: 'unknown', repaired: [], pendingOperation: 'spawn' }),
+    };
+  }
+  const candidate = { ...lane, providerId: operation.providerId };
+  const inspected = await inspectThread(client, candidate);
+  if (inspected.thread.cwd !== lane.seat.path) {
+    throw new TransmogrifyError('OWNERSHIP_MISMATCH', 'journaled provider cwd does not match reserved seat');
+  }
+  const bound = bindLaneProvider(options.repoRoot, lane.laneId, operation.providerId, {
+    state: 'created',
+    runtime: client.runtimeIdentity,
+    ownership: {
+      creationReceipt: {
+        providerId: operation.providerId,
+        requestedCwd: lane.seat.path,
+        responseCwd: null,
+        cwd: inspected.thread.cwd,
+        initializedUserAgent: initialized.userAgent,
+        recoveredAt: new Date().toISOString(),
+      },
+    },
+  }, env);
+  return { lane: bound };
+}
+
+// Retirement states: an archived lane finishes its managed cleanup, a
+// requested or unknown archive is verified against the census, and any other
+// pending retirement is reported pending. Returns null when the lane is not
+// retiring.
+async function settleRetirementState(options, env, client, initialLane, initialOperation) {
+  let lane = initialLane;
+  let operation = initialOperation;
+  const cleanupWanted = () => lane.seat?.managed === true && options.cleanupWorktree !== false;
+  if (lane.state === 'archivedVerified') {
+    const repaired = [];
+    if (cleanupWanted()) {
+      if (operation?.type !== 'retire') {
+        throw new TransmogrifyError('HARVEST_REQUIRED', 'refusing recovered cleanup without a pending retirement harvest receipt');
+      }
+      lane = finishRetiredCleanup(options, lane, operation, retirementHarvestReceipt(operation), env);
+      repaired.push('worktreeRemoved');
+    } else if (operation?.type === 'retire') {
+      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { state: 'complete' }, env);
+    }
+    return laneEntry(lane, { outcome: 'retirementFinished', delivery: 'confirmed', repaired, pendingOperation: null });
+  }
+  if (lane.state === 'retireRequested' || lane.state === 'archiveUnknown') {
+    if (operation?.type !== 'retire') {
+      throw new TransmogrifyError('HARVEST_REQUIRED', 'refusing retirement recovery without a pending harvest receipt');
+    }
+    const archived = await verifyArchived(client, lane, options);
+    if (!archived) {
+      return laneEntry(lane, { outcome: 'retirementPending', delivery: 'unknown', repaired: [], pendingOperation: 'retire' });
+    }
+    lane = updateLane(options.repoRoot, lane.laneId, {
+      state: 'archivedVerified',
+      lastVerifiedAt: new Date().toISOString(),
+    }, env);
+    operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { state: 'providerRetired' }, env);
+    const repaired = ['archiveVerified'];
+    if (cleanupWanted()) {
+      lane = finishRetiredCleanup(options, lane, operation, retirementHarvestReceipt(operation), env);
+      repaired.push('worktreeRemoved');
+    } else {
+      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { state: 'complete' }, env);
+    }
+    return laneEntry(lane, { outcome: 'archiveVerified', delivery: 'confirmed', repaired, pendingOperation: null });
+  }
+  if (operation?.type === 'retire') {
+    return laneEntry(lane, { outcome: 'retirementPending', delivery: 'unknown', pendingOperation: 'retire', repaired: [] });
+  }
+  return null;
+}
+
+// A pending steer, interrupt, or resume settled from provider evidence
+// without replaying it: a journal that never reached its provider request
+// is proven undelivered (for a resume, thread/resume only loads the thread
+// and the input goes out with turn/start, journaled as turnDispatching
+// first); otherwise the input receipt or the turn's postcondition decides,
+// and a target turn still in progress keeps the journal unknown.
+async function settlePendingMutation(options, env, client, initialLane, pending) {
+  let lane = initialLane;
+  const undispatched = pending.type === 'resume'
+    ? UNDISPATCHED_RESUME_STATES.has(pending.state)
+    : pending.state === 'planned';
+  if (undispatched) {
+    completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+      state: 'notDelivered',
+      details: { ...pending.details, recoveredBeforeDispatchAt: new Date().toISOString() },
+    }, env);
+    const label = `${pending.type[0].toUpperCase()}${pending.type.slice(1)}`;
+    return laneEntry(lane, {
+      outcome: `${pending.type}NotDelivered`, delivery: 'notDelivered',
+      repaired: [`clearedUndispatched${label}`], pendingOperation: null,
+    });
+  }
+  const inspection = await inspectThread(client, lane);
+  const settle = (state, details) => completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+    state, details: { ...pending.details, ...details },
+  }, env);
+  if (pending.type === 'steer') {
+    // turn/steer's response carries only { turnId }, no item body to verify
+    // inline the way turn/start's response can. The exact receipt is the same
+    // clientId marker turn/start uses, searched the same way; its absence only
+    // proves non-delivery once the target turn can no longer accept input.
+    const recoveredTurnId = await findTurnByClientMessage(client, lane.providerId, pending.operationId, pending.details.messageSha256);
+    if (recoveredTurnId) {
+      if (recoveredTurnId !== pending.details.expectedTurnId) {
+        throw new TransmogrifyError('PROTOCOL_ERROR', 'persisted steer input receipt named a different turn than the steer target');
+      }
+      lane = updateLaneFromInspection(options, lane, inspection, env);
+      settle('complete', { recoveredTurnId, postconditionObservedAt: new Date().toISOString() });
+      return laneEntry(lane, {
+        ...phaseFields('codex', inspection.phase), outcome: 'steerInputReceipt', delivery: 'confirmed',
+        repaired: ['steerInputReceipt'], pendingOperation: null,
+      });
+    }
+    if (inspection.turn?.id === pending.details.expectedTurnId && inspection.turn.status === 'inProgress') {
+      return laneEntry(lane, { outcome: 'steerUnknown', delivery: 'unknown', pendingOperation: 'steer', repaired: [] });
+    }
+    lane = updateLaneFromInspection(options, lane, inspection, env);
+    settle('notDelivered', { notDeliveredObservedAt: new Date().toISOString() });
+    return laneEntry(lane, {
+      ...phaseFields('codex', inspection.phase), outcome: 'steerInputAbsent', delivery: 'notDelivered',
+      repaired: ['steerInputAbsent'], pendingOperation: null,
+    });
+  }
+  if (pending.type === 'interrupt') {
+    if (inspection.turn?.id === pending.details.turnId && inspection.turn.status === 'inProgress') {
+      return laneEntry(lane, { outcome: 'interruptUnknown', delivery: 'unknown', pendingOperation: 'interrupt', repaired: [] });
+    }
+    lane = updateLaneFromInspection(options, lane, inspection, env);
+    settle('complete', {
+      postconditionObservedAt: new Date().toISOString(),
+      observedTurnId: inspection.turn?.id || null,
+      observedTurnStatus: inspection.turn?.status || null,
+    });
+    return laneEntry(lane, {
+      ...phaseFields('codex', inspection.phase), outcome: 'interruptSettled', delivery: 'confirmed',
+      repaired: ['interruptPostcondition'], pendingOperation: null,
+    });
+  }
+  const recoveredTurnId = await findTurnByClientMessage(client, lane.providerId, pending.operationId, pending.details.messageSha256);
+  if (recoveredTurnId) {
+    lane = updateLaneFromInspection(options, lane, inspection, env);
+    settle('complete', { recoveredTurnId, postconditionObservedAt: new Date().toISOString() });
+    return laneEntry(lane, {
+      ...phaseFields('codex', inspection.phase), outcome: 'resumeInputReceipt', delivery: 'confirmed',
+      repaired: ['resumeInputReceipt'], pendingOperation: null,
+    });
+  }
+  return laneEntry(lane, { outcome: 'resumeUnknown', delivery: 'unknown', pendingOperation: 'resume', repaired: [] });
+}
+
+// Observe a bound lane: a pending spawn is settled from its input receipt
+// (or, past the grace period, its proven absence), a recovered first turn
+// gets the lane's name back, and the lane's state follows the thread.
+async function observeBoundLane(options, env, client, initialLane, operation) {
+  let lane = initialLane;
+  let inspected = await inspectThread(client, lane);
+  const repaired = [];
+  const spawnPending = operation?.type === 'spawn' && !TERMINAL_OPERATION_STATES.has(operation.state);
+  const recoveredSpawnTurnId = spawnPending
+    ? await findTurnByClientMessage(client, lane.providerId, operation.operationId, operation.details.inputSha256)
+    : null;
+  if (spawnPending && !recoveredSpawnTurnId &&
+      SPAWN_ABSENCE_JOURNAL_STATES.has(operation.state) &&
+      inspected.turn?.status !== 'inProgress' &&
+      typeof operation.details.turnDispatchStartedAt === 'string') {
+    const dispatchedAtMs = Date.parse(operation.details.turnDispatchStartedAt);
+    if (Number.isFinite(dispatchedAtMs) && nowMs(options) - dispatchedAtMs >= spawnAbsenceGraceMs(options)) {
+      const observedAbsentAt = new Date(nowMs(options)).toISOString();
+      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+        state: 'notDelivered',
+        details: { ...operation.details, outcome: 'spawnInputAbsent', observedAbsentAt },
+      }, env);
+      // A spawn only reaches these journal states once its provider id is
+      // bound, so the lane here is created, deliveryUnknown, idle, or active;
+      // LANE_TRANSITIONS gives each a direct edge to failed.
+      lane = updateLane(options.repoRoot, lane.laneId, {
+        state: 'failed',
+        providerState: inspected.thread.status,
+        turnId: inspected.turn?.id || lane.turnId,
+        lastVerifiedAt: observedAbsentAt,
+      }, env);
+      return laneEntry(lane, { outcome: 'spawnInputAbsent', delivery: 'notDelivered', repaired: ['spawnInputAbsent'], pendingOperation: null });
+    }
+  }
+  if (['created', 'materialized', 'deliveryUnknown'].includes(lane.state) &&
+      inspected.turn && (!spawnPending || recoveredSpawnTurnId)) {
+    if (inspected.thread.name !== lane.displayName) {
+      await client.call('thread/name/set', { threadId: lane.providerId, name: lane.displayName });
+      const readBack = await client.call('thread/read', { threadId: lane.providerId, includeTurns: false });
+      assertProviderSeat(lane, readBack?.thread, undefined, 'thread/read');
+      if (readBack.thread.name !== lane.displayName) {
+        throw new TransmogrifyError('PROTOCOL_ERROR', 'recovered thread name read-back did not match');
+      }
+      repaired.push('name');
+      inspected = { ...inspected, thread: readBack.thread };
+    }
+    repaired.push(spawnPending ? 'spawnInputReceipt' : 'turnReceipt');
+  }
+  lane = updateLane(options.repoRoot, lane.laneId, {
+    state: observedLaneState(lane, inspected.phase),
+    providerState: inspected.thread.status,
+    turnId: inspected.turn?.id || lane.turnId,
+    lastVerifiedAt: new Date().toISOString(),
+  }, env);
+  if (spawnPending && recoveredSpawnTurnId) {
+    const patch = {
+      state: 'complete',
+      details: { ...operation.details, recoveredTurnId: recoveredSpawnTurnId, postconditionObservedAt: new Date().toISOString() },
+    };
+    const currentLane = requireOwnedLane(options.repoRoot, lane.laneId, env);
+    if (currentLane.pendingOperationId === operation.operationId) {
+      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, patch, env);
+    } else {
+      updateOperation(options.repoRoot, operation.operationId, patch, env);
+    }
+  }
+  // A turn found for a still-pending spawn is that spawn's own input receipt;
+  // found with nothing pending, it is this call's re-observation of an
+  // already-materialized lane.
+  const outcome = spawnPending
+    ? (recoveredSpawnTurnId ? 'spawnInputReceipt' : 'spawnUnknown')
+    : inspected.turn ? (repaired.includes('turnReceipt') ? 'turnObserved' : 'verified') : 'spawnUnknown';
+  return laneEntry(lane, {
+    ...phaseFields('codex', inspected.phase),
+    outcome,
+    delivery: spawnPending ? (recoveredSpawnTurnId ? 'confirmed' : 'unknown') : inspected.turn ? 'confirmed' : 'unknown',
+    pendingOperation: spawnPending && !recoveredSpawnTurnId ? 'spawn' : null,
+    repaired,
+  });
+}
+
+// The entry for a lane whose recovery threw: a retryable cleanup keeps its
+// retirement pending; anything else is reported uncertain with its code.
+function recoveryFailureEntry(initial, error) {
+  if (error.code === 'CLEANUP_RETRYABLE') {
+    return {
+      laneId: initial.laneId, state: initial.state, outcome: 'cleanupRetryable', code: error.code,
+      providerRetired: true, cleanup: 'retryable', delivery: 'unknown', repaired: [], pendingOperation: 'retire',
+    };
+  }
+  const causeCode = error.details?.causeCode;
+  return {
+    laneId: initial.laneId, providerId: initial.providerId, state: initial.state, outcome: 'uncertain',
+    error: error.message, code: error.code || 'RECOVERY_ERROR', delivery: 'unknown', repaired: [], pendingOperation: null,
+    ...(causeCode ? { causeCode } : {}),
+    ...(error.details?.ownerAction ? { ownerAction: error.details.ownerAction } : {}),
+  };
+}
+
 // Reconcile one lane or the whole Codex fleet against the runtime. It repairs
 // what local state alone proves, then observes the provider for the rest,
 // never replaying an unknown mutation and never inferring creation from a title.
@@ -200,475 +495,12 @@ async function recover(options, env = process.env) {
     }
     for (const initial of providerLanes) {
       try {
-        const result = await withLaneLease(options.repoRoot, initial.laneId, async () => {
-          let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
-          let pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-          let operation = pending || operations.get(lane.operationId);
-          if (!lane.seat && lane.seatIntent && operation?.type === 'spawn') {
-            const seat = materializeManagedSeat(options.repoRoot, lane.seatIntent);
-            lane = bindLaneSeat(
-              options.repoRoot,
-              lane.laneId,
-              operation.operationId,
-              seat,
-              env,
-            );
-            pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-            operation = pending;
-          }
-          assertSeatIdentity(options, lane, env);
-
-          if (!lane.providerId) {
-            if (!operation?.providerId) {
-              return {
-                laneId: lane.laneId,
-                providerId: null,
-                state: lane.state,
-                outcome: 'spawnUnknown',
-                delivery: 'unknown',
-                repaired: [],
-                pendingOperation: 'spawn',
-              };
-            }
-            const candidate = { ...lane, providerId: operation.providerId };
-            const inspected = await inspectThread(client, candidate);
-            if (inspected.thread.cwd !== lane.seat.path) {
-              throw new TransmogrifyError('OWNERSHIP_MISMATCH', 'journaled provider cwd does not match reserved seat');
-            }
-            lane = bindLaneProvider(options.repoRoot, lane.laneId, operation.providerId, {
-              state: 'created',
-              runtime: client.runtimeIdentity,
-              ownership: {
-                creationReceipt: {
-                  providerId: operation.providerId,
-                  requestedCwd: lane.seat.path,
-                  responseCwd: null,
-                  cwd: inspected.thread.cwd,
-                  initializedUserAgent: initialized.userAgent,
-                  recoveredAt: new Date().toISOString(),
-                },
-              },
-            }, env);
-          } else {
-            assertRuntimeIdentity(lane, client);
-          }
-
-          if (lane.state === 'archivedVerified') {
-            const repaired = [];
-            if (lane.seat?.managed === true && options.cleanupWorktree !== false) {
-              if (operation?.type !== 'retire') {
-                throw new TransmogrifyError(
-                  'HARVEST_REQUIRED',
-                  'refusing recovered cleanup without a pending retirement harvest receipt',
-                );
-              }
-              lane = finishRetiredCleanup(
-                options,
-                lane,
-                operation,
-                retirementHarvestReceipt(operation),
-                env,
-              );
-              repaired.push('worktreeRemoved');
-            } else if (operation?.type === 'retire') {
-              completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-                state: 'complete',
-              }, env);
-            }
-            return {
-              laneId: lane.laneId,
-              providerId: lane.providerId,
-              state: lane.state,
-              outcome: 'retirementFinished',
-              delivery: 'confirmed',
-              repaired,
-              pendingOperation: null,
-            };
-          }
-          if (lane.state === 'retireRequested' || lane.state === 'archiveUnknown') {
-            if (operation?.type !== 'retire') {
-              throw new TransmogrifyError(
-                'HARVEST_REQUIRED',
-                'refusing retirement recovery without a pending harvest receipt',
-              );
-            }
-            const archived = await verifyArchived(client, lane, options);
-            if (!archived) {
-              return {
-                laneId: lane.laneId,
-                providerId: lane.providerId,
-                state: lane.state,
-                outcome: 'retirementPending',
-                delivery: 'unknown',
-                repaired: [],
-                pendingOperation: 'retire',
-              };
-            }
-            lane = updateLane(options.repoRoot, lane.laneId, {
-              state: 'archivedVerified',
-              lastVerifiedAt: new Date().toISOString(),
-            }, env);
-            operation = updatePendingLaneOperation(
-              options.repoRoot,
-              lane.laneId,
-              operation.operationId,
-              { state: 'providerRetired' },
-              env,
-            );
-            const repaired = ['archiveVerified'];
-            if (lane.seat?.managed === true && options.cleanupWorktree !== false) {
-              lane = finishRetiredCleanup(
-                options,
-                lane,
-                operation,
-                retirementHarvestReceipt(operation),
-                env,
-              );
-              repaired.push('worktreeRemoved');
-            } else {
-              completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-                state: 'complete',
-              }, env);
-            }
-            return {
-              laneId: lane.laneId,
-              providerId: lane.providerId,
-              state: lane.state,
-              outcome: 'archiveVerified',
-              delivery: 'confirmed',
-              repaired,
-              pendingOperation: null,
-            };
-          }
-          if (operation?.type === 'retire') {
-            return {
-              laneId: lane.laneId,
-              providerId: lane.providerId,
-              state: lane.state,
-              outcome: 'retirementPending',
-              delivery: 'unknown',
-              pendingOperation: 'retire',
-              repaired: [],
-            };
-          }
-
-          if (pending && ['steer', 'interrupt', 'resume'].includes(pending.type)) {
-            // A journal that never reached its provider request is proven
-            // undelivered. For a resume, thread/resume only loads the thread;
-            // the input goes out with turn/start, which is journaled as
-            // turnDispatching before it is sent, so every earlier resume state
-            // is undispatched input as well.
-            const undispatched = pending.type === 'resume'
-              ? UNDISPATCHED_RESUME_STATES.has(pending.state)
-              : pending.state === 'planned';
-            if (undispatched) {
-              completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
-                state: 'notDelivered',
-                details: {
-                  ...pending.details,
-                  recoveredBeforeDispatchAt: new Date().toISOString(),
-                },
-              }, env);
-              return {
-                laneId: lane.laneId,
-                providerId: lane.providerId,
-                state: lane.state,
-                outcome: `${pending.type}NotDelivered`,
-                delivery: 'notDelivered',
-                repaired: [`clearedUndispatched${pending.type[0].toUpperCase()}${pending.type.slice(1)}`],
-                pendingOperation: null,
-              };
-            }
-            const pendingInspection = await inspectThread(client, lane);
-            if (pending.type === 'steer') {
-              // turn/steer's response carries only { turnId }, no item body to
-              // verify inline the way turn/start's response can. The exact
-              // receipt is the same clientId marker turn/start uses, searched
-              // the same way; its absence only proves non-delivery once the
-              // target turn can no longer accept more steered input.
-              const recoveredTurnId = await findTurnByClientMessage(
-                client,
-                lane.providerId,
-                pending.operationId,
-                pending.details.messageSha256,
-              );
-              if (recoveredTurnId) {
-                if (recoveredTurnId !== pending.details.expectedTurnId) {
-                  throw new TransmogrifyError(
-                    'PROTOCOL_ERROR',
-                    'persisted steer input receipt named a different turn than the steer target',
-                  );
-                }
-                lane = updateLaneFromInspection(options, lane, pendingInspection, env);
-                completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
-                  state: 'complete',
-                  details: {
-                    ...pending.details,
-                    recoveredTurnId,
-                    postconditionObservedAt: new Date().toISOString(),
-                  },
-                }, env);
-                return {
-                  laneId: lane.laneId,
-                  providerId: lane.providerId,
-                  state: lane.state,
-                  ...phaseFields('codex', pendingInspection.phase),
-                  outcome: 'steerInputReceipt',
-                  delivery: 'confirmed',
-                  repaired: ['steerInputReceipt'],
-                  pendingOperation: null,
-                };
-              }
-              const targetIsActive = pendingInspection.turn?.id === pending.details.expectedTurnId &&
-                pendingInspection.turn.status === 'inProgress';
-              if (targetIsActive) {
-                return {
-                  laneId: lane.laneId,
-                  providerId: lane.providerId,
-                  state: lane.state,
-                  outcome: 'steerUnknown',
-                  delivery: 'unknown',
-                  pendingOperation: 'steer',
-                  repaired: [],
-                };
-              }
-              lane = updateLaneFromInspection(options, lane, pendingInspection, env);
-              completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
-                state: 'notDelivered',
-                details: {
-                  ...pending.details,
-                  notDeliveredObservedAt: new Date().toISOString(),
-                },
-              }, env);
-              return {
-                laneId: lane.laneId,
-                providerId: lane.providerId,
-                state: lane.state,
-                ...phaseFields('codex', pendingInspection.phase),
-                outcome: 'steerInputAbsent',
-                delivery: 'notDelivered',
-                repaired: ['steerInputAbsent'],
-                pendingOperation: null,
-              };
-            }
-            if (pending.type === 'interrupt') {
-              const targetIsActive = pendingInspection.turn?.id === pending.details.turnId &&
-                pendingInspection.turn.status === 'inProgress';
-              if (targetIsActive) {
-                return {
-                  laneId: lane.laneId,
-                  providerId: lane.providerId,
-                  state: lane.state,
-                  outcome: 'interruptUnknown',
-                  delivery: 'unknown',
-                  pendingOperation: 'interrupt',
-                  repaired: [],
-                };
-              }
-              lane = updateLaneFromInspection(options, lane, pendingInspection, env);
-              completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
-                state: 'complete',
-                details: {
-                  ...pending.details,
-                  postconditionObservedAt: new Date().toISOString(),
-                  observedTurnId: pendingInspection.turn?.id || null,
-                  observedTurnStatus: pendingInspection.turn?.status || null,
-                },
-              }, env);
-              return {
-                laneId: lane.laneId,
-                providerId: lane.providerId,
-                state: lane.state,
-                ...phaseFields('codex', pendingInspection.phase),
-                outcome: 'interruptSettled',
-                delivery: 'confirmed',
-                repaired: ['interruptPostcondition'],
-                pendingOperation: null,
-              };
-            }
-
-            const recoveredTurnId = await findTurnByClientMessage(
-              client,
-              lane.providerId,
-              pending.operationId,
-              pending.details.messageSha256,
-            );
-            if (recoveredTurnId) {
-              lane = updateLaneFromInspection(options, lane, pendingInspection, env);
-              completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
-                state: 'complete',
-                details: {
-                  ...pending.details,
-                  recoveredTurnId,
-                  postconditionObservedAt: new Date().toISOString(),
-                },
-              }, env);
-              return {
-                laneId: lane.laneId,
-                providerId: lane.providerId,
-                state: lane.state,
-                ...phaseFields('codex', pendingInspection.phase),
-                outcome: 'resumeInputReceipt',
-                delivery: 'confirmed',
-                repaired: ['resumeInputReceipt'],
-                pendingOperation: null,
-              };
-            }
-            return {
-              laneId: lane.laneId,
-              providerId: lane.providerId,
-              state: lane.state,
-              outcome: 'resumeUnknown',
-              delivery: 'unknown',
-              pendingOperation: 'resume',
-              repaired: [],
-            };
-          }
-
-          let inspected = await inspectThread(client, lane);
-          const repaired = [];
-          const spawnPending = operation?.type === 'spawn' &&
-            !TERMINAL_OPERATION_STATES.has(operation.state);
-          const recoveredSpawnTurnId = spawnPending
-            ? await findTurnByClientMessage(
-              client,
-              lane.providerId,
-              operation.operationId,
-              operation.details.inputSha256,
-            )
-            : null;
-          if (spawnPending && !recoveredSpawnTurnId &&
-              SPAWN_ABSENCE_JOURNAL_STATES.has(operation.state) &&
-              inspected.turn?.status !== 'inProgress' &&
-              typeof operation.details.turnDispatchStartedAt === 'string') {
-            const dispatchedAtMs = Date.parse(operation.details.turnDispatchStartedAt);
-            if (Number.isFinite(dispatchedAtMs) &&
-                nowMs(options) - dispatchedAtMs >= spawnAbsenceGraceMs(options)) {
-              const observedAbsentAt = new Date(nowMs(options)).toISOString();
-              completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-                state: 'notDelivered',
-                details: {
-                  ...operation.details,
-                  outcome: 'spawnInputAbsent',
-                  observedAbsentAt,
-                },
-              }, env);
-              // A spawn only reaches these journal states once its provider id
-              // is bound, so the lane here is one of created, deliveryUnknown,
-              // idle, or active (an earlier observation in this same call can
-              // advance it that far). LANE_TRANSITIONS gives every one of
-              // those a direct edge to failed, so no intermediate hop is
-              // needed.
-              lane = updateLane(options.repoRoot, lane.laneId, {
-                state: 'failed',
-                providerState: inspected.thread.status,
-                turnId: inspected.turn?.id || lane.turnId,
-                lastVerifiedAt: observedAbsentAt,
-              }, env);
-              return {
-                laneId: lane.laneId,
-                providerId: lane.providerId,
-                state: lane.state,
-                outcome: 'spawnInputAbsent',
-                delivery: 'notDelivered',
-                repaired: ['spawnInputAbsent'],
-                pendingOperation: null,
-              };
-            }
-          }
-          if (['created', 'materialized', 'deliveryUnknown'].includes(lane.state) &&
-              inspected.turn && (!spawnPending || recoveredSpawnTurnId)) {
-            if (inspected.thread.name !== lane.displayName) {
-              await client.call('thread/name/set', {
-                threadId: lane.providerId,
-                name: lane.displayName,
-              });
-              const readBack = await client.call('thread/read', {
-                threadId: lane.providerId,
-                includeTurns: false,
-              });
-              assertProviderSeat(lane, readBack?.thread, undefined, 'thread/read');
-              if (readBack.thread.name !== lane.displayName) {
-                throw new TransmogrifyError('PROTOCOL_ERROR', 'recovered thread name read-back did not match');
-              }
-              repaired.push('name');
-              inspected = { ...inspected, thread: readBack.thread };
-            }
-            repaired.push(spawnPending ? 'spawnInputReceipt' : 'turnReceipt');
-          }
-          lane = updateLane(options.repoRoot, lane.laneId, {
-            state: observedLaneState(lane, inspected.phase),
-            providerState: inspected.thread.status,
-            turnId: inspected.turn?.id || lane.turnId,
-            lastVerifiedAt: new Date().toISOString(),
-          }, env);
-          if (spawnPending && recoveredSpawnTurnId) {
-            const patch = {
-              state: 'complete',
-              details: {
-                ...operation.details,
-                recoveredTurnId: recoveredSpawnTurnId,
-                postconditionObservedAt: new Date().toISOString(),
-              },
-            };
-            const currentLane = requireOwnedLane(options.repoRoot, lane.laneId, env);
-            if (currentLane.pendingOperationId === operation.operationId) {
-              completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, patch, env);
-            } else {
-              updateOperation(options.repoRoot, operation.operationId, patch, env);
-            }
-          }
-          // A turn found for a still-pending spawn is that spawn's own input
-          // receipt; found with nothing pending, it is just this call's normal
-          // re-observation of an already-materialized lane.
-          const outcome = spawnPending
-            ? (recoveredSpawnTurnId ? 'spawnInputReceipt' : 'spawnUnknown')
-            : inspected.turn
-              ? (repaired.includes('turnReceipt') ? 'turnObserved' : 'verified')
-              : 'spawnUnknown';
-          return {
-            laneId: lane.laneId,
-            providerId: lane.providerId,
-            state: lane.state,
-            ...phaseFields('codex', inspected.phase),
-            outcome,
-            delivery: spawnPending
-              ? recoveredSpawnTurnId ? 'confirmed' : 'unknown'
-              : inspected.turn ? 'confirmed' : 'unknown',
-            pendingOperation: spawnPending && !recoveredSpawnTurnId ? 'spawn' : null,
-            repaired,
-          };
-        }, env);
+        const result = await withLaneLease(options.repoRoot, initial.laneId, () =>
+          recoverProviderLane(options, env, client, initialized, operations, initial)
+        );
         recovered.push(result);
       } catch (error) {
-        if (error.code === 'CLEANUP_RETRYABLE') {
-          recovered.push({
-            laneId: initial.laneId,
-            state: initial.state,
-            outcome: 'cleanupRetryable',
-            code: error.code,
-            providerRetired: true,
-            cleanup: 'retryable',
-            delivery: 'unknown',
-            repaired: [],
-            pendingOperation: 'retire',
-          });
-          continue;
-        }
-        const causeCode = error.details?.causeCode;
-        recovered.push({
-          laneId: initial.laneId,
-          providerId: initial.providerId,
-          state: initial.state,
-          outcome: 'uncertain',
-          error: error.message,
-          code: error.code || 'RECOVERY_ERROR',
-          delivery: 'unknown',
-          repaired: [],
-          pendingOperation: null,
-          ...(causeCode ? { causeCode } : {}),
-          ...(error.details?.ownerAction ? { ownerAction: error.details.ownerAction } : {}),
-        });
+        recovered.push(recoveryFailureEntry(initial, error));
       }
     }
     return {
