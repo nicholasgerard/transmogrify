@@ -129,24 +129,52 @@ reconcile.
 ## Priority 1: compatibility and acceptance hardening
 
 - Claude resume lineage. On CLI `2.1.258` a background resume of a stopped
-  job forks a new session; the adapter now stops that fork and leaves the lane
-  stopped. Either find an in-place resume (a future CLI flag, or attaching to
-  the stopped job) or adopt the fork as the lane's next session with explicit
-  lineage and retire every row in that lineage. Until then a stopped Claude
-  lane is retired or replaced, never resumed.
-- Close and rerun the Codex pre-restart-lane reattachment case after a Desktop
-  restart; capture the exact failing provider boundary if the current app tuple
-  still rejects it.
-- Evaluate the Desktop-owned SSH runtime path as the turnkey replacement for
-  the environment-variable attach. Determine whether Desktop's SSH launcher
-  uses `app-server daemon` and `app-server proxy`, identify its CLI-exposed
-  control socket and lifecycle owner, then prove that a second Transmogrify
-  client can initialize, create one disposable task, stream live in Desktop
-  and mobile, steer, stop, and archive without relaunching the app or
-  reconfiguring the Desktop-owned daemon. Until that passes, the measured
-  attach receipt stays the supported native path; the replacement must keep
-  bootstrap turnkey from both hosts. Private app sockets are not control
-  surfaces.
+  job forks a new session; the adapter stops that fork and leaves the lane
+  stopped. Plan: (1) measure on a disposable lane what the CLI produces on
+  resume (census rows before and after, the new transcript path, any parent
+  reference in `~/.claude/sessions/<pid>.json`, and whether `claude attach`
+  or a foreground `--resume` keeps the id); (2) if no in-place resume exists,
+  adopt the fork as the lane's next session only on proof (a parent reference
+  or our replayed prompt marker), recording a `lineage` of sessions in the
+  Claude identity schema with transitions like the runtime epochs, targeting
+  the newest session for status and steer, and stopping and archiving every
+  session in the lineage at retirement; an unproven fork stays
+  `forkedCopyStopped`. Acceptance: stop, recover, steer lands in the newest
+  transcript, retire clears every row. About 400 lines with tests.
+- Two acceptance rows still need Nick present: mobile reattachment after a
+  Desktop restart (spawn a narrating Codex probe, quit and relaunch Desktop
+  attached, confirm the lane is listed and streams on the iPhone, steer from
+  the phone, retire; if the thread is missing after the relaunch, `recover
+  --input` is the repair to test), and a seeded same-name foreign session
+  (Nick starts a hand-run `claude --bg --remote-control` and a hand-run Codex
+  thread with a lane's exact title; spawn, steer, and retire the lane; verify
+  by hand that the foreign sessions never receive anything and survive).
+- Replace the environment-variable attach with Codex's managed daemon
+  (researched 2026-09-03, plan in docs/NOTIFICATIONS.md's sibling notes and
+  the maintainer's plan). Findings: Desktop's SSH projects run a plain
+  `app-server --listen unix://` on the remote with `app-server proxy` over
+  SSH, not the daemon subsystem; Desktop's local host has an Electron-side
+  switch `CODEX_APP_SERVER_USE_LOCAL_DAEMON=1` that attaches it to the
+  managed daemon's control socket (`~/.codex/app-server-control/
+  app-server-control.sock`) with reconnect support instead of spawning a
+  private stdio child; `codex app-server daemon enable-remote-control`
+  claims to apply to a running managed daemon; Desktop bundles
+  `0.153.0-alpha.5` against the pinned `0.151.0`. Target: the managed daemon
+  becomes the shared runtime (our client speaks `ws+unix://`), Desktop
+  attaches on every Dock launch through a persisted `launchctl setenv`, and
+  the visibility receipt becomes the unix-socket connection. Experiments in
+  order, on a scratch `CODEX_HOME` and never on 8843: (1) `daemon start`,
+  `enable-remote-control`, same pid, second client through `proxy --sock`;
+  (2) `daemon bootstrap --remote-control`, our client over the socket,
+  cross-client `thread/status/changed` and `turn/completed` for a thread
+  another client created, steer, interrupt, archive, plus a schema diff
+  between 0.151.0 and 0.153.0-alpha.5; (3) with Nick, one deliberate Desktop
+  launch with the switch on a disposable profile, lsof receipt of the socket
+  connection, a thread from our client rendering on Desktop and iPhone;
+  (4) persistence across a Dock relaunch and a login. Kill criteria: pid
+  changes on enable, no cross-client fan-out, Desktop still spawns the stdio
+  child, or the thread does not render. Until it passes, the measured attach
+  receipt stays the supported native path.
 - Re-test the `mcp_servers.codex_app` launcher override counterfactual on a
   disposable runtime: confirm whether an attached Desktop still opens threads
   when the override is absent, so the launcher rule rests on a current receipt.
