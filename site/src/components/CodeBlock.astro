@@ -44,12 +44,25 @@ const trimmed = code.replace(/\n+$/, '');
     padding: var(--s-4);
     padding-inline-end: 5.5rem;
     overflow-x: auto;
+    overscroll-behavior-x: contain;
     font-size: clamp(0.75rem, 0.7rem + 0.2vw, 0.8125rem);
     line-height: 1.7;
     color: var(--text);
     /* Shell snippets keep their line structure; the container scrolls. */
     white-space: pre;
     tab-size: 2;
+    /* Same pure-CSS scroll shadow as the matrix: the `local` layers ride with
+       the content, so an edge shade shows only while a line runs past it. */
+    background:
+      linear-gradient(to right, var(--bg-sunken) 30%, transparent),
+      linear-gradient(to left, var(--bg-sunken) 30%, transparent),
+      radial-gradient(farthest-side at 0 50%, var(--scroll-shade), transparent),
+      radial-gradient(farthest-side at 100% 50%, var(--scroll-shade), transparent)
+      var(--bg-sunken);
+    background-position: 0 0, 100% 0, 0 0, 100% 0;
+    background-repeat: no-repeat;
+    background-size: 2.5rem 100%, 2.5rem 100%, 0.75rem 100%, 0.75rem 100%;
+    background-attachment: local, local, scroll, scroll;
   }
 
   /* The block scrolls horizontally, so it must be reachable and scrollable
@@ -74,7 +87,7 @@ const trimmed = code.replace(/\n+$/, '');
     letter-spacing: 0.09em;
     text-transform: uppercase;
     cursor: pointer;
-    transition: color 120ms ease, border-color 120ms ease;
+    transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
   }
 
   .copy-inline:hover {

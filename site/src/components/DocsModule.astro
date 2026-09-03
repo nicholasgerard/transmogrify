@@ -53,14 +53,17 @@ const facts = getRepoFacts();
     border-radius: var(--radius);
     background: var(--bg-raised);
     text-decoration: none;
-    transition: border-color 130ms ease, background-color 130ms ease, transform 130ms ease;
+    transition:
+      border-color var(--dur-2) var(--ease),
+      background-color var(--dur-2) var(--ease),
+      transform var(--dur-2) var(--ease);
   }
 
   a:hover {
     border-color: var(--accent);
     background: var(--bg-inset);
     color: inherit;
-    transform: translateY(-1px);
+    transform: translateY(-2px);
   }
 
   .head {
@@ -80,7 +83,7 @@ const facts = getRepoFacts();
   .arrow {
     flex: none;
     color: var(--faint);
-    transition: color 130ms ease;
+    transition: color var(--dur-2) var(--ease);
   }
 
   a:hover .arrow {

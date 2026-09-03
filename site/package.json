@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build && node scripts/build-start.mjs && node scripts/build-headers.mjs",
+    "build": "astro build && node scripts/minify-html.mjs && node scripts/build-start.mjs && node scripts/build-headers.mjs",
     "preview": "astro preview",
     "check": "astro check",
     "test": "node --test test/*.test.ts",

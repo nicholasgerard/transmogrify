@@ -3,9 +3,9 @@
 export const SITE_NAME = 'Transmogrify';
 export const SITE_ORIGIN = 'https://transmogrify.sh';
 export const SITE_TAGLINE =
-  'Operate exact-owned, worktree-seated Codex and Claude Code lanes with receipt-gated native app visibility.';
+  'Open-source agent orchestration built directly into the ChatGPT and Claude apps.';
 export const SITE_DESCRIPTION =
-  'Transmogrify is an open-source operator skill and zero-framework Node tools that let Codex or Claude Code create and manage exact-owned, worktree-seated agent lanes — with receipt-gated native visibility, provider-specific steering, recovery, and verified retirement.';
+  'Open-source agent orchestration built directly into the ChatGPT and Claude apps. Install one skill and either app can put the other to work — each job in its own worktree, visible while it runs, and steerable from your laptop or your phone.';
 
 /** Social card. Regenerate with `node scripts/make-images.mjs`. */
 export const OG_IMAGE = { path: '/og.png', width: 1200, height: 630 } as const;

@@ -46,7 +46,7 @@ Other commands:
 
 | Command | What it does |
 | --- | --- |
-| `npm run build` | Production build into `dist/`, then generates `/start` and `dist/_headers` |
+| `npm run build` | Production build into `dist/`, minifies the HTML, then generates `/start` and `dist/_headers` |
 | `npm run preview` | Serve the built `dist/` locally |
 | `npm run check` | `astro check` — Astro, TypeScript, and content-schema diagnostics |
 | `npm test` | Unit tests for the pure logic and the content guarantees |
@@ -178,6 +178,29 @@ before the first frame (so there is no flash of the wrong theme) and clears the
 Without JavaScript the page is fully usable: the prompt is present and
 selectable, and the copy button and theme control are *removed* rather than left
 as dead controls.
+
+## Motion
+
+There is no animation library and no scroll observer. The motion section at the
+end of `src/styles/global.css` has three pieces, and every one of them degrades
+to a static page:
+
+| Effect | Mechanism | Fallback |
+| --- | --- | --- |
+| Hero entrance | one `rise` keyframe with staggered delays | plain CSS animation; nothing to fail |
+| Section reveal on scroll | `animation-timeline: view()` behind `@supports` | content renders at its final state |
+| Masthead edge on scroll | `animation-timeline: scroll()` behind the same guard | flat header |
+| Page-to-page cross-fade | `@view-transition { navigation: auto }` | ordinary navigation |
+
+The masthead and footer carry `view-transition-name`, so they hold still while
+the page body cross-fades. Nothing animates layout, so none of it can cost a
+layout shift, and `prefers-reduced-motion: reduce` cancels all of it — including
+the view-transition pseudo-elements, which a `*` selector does not reach.
+
+Both horizontally scrollable regions — the support matrix and every shell
+snippet — use the `background-attachment: local` scroll-shadow pattern, so an
+edge shade appears only while there is more content in that direction. It needs
+no script and cannot fall out of sync with the scroll position.
 
 ## Security headers and caching
 

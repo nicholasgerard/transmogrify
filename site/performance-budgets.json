@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-02",
+  "updatedAt": "2026-09-03",
   "headroomPercent": 10,
   "globalLimits": {
     "maxAssetRawBytes": 262144,
@@ -8,42 +8,42 @@
     "maxStyleRawBytes": 65536
   },
   "deploy": {
-    "rawBytes": 272988
+    "rawBytes": 228290
   },
   "routes": {
     "/404": {
-      "rawBytes": 32322,
-      "gzipBytes": 8820,
-      "brotliBytes": 7453,
-      "jsBrotliBytes": 1359,
-      "cssBrotliBytes": 3292,
+      "rawBytes": 31299,
+      "gzipBytes": 8095,
+      "brotliBytes": 6858,
+      "jsBrotliBytes": 758,
+      "cssBrotliBytes": 3640,
       "mediaRawBytes": 0,
       "requests": 4
     },
     "/": {
-      "rawBytes": 91819,
-      "gzipBytes": 20848,
-      "brotliBytes": 17554,
-      "jsBrotliBytes": 1359,
-      "cssBrotliBytes": 5855,
+      "rawBytes": 73349,
+      "gzipBytes": 15795,
+      "brotliBytes": 13497,
+      "jsBrotliBytes": 758,
+      "cssBrotliBytes": 6163,
       "mediaRawBytes": 0,
       "requests": 4
     },
     "/privacy": {
-      "rawBytes": 42721,
-      "gzipBytes": 12832,
-      "brotliBytes": 10735,
-      "jsBrotliBytes": 1359,
-      "cssBrotliBytes": 3496,
+      "rawBytes": 41672,
+      "gzipBytes": 12198,
+      "brotliBytes": 10163,
+      "jsBrotliBytes": 758,
+      "cssBrotliBytes": 3844,
       "mediaRawBytes": 0,
       "requests": 4
     },
     "/terms": {
-      "rawBytes": 40223,
-      "gzipBytes": 11847,
-      "brotliBytes": 9903,
-      "jsBrotliBytes": 1359,
-      "cssBrotliBytes": 3496,
+      "rawBytes": 39202,
+      "gzipBytes": 11183,
+      "brotliBytes": 9310,
+      "jsBrotliBytes": 758,
+      "cssBrotliBytes": 3844,
       "mediaRawBytes": 0,
       "requests": 4
     }

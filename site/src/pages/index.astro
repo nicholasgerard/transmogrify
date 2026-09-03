@@ -17,47 +17,22 @@ const sections = (await getCollection('sections')).sort((a, b) => a.data.order -
 const rendered = await Promise.all(
   sections.map(async (entry) => ({ entry, Content: (await render(entry)).Content })),
 );
-
-const lifecycle = [
-  ['spawn', 'Reserve, then create a named lane in its own seat'],
-  ['steer', 'Direct the exact running lane'],
-  ['status', 'Re-resolve and revalidate exact owned identity'],
-  ['stop', 'Interrupt a Codex turn, or stop a whole Claude session'],
-  ['recover', 'Resume the same identity after an interruption'],
-  ['harvest', 'Persist output durably and hash it'],
-  ['retire', 'Archive the exact native row against a receipt'],
-  ['reconcile', 'Close pending journals by observation, never replay'],
-];
-
-const pins = [
-  { label: 'Codex app-server', value: facts.pins.supportedCodexRuntime.replace(/^app-server\s*/, '') },
-  { label: 'Codex Desktop', value: facts.pins.verifiedCodexDesktop },
-  { label: 'Codex mobile', value: facts.pins.verifiedCodexMobile.replace(/^ChatGPT for iOS\s*/, '') },
-  { label: 'Claude Code CLI', value: facts.pins.verifiedClaudeCli },
-  { label: 'Claude Desktop', value: facts.pins.verifiedClaudeDesktop },
-  { label: 'Claude mobile', value: facts.pins.verifiedClaudeMobile.replace(/^Claude for iOS\s*/, '') },
-  { label: 'Node.js', value: `${facts.nodeEngine}+` },
-  { label: 'Runtime deps', value: facts.runtimeDependencies.join(', ') },
-  { label: 'Live-verified', value: facts.pins.verifiedDate },
-];
 ---
 
-<BaseLayout title={`${SITE_NAME} — ${'one lifecycle for exact-owned agent lanes'}`} bare description={SITE_DESCRIPTION}>
+<BaseLayout title={`${SITE_NAME} — ${'your coding agents, working as a team'}`} bare description={SITE_DESCRIPTION}>
   <section class="hero" aria-labelledby="hero-title">
     <div class="shell hero-inner">
-      <p class="eyebrow">Open-source operator skill · zero-framework Node tools</p>
-      <h1 id="hero-title">Turn two different coding agents into one lifecycle you own.</h1>
+      <p class="eyebrow">For Claude and ChatGPT</p>
+      <h1 id="hero-title">Your coding agents, working as a team.</h1>
       <p class="lede hero-lede">
-        Transmogrify lets Codex or Claude Code create and manage exact-owned,
-        worktree-seated lanes in <em>either</em> provider — visible through the
-        verified native surfaces, steered through provider-native channels,
-        and never adopted by name.
+        Open-source agent orchestration built directly into the
+        <em>ChatGPT and Claude apps</em>.
       </p>
 
       <StartPrompt />
 
       <p class="secondary">
-        <a class="ghost-link" href="#install">How it installs</a>
+        <a class="ghost-link" href="#start">Get started</a>
         <span aria-hidden="true">·</span>
         <a class="ghost-link" href={docUrl(facts.repositoryUrl, 'SKILL.md')} rel="noopener noreferrer external">
           Read the skill<span class="sr-only"> (opens on github.com)</span>
@@ -67,36 +42,6 @@ const pins = [
           Source<span class="sr-only"> (opens on github.com)</span>
         </a>
       </p>
-    </div>
-
-    <div class="shell">
-      <dl class="pins" aria-label="Verified compatibility pins">
-        {
-          pins.map((pin) => (
-            <div>
-              <dt>{pin.label}</dt>
-              <dd>{pin.value}</dd>
-            </div>
-          ))
-        }
-      </dl>
-    </div>
-  </section>
-
-  <section class="lifecycle-band" aria-labelledby="lifecycle-title">
-    <div class="shell">
-      <h2 id="lifecycle-title" class="eyebrow">The eight verbs, whichever provider is behind them</h2>
-      <ol class="lifecycle">
-        {
-          lifecycle.map(([verb, gloss], index) => (
-            <li>
-              <span class="n">{String(index + 1).padStart(2, '0')}</span>
-              <span class="verb">{verb}</span>
-              <span class="gloss">{gloss}</span>
-            </li>
-          ))
-        }
-      </ol>
     </div>
   </section>
 
@@ -163,7 +108,7 @@ const pins = [
 
   .hero {
     position: relative;
-    padding-block: clamp(2.25rem, 5.5vw, 4rem) clamp(1.75rem, 4vw, 3rem);
+    padding-block: clamp(2.25rem, 5.5vw, 4rem) clamp(0.5rem, 1.5vw, 1.25rem);
     overflow: hidden;
   }
 
@@ -198,7 +143,10 @@ const pins = [
 
   .hero-lede {
     text-align: center;
-    max-inline-size: 58ch;
+    /* Wide enough to hold the one-sentence lede on a single line at desktop
+       widths; it wraps normally once the viewport is narrower than it. */
+    max-inline-size: 70ch;
+    text-wrap: pretty;
     margin-block-end: var(--s-2);
   }
 
@@ -234,97 +182,13 @@ const pins = [
     border-color: var(--accent);
   }
 
-  /* ------------------------------------------------------------------ pins */
-
-  .pins {
-    position: relative;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
-    gap: 1px;
-    margin-block-start: clamp(1.5rem, 3.5vw, 2.5rem);
-    background: var(--line);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .pins > div {
-    background: var(--bg-raised);
-    padding: var(--s-3) var(--s-4);
-  }
-
-  .pins dt {
-    font-family: var(--mono);
-    font-size: var(--step--2);
-    letter-spacing: 0.11em;
-    text-transform: uppercase;
-    color: var(--faint);
-  }
-
-  .pins dd {
-    margin: 0.2rem 0 0;
-    font-family: var(--mono);
-    font-size: var(--step-0);
-    color: var(--text);
-    overflow-wrap: anywhere;
-  }
-
-  /* ------------------------------------------------------------- lifecycle */
-
-  .lifecycle-band {
-    border-block: 1px solid var(--line);
-    background: var(--bg-sunken);
-    padding-block: var(--s-6);
-  }
-
-  .lifecycle-band h2 {
-    margin-block-end: var(--s-4);
-  }
-
-  .lifecycle {
-    list-style: none;
-    padding: 0;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-    gap: var(--s-4) var(--s-5);
-  }
-
-  .lifecycle li {
-    display: grid;
-    grid-template-columns: 1.75rem minmax(0, 1fr);
-    gap: 0 var(--s-2);
-    padding-block-start: var(--s-2);
-    border-block-start: 1px solid var(--line-strong);
-  }
-
-  .n {
-    grid-row: 1 / span 2;
-    font-family: var(--mono);
-    font-size: var(--step--2);
-    color: var(--accent-dim);
-    padding-block-start: 0.22rem;
-  }
-
-  .verb {
-    font-family: var(--mono);
-    font-size: var(--step-0);
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .gloss {
-    color: var(--muted);
-    font-size: var(--step--1);
-    line-height: 1.5;
-  }
-
   /* ----------------------------------------------------------------- board */
 
   .board {
     display: grid;
     grid-template-columns: 12.5rem minmax(0, 1fr);
     gap: clamp(1.5rem, 5vw, 4.5rem);
-    padding-block: clamp(2.5rem, 6vw, 4.5rem);
+    padding-block: clamp(2rem, 4.5vw, 3.5rem) clamp(2.5rem, 6vw, 4.5rem);
   }
 
   .index {
@@ -428,6 +292,14 @@ const pins = [
     display: grid;
     gap: var(--s-5);
     padding-inline-start: calc(3.25rem + var(--s-4));
+  }
+
+  /* A grid item's automatic minimum size is its min-content, so the matrix
+     table's 46rem floor would widen this column instead of scrolling inside
+     its own wrapper. Let the items shrink and the wrapper do its job. */
+  .section-body > :global(*),
+  .sections > .section {
+    min-inline-size: 0;
   }
 
   .section-body > .prose:empty {

@@ -1,65 +1,48 @@
 ---
 order: 1
-anchor: definition
+anchor: what
 label: What it is
 number: '01'
-title: One lifecycle, two providers, no pretending
+title: What it is
 lede: >-
-  Codex and Claude Code do not share a transport, and Transmogrify does not
-  invent one. It gives both the same observable contract — and the same
-  refusals — over each provider's own native channel.
+  Install it once in Claude Code or Codex. After that, either app can hand work
+  to the other and watch it run.
 module: ledger
 ledger:
-  - term: One provider-neutral lifecycle
+  - term: Work in either direction
     tone: affirm
     detail: >-
-      Spawn, steer, status, stop or interrupt, recover, harvest, retire,
-      reconcile. The same eight verbs whichever provider is behind them.
-  - term: A single common transport
-    tone: deny
-    detail: >-
-      Codex lanes speak JSON-RPC to a shared `codex app-server` WebSocket.
-      Claude lanes use public background Remote Control sessions and `--cloud`
-      follow-ups. Transport symmetry is not the goal; lifecycle parity is.
-  - term: Native app visibility, with a receipt
+      Claude Code can hand a job to Codex, and Codex can hand one back. The
+      commands are the same in either direction.
+  - term: A separate worktree per job
     tone: affirm
     detail: >-
-      Claude lanes present through Remote Control with a recorded deep-link
-      receipt. Codex lanes carry a measured Desktop attachment receipt: the
-      app holds a live connection to the shared runtime, or the lane is
-      labelled protocol-only by explicit flag. The support matrix below is
-      rendered from the repository.
-  - term: GUI automation
-    tone: deny
-    detail: >-
-      No part of the control plane drives a desktop application. Deep links may
-      present a session that is already owned; identity and control come from
-      provider or measured local interfaces.
-  - term: Exact ownership, recorded before the provider is touched
+      Jobs run in separate checkouts, so two agents never edit the same files.
+      A worktree is removed only if nothing changed in it after you collected
+      the work.
+  - term: Named sessions you can watch
     tone: affirm
     detail: >-
-      Every mutation resolves a lane registered by this installation, with an
-      exact provider identity, seat identity, runtime identity, and one pending
-      operation pointer.
-  - term: Adoption by name, path, age, or short ID
-    tone: deny
-    detail: >-
-      Those are discovery evidence. They are never ownership. Ambiguity is a
-      hard refusal, not a reason to mutate every match.
-  - term: Worktree seating
+      Jobs show up as named sessions in Codex Desktop, the ChatGPT app, and
+      Claude's Remote Control, on your laptop or your phone.
+  - term: Jobs that outlive their operator
     tone: affirm
     detail: >-
-      Each lane gets its own Git worktree seat, pinned by absolute path, kept
-      outside the repository's tracked tree.
-  - term: A server, an account, or a hosted service
+      Close the agent that kicked a job off and the job keeps running under the
+      same name. Pick it up again whenever you want.
+  - term: A server, an account, or telemetry
     tone: deny
     detail: >-
-      Transmogrify is an installed skill plus standalone Node tools. Operation
-      and recovery never depend on DNS or on this website, and neither does
-      installation from a Git checkout; the `/start` prompt is a convenience,
-      not a dependency.
+      A skill and a few Node scripts on your machine. Nothing phones home, and
+      nothing needs this website in order to keep working.
 ---
 
-The host repository stays the authority for **what** a lane may do — scope,
-reviews, merges, deployments, spend, owner approvals. Transmogrify only owns
-**how** the lane runs.
+Give one coding agent a big piece of work and it will spawn helpers. What you
+get back is a terminal full of unnamed subprocesses. You cannot tell which one
+is doing what, you cannot send any of them a follow-up, and when the session
+that started them exits, so do they.
+
+Transmogrify names each job and gives it its own Git worktree. It calls them
+lanes. You can watch a lane in the app, send it more instructions while it
+runs, collect what it wrote, and close it out, and that works the same way
+whichever agent started it.
