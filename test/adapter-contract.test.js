@@ -71,7 +71,10 @@ for (const adapter of ADAPTERS) {
     const laneId = '12121212-1212-4121-8121-121212121212';
     const operationId = '34343434-3434-4343-8343-343434343434';
     reserveSpawn(fixture.repoRoot, {
-      operation: { operationId, type: 'spawn', laneId, details: { target: adapter.descriptor.target, name: '[test] unstarted' } },
+      operation: {
+        operationId, type: 'spawn', laneId,
+        details: { target: adapter.descriptor.target, name: '[test] unstarted', spawner: { pid: 999999, processBirth: 'gone' } },
+      },
       lane: {
         laneId,
         backend: adapter.descriptor.backend,

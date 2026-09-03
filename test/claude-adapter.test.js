@@ -943,7 +943,7 @@ function reserveUnstartedClaudeLane(fixture, operationState = 'planned') {
       operationId,
       type: 'spawn',
       laneId,
-      details: {
+      details: { spawner: { pid: 999999, processBirth: 'gone' },
         target: 'claude',
         name,
         promptSha256: 'a'.repeat(64),
