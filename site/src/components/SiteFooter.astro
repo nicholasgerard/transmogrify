@@ -1,7 +1,7 @@
 ---
 import Wordmark from './Wordmark.astro';
 import { getRepoFacts } from '../lib/repo-facts.node.ts';
-import { docUrl } from '../lib/site.ts';
+import { SITE_TAGLINE, docUrl } from '../lib/site.ts';
 
 interface Props {
   analyticsConfigured: boolean;
@@ -54,9 +54,7 @@ const columns = [
     <div class="grid">
       <div class="identity">
         <Wordmark />
-        <p>
-          One skill that lets your coding agents put each other to work.
-        </p>
+        <p>{SITE_TAGLINE}</p>
         <p class="pins">
           v{facts.packageVersion} · Node {facts.nodeEngine}+ · verified {facts.pins.verifiedDate}
         </p>
