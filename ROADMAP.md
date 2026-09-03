@@ -89,6 +89,12 @@ provider or measured local interfaces.
 
 ## Priority 1: compatibility and acceptance hardening
 
+- Claude resume lineage. On CLI `2.1.258` a background resume of a stopped
+  job forks a new session; the adapter now stops that fork and leaves the lane
+  stopped. Either find an in-place resume (a future CLI flag, or attaching to
+  the stopped job) or adopt the fork as the lane's next session with explicit
+  lineage and retire every row in that lineage. Until then a stopped Claude
+  lane is retired or replaced, never resumed.
 - Close and rerun the Codex pre-restart-lane reattachment case after a Desktop
   restart; capture the exact failing provider boundary if the current app tuple
   still rejects it.

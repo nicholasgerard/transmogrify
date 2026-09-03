@@ -21,8 +21,9 @@ not consumer Chat.
   lifecycle.
 - A provider session is never owned on CLI output alone. Ownership is the full
   correlation below.
-- Unrelated concurrent sessions are ignored, and a correlated same-name or
-  same-seat copy is rejected rather than adopted.
+- Unrelated concurrent sessions are ignored. A correlated same-name,
+  same-seat copy that a recovery's own command created is stopped, never
+  removed, and never adopted.
 - `claude rm` deletes the background session and its worktree. It is
   destructive cleanup, not a record-only operation, and runs only after the
   managed seat path is already absent.
@@ -171,6 +172,14 @@ It binds a new worker and socket epoch before restoring control. An ambiguous
 resume is reconciled against the same full UUID and Remote Control bridge
 rather than resumed a second time.
 
+On the pinned CLI, resuming a stopped background job produced a new job with a
+new session id and its own transcript (observed 2026-09-03), so in-place
+recovery of a stopped lane is not available on this build. The adapter treats
+that result as a fork: it stops the copy its own command created inside the
+recorded dispatch window, closes the recovery journal as `forkedCopyStopped`,
+and leaves the lane stopped so it can be retired or replaced. A recovery whose
+window passes with no running session settles as `recoveryNotAchieved`.
+
 An already-running worker can be encountered after a verified provider
 upgrade. Reconciliation treats that as an explicit append-only runtime
 transition, not an implicit version substitution. It requires an unchanged
@@ -295,7 +304,8 @@ platforms cannot support the design.
 | Lane appears in Claude mobile Code session list | Live-verified |
 | Transmogrify observes status | Implemented and live-verified |
 | Transmogrify steers exact running lane | Implemented with public `--cloud` follow-up and live-verified |
-| Transmogrify stops and resumes exact lane | Implemented and live-verified |
+| Transmogrify stops exact lane | Implemented and live-verified |
+| Transmogrify resumes a stopped lane in place | Not available on CLI `2.1.258`: a background resume forks a new session (observed 2026-09-03); the adapter stops the fork it created and settles the lane as stopped |
 | Transmogrify archives native row | Implemented through pinned private API and live-verified |
 | Transmogrify removes only its clean managed worktree | Implemented and adversarially tested |
 | Transmogrify clears local Claude record without risking an external/deferred seat | Managed-seat ordering implemented and tested; external/deferred removal is intentionally deferred |

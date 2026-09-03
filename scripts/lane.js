@@ -154,9 +154,13 @@ const SAFE_DETAIL_KEYS = new Set([
   'causeMessage',
   'cleanup',
   'code',
+  'copiesStopped',
+  'correlatedCopies',
   'delivery',
   'exactSession',
+  'dispatchId',
   'executionEpoch',
+  'failures',
   'httpStatus',
   'laneId',
   'localRemoval',
@@ -216,7 +220,7 @@ const PUBLIC_ERROR_MESSAGES = new Map([
   ['DELIVERY_UNCERTAIN', 'provider delivery outcome is unknown'],
   ['EXECUTION_EPOCH_UNBOUND', 'live provider execution no longer matches the owned receipt'],
   ['EXECUTION_PROFILE_UNSUPPORTED', 'the requested model, effort, or speed is unsupported'],
-  ['FORKED_COPY', 'recovery may have created a separate provider session; no copy was touched'],
+  ['FORKED_COPY', 'recovery forked into a separate provider session; the fork this recovery created was stopped and the lane remains stopped'],
   ['HARVEST_MISMATCH', 'the supplied harvest receipt does not match the durable retirement receipt'],
   ['HARVEST_REQUIRED', 'retirement requires a durable harvested-output receipt'],
   ['HOST_CALLBACK_FAILED', 'lane launch is verified; the host launch callback failed'],
@@ -805,7 +809,10 @@ async function waitForParentEvent(context, values, env) {
     if (observed.errors.length > 0) {
       const error = new Error('one or more exact child observations failed');
       error.code = 'OBSERVATION_FAILED';
-      error.details = { attempted: observed.dispatches.length };
+      error.details = {
+        attempted: observed.dispatches.length,
+        failures: errors.map((entry) => ({ dispatchId: entry.dispatchId, code: entry.code })),
+      };
       throw error;
     }
     if (Date.now() >= deadline) {

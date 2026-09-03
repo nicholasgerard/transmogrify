@@ -77,6 +77,10 @@ const UNBOUND_PROVIDER_RECEIPT = Object.freeze({
   unbound: true, stop: 'notAttempted', archive: 'notAttempted', localRemoval: 'notAttempted',
 });
 const OWNER_ACTIONS = new Map([
+  ['FORKED_COPY',
+    'This Claude CLI build resumes a stopped background job as a new session, a fork. The fork ' +
+    'this recovery created was stopped and the lane stays stopped with its original session. ' +
+    'Retire the lane with a harvest digest, or spawn a new lane.'],
   ['REMOTE_CONTROL_UNAVAILABLE',
     'The session never registered Remote Control, usually because the Claude login broke at launch. ' +
     'Run claude auth status and, if it is logged out, claude auth login. Then stop and remove that ' +
@@ -1226,7 +1230,7 @@ function correlatedRecoveryCopies(agents, lane, operation) {
 async function observeRecovery(options, env, surface, runtime, lane, operation, deadline = null) {
   const located = await pollAgents(surface, runtime, (agents) => {
     const copies = correlatedRecoveryCopies(agents, lane, operation);
-    if (copies.length) return { forked: copies.map((agent) => agent.sessionId) };
+    if (copies.length) return { forked: copies };
     try {
       const agent = surface.exactOwnedAgent(agents, lane.providerIdentity, {
         name: lane.displayName, cwd: lane.seat.path,
@@ -1238,11 +1242,34 @@ async function observeRecovery(options, env, surface, runtime, lane, operation, 
     delayMs: options.recoveryVerifyDelayMs,
     deadline,
   });
-  if (!located) return null;
+  if (!located) {
+    // The dispatch window has passed with no running exact session and no
+    // correlated copy: the resume did not happen. Close the journal so the
+    // lane can be retired or replaced instead of staying uncertain forever.
+    const notAfter = operation.details.dispatchNotAfter;
+    if (Number.isFinite(notAfter) && Date.now() > notAfter) {
+      const settled = settleFailedRecovery(options, env, lane, operation, { outcome: 'recoveryNotAchieved' });
+      return { settled: 'recoveryNotAchieved', lane: settled };
+    }
+    return null;
+  }
   if (located.result.forked) {
+    // The pinned CLI resumes a stopped background job as a new session. The
+    // copies are ours: they were created by this recovery's own command, in
+    // this seat, inside the recorded window. Stop them (never remove them),
+    // close the journal, and leave the lane stopped with its original session.
+    const stopped = await stopCorrelatedCopies(options, surface, runtime, located.result.forked);
+    settleFailedRecovery(options, env, lane, operation, {
+      outcome: 'forkedCopyStopped', correlatedCopies: located.result.forked.length,
+      copiesStopped: stopped.stopped, copiesStopFailed: stopped.failed,
+    });
     throw new ClaudeTransmogrifyError(
-      'FORKED_COPY', 'Claude recovery correlated a new session with this lane; no copy was touched',
-      { correlatedCopies: located.result.forked.length },
+      'FORKED_COPY',
+      'Claude recovery forked into a separate session; the fork this recovery created was stopped and the lane remains stopped',
+      {
+        correlatedCopies: located.result.forked.length, copiesStopped: stopped.stopped,
+        ownerAction: OWNER_ACTIONS.get('FORKED_COPY'),
+      },
     );
   }
   const discovery = surface.discoverExecution(runtime, {
@@ -1275,6 +1302,31 @@ async function observeRecovery(options, env, surface, runtime, lane, operation, 
     },
   }, env);
   return { lane, presentation: presented.presentation };
+}
+async function stopCorrelatedCopies(options, surface, runtime, copies) {
+  let stopped = 0;
+  let failed = 0;
+  for (const copy of copies) {
+    if (typeof copy?.id !== 'string' || !/^[0-9a-f]{8}$/iu.test(copy.id)) { failed += 1; continue; }
+    try {
+      await surface.run(runtime, ['stop', copy.id], {
+        cwd: options.repoRoot, timeoutMs: options.commandTimeoutMs,
+      });
+      stopped += 1;
+    } catch { failed += 1; }
+  }
+  return { stopped, failed };
+}
+// Close a recovery journal as failed and return the lane to stopped, which is
+// a valid transition from both recoverRequested and deliveryUnknown.
+function settleFailedRecovery(options, env, lane, operation, details) {
+  completePending(options.repoRoot, lane.laneId, operation, {
+    state: 'failed',
+    details: { ...operation.details, ...details, settledAt: new Date().toISOString() },
+  }, env);
+  const current = requireOwnedLane(options.repoRoot, lane.laneId, env);
+  return current.state === 'stopped'
+    ? current : updateLane(options.repoRoot, lane.laneId, { state: 'stopped' }, env);
 }
 // Resume a stopped lane as the same session with its pinned execution profile.
 // It refuses a lane that is already running, journals the baseline session census
@@ -1330,7 +1382,7 @@ async function recover(options, env = process.env) {
           .filter((agent) => typeof agent.sessionId === 'string')
           .map((agent) => agent.sessionId.toLowerCase()).sort(),
         dispatchStartedAt,
-        dispatchNotAfter: dispatchStartedAt + commandWindowMs + 5000,
+        dispatchNotAfter: dispatchStartedAt + commandWindowMs + (options.recoveryWindowSlackMs ?? 5000),
       },
     }, env);
     lane = updateLane(options.repoRoot, lane.laneId, { state: 'recoverRequested' }, env);
@@ -1359,6 +1411,12 @@ async function recover(options, env = process.env) {
     try {
       const observed = await observeRecovery(options, env, surface, runtime, lane, operation);
       if (!observed) throw new ClaudeTransmogrifyError('RECOVERY_UNCERTAIN', 'same-session Claude recovery was not verified');
+      if (observed.settled) {
+        throw new ClaudeTransmogrifyError(
+          'RECOVERY_UNCERTAIN', 'Claude recovery did not produce a running session; the lane remains stopped',
+          { causeCode: 'RECOVERY_NOT_ACHIEVED' },
+        );
+      }
       return laneResult('recover', observed.lane, {
         operationId: operation.operationId,
         receipt: {
@@ -2423,7 +2481,7 @@ async function reconcile(options, env = process.env) {
           return {
             laneId: lane.laneId, providerId: lane.providerId,
             state: recovered ? recovered.lane.state : lane.state,
-            outcome: recovered ? 'recoveryVerified' : 'recoveryUnknown',
+            outcome: recovered ? (recovered.settled || 'recoveryVerified') : 'recoveryUnknown',
           };
         }
         if (operation) {
@@ -2454,12 +2512,21 @@ async function reconcile(options, env = process.env) {
         });
         continue;
       }
+      if (error.code === 'FORKED_COPY' && error.details?.copiesStopped !== undefined) {
+        results.push({
+          laneId: initial.laneId, providerId: initial.providerId, state: 'stopped',
+          outcome: 'forkedCopyStopped', code: error.code,
+          copiesStopped: error.details.copiesStopped, ownerAction: error.details.ownerAction,
+        });
+        continue;
+      }
       const causeCode = error.details?.causeCode;
       results.push({
         laneId: initial.laneId, providerId: initial.providerId, state: initial.state,
         outcome: 'uncertain', code: error.code || 'RECONCILIATION_UNCERTAIN', error: error.message,
         ...(causeCode ? { causeCode } : {}),
-        ...(ownerActionFor(causeCode) ? { ownerAction: ownerActionFor(causeCode) } : {}),
+        ...((error.details?.ownerAction || ownerActionFor(causeCode))
+          ? { ownerAction: error.details?.ownerAction || ownerActionFor(causeCode) } : {}),
       });
     }
   }

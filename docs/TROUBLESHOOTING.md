@@ -37,6 +37,7 @@ Add `--url` only to Codex commands when the runtime is not the default
 | Mobile task fails after a Desktop restart | [Codex mobile Remote access](#codex-mobile-remote-access) |
 | Claude CLI, account, Desktop, or Keychain refusal | [Claude compatibility or authentication problems](#claude-compatibility-or-authentication-problems) |
 | `SPAWN_UNCERTAIN` with `causeCode` `TRANSCRIPT_RECEIPT_PENDING` or `REMOTE_CONTROL_UNAVAILABLE`, `spawnJobAbsent` | [Claude spawn did not verify](#claude-spawn-did-not-verify) |
+| `FORKED_COPY`, `forkedCopyStopped`, `recoveryNotAchieved` | [Claude recovery forked or did not resume](#claude-recovery-forked-or-did-not-resume) |
 | `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
 | `CLEANUP_RETRYABLE`, `CLEANUP_BLOCKED` | [Cleanup is blocked](#cleanup-is-blocked) |
 
@@ -325,6 +326,21 @@ its receipts could not be verified. The refusal and the lane's journal carry
 
 Reconcile never replays a spawn. A lane whose job is still listed keeps its
 journal open and repeats the cause and the owner action on every reconcile.
+
+## Claude recovery forked or did not resume
+
+`recover` on a stopped Claude lane runs `claude --resume <session> --bg`. On
+the pinned CLI that command starts a new job with a new session id and its
+own transcript instead of reviving the stopped one, so the adapter reports
+`RECOVERY_UNCERTAIN` with `causeCode` `FORKED_COPY`: it stopped the copy its
+own command created (never removed it, never adopted it), closed the journal
+as `forkedCopyStopped`, and left the lane stopped with its original session.
+Retire the lane with a harvest digest, or spawn a new lane; do not resume by
+hand. A recovery whose dispatch window passes with no running session and no
+copy settles on the next `reconcile` as `recoveryNotAchieved`, also leaving
+the lane stopped. The stopped fork's local record can be removed with
+`claude rm <job>` after review, and its Remote Control row archived in the
+app.
 
 ## Pending or uncertain operation
 

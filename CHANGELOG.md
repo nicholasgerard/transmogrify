@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.4
+
+- Contain a forked Claude recovery: on the pinned CLI a background resume of
+  a stopped job starts a new session, so `recover` now stops the copy its own
+  command created, closes the journal as `forkedCopyStopped`, and leaves the
+  lane stopped for retirement or replacement; a recovery whose window passes
+  with no running session settles as `recoveryNotAchieved` on reconcile.
+- Name each child whose observation failed inside a `wait` error.
+- Record the resume behaviour honestly in the Claude integration document,
+  the troubleshooting guide, and the roadmap.
+
 ## 0.2.3
 
 - Wait for a Claude session's first receipts: spawn retries the transcript

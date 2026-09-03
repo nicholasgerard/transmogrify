@@ -175,16 +175,18 @@ function createFakeSurface(configuration = {}) {
     async run(_runtime, args, options) {
       calls.push({ method: 'run', args, options });
       if (args[0] === 'stop') {
-        assert.equal(args[1], jobId);
-        rows = rows.map((row) => row.sessionId === sessionId
+        assert.ok(rows.some((row) => row.id === args[1]), 'stop targets a listed job');
+        rows = rows.map((row) => row.id === args[1]
           ? { ...row, pid: null, status: 'stopped' }
           : row);
       } else if (args[0] === '--resume') {
         assert.deepEqual(args, surface.expectedResumeArgs || ['--resume', sessionId, '--bg']);
-        currentPid = 202;
-        rows = rows.map((row) => row.sessionId === sessionId
-          ? { ...row, pid: currentPid, status: 'idle' }
-          : row);
+        if (!surface.resumeDoesNothing) {
+          currentPid = 202;
+          rows = rows.map((row) => row.sessionId === sessionId
+            ? { ...row, pid: currentPid, status: 'idle' }
+            : row);
+        }
         if (surface.resumeExtraRows) {
           rows.push(...surface.resumeExtraRows.map((row) => ({ ...row })));
         }
@@ -1431,11 +1433,47 @@ test('Claude recovery ignores unrelated concurrent rows but rejects a correlated
     surface: correlated.surface,
     recoveryVerifyAttempts: 1,
   }, correlated.fixture.env), (error) =>
-    error.code === 'RECOVERY_UNCERTAIN' && error.details.causeCode === 'FORKED_COPY'
+    error.code === 'RECOVERY_UNCERTAIN' && error.details.causeCode === 'FORKED_COPY' &&
+    error.details.copiesStopped === 1 && /fork/.test(error.details.ownerAction)
   );
-  const touchedCopy = correlated.surface.calls.some((call) =>
+  // The fork was created by this recovery's own command, so it is stopped,
+  // never removed, and never adopted; the lane returns to stopped with a
+  // closed journal.
+  const copyCalls = correlated.surface.calls.filter((call) =>
     call.method === 'run' && call.args.some((argument) => argument === '44444444'));
-  assert.equal(touchedCopy, false);
+  assert.deepEqual(copyCalls.map((call) => call.args[0]), ['stop']);
+  assert.equal(correlated.surface.getRows().find((row) => row.id === '44444444').status, 'stopped');
+  assert.equal(pendingOperationForLane(correlated.fixture.repoRoot, correlated.lane.laneId, correlated.fixture.env), null);
+  assert.equal(listLanes(correlated.fixture.repoRoot, correlated.fixture.env)
+    .find((entry) => entry.laneId === correlated.lane.laneId).state, 'stopped');
+  const recoverOperation = listOperations(correlated.fixture.repoRoot, correlated.fixture.env)
+    .find((operation) => operation.type === 'recover' && operation.laneId === correlated.lane.laneId);
+  assert.equal(recoverOperation.state, 'failed');
+  assert.equal(recoverOperation.details.outcome, 'forkedCopyStopped');
+});
+
+test('Claude reconcile settles a recovery that never produced a running session', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  await stop({ repoRoot: fixture.repoRoot, laneId: lane.laneId, surface, stopVerifyAttempts: 1 }, fixture.env);
+  surface.resumeDoesNothing = true;
+  await assert.rejects(() => recover({
+    repoRoot: fixture.repoRoot, laneId: lane.laneId, surface,
+    recoveryVerifyAttempts: 1, recoveryVerifyDelayMs: 0, commandTimeoutMs: 1000, recoveryWindowSlackMs: 0,
+  }, fixture.env), (error) => error.code === 'RECOVERY_UNCERTAIN');
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
+  const early = await reconcile({
+    repoRoot: fixture.repoRoot, laneId: lane.laneId, surface, recoveryVerifyAttempts: 1, recoveryVerifyDelayMs: 0,
+  }, fixture.env);
+  assert.equal(early.results[0].outcome, 'recoveryUnknown');
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const result = await reconcile({
+    repoRoot: fixture.repoRoot, laneId: lane.laneId, surface, recoveryVerifyAttempts: 1, recoveryVerifyDelayMs: 0,
+  }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(result.results[0].outcome, 'recoveryNotAchieved');
+  assert.equal(result.results[0].state, 'stopped');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  assert.equal(surface.calls.filter((call) => call.method === 'run' && call.args[0] === '--resume').length, 1);
 });
 
 test('Claude retirement without a harvest digest performs no provider or private mutation', async (t) => {
