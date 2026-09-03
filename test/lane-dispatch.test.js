@@ -9,7 +9,7 @@ const test = require('node:test');
 const { main } = require('../scripts/lane');
 const { retire: retireCodex, spawn: spawnCodex } = require('../scripts/lib/codex-adapter');
 const {
-  countEvents, createParentContext, pathsFor, reserveDispatch, listDispatches, recordEvent,
+  countEvents, createParentContext, pathsFor, reserveDispatch, listDispatches, recordEvent, recordParentWake, loadParentContext,
 } = require('../scripts/lib/dispatch');
 const {
   completeLaneOperation, ensureRegistry, listLanes, listOperations, pendingOperationForLane,
@@ -471,4 +471,32 @@ test('ack --through acknowledges every pending event up to a sequence and nothin
   const single = await main(['ack', '--parent-context-file', parentContext.file, '--event', third.eventId], fixture.env);
   assert.deepEqual([single.eventId, single.acknowledged, single.count], [third.eventId, [third.eventId], 1]);
   assert.equal(countEvents(parentContext, {}, fixture.env), 0);
+});
+
+test('parent-init rediscovers the wake channel on re-adoption instead of keeping an earlier session\'s', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  // The test process may itself run under a Claude session; point discovery
+  // at an empty config directory so the environment cannot supply a bridge.
+  const configDir = fs.mkdtempSync(path.join(fixture.root, 'claude-config-'));
+  fixture.env = { ...fixture.env, CLAUDE_CONFIG_DIR: configDir };
+  const first = await main([
+    'parent-init', '--host-provider', 'claude', '--host-app', 'claude-code', '--name', 'Re-adopted parent',
+    '--native-task-ref', 'task-readopt-1',
+  ], fixture.env);
+  assert.equal(first.wake.channel, 'none', 'no Claude ancestor in the test process');
+  recordParentWake(first.contextFile, {
+    channel: 'claude-bridge', id: 'session_staleBridge1', cwd: null, receipt: { source: 'earlier-session' },
+  }, fixture.env);
+  const again = await main([
+    'parent-init', '--host-provider', 'claude', '--host-app', 'claude-code', '--name', 'Re-adopted parent',
+    '--native-task-ref', 'task-readopt-1',
+  ], fixture.env);
+  assert.equal(again.parentRef, first.parentRef, 'the same context is re-adopted');
+  assert.equal(again.wake.channel, 'none', 'the stale bridge is not kept');
+  assert.equal(loadParentContext(first.contextFile, fixture.env).parent.wake.channel, 'none');
+  const kept = await main([
+    'parent-init', '--host-provider', 'claude', '--host-app', 'claude-code', '--name', 'Re-adopted parent',
+    '--native-task-ref', 'task-readopt-1', '--wake', 'none',
+  ], fixture.env);
+  assert.equal(kept.wake.channel, 'none');
 });

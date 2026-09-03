@@ -505,7 +505,7 @@ async function main(argv, env = process.env) {
       'self-nonce': { type: 'string' },
       'parent-context-file': { type: 'string' },
       event: { type: 'string' },
-    through: { type: 'string' },
+      through: { type: 'string' },
       after: { type: 'string' },
       until: { type: 'string' },
       observe: { type: 'boolean' },
@@ -560,7 +560,10 @@ async function main(argv, env = process.env) {
     let wake = created.parent.wake
       ? { channel: created.parent.wake.channel, source: created.parent.wake.receipt?.source ?? null }
       : { channel: 'none', source: null, reason: 'not-requested' };
-    if (wakeMode === 'auto' && !created.parent.wake) {
+    // A re-adopted context (same native task reference) may carry the wake
+    // channel of an earlier session; the channel is always this session's
+    // own, so it is rediscovered and re-recorded on every automatic init.
+    if (wakeMode === 'auto') {
       const discovered = await discoverWakeForHost(values['host-provider'], {
         repoRoot: values['repo-root'] ? resolveProject(values['repo-root']).root : undefined,
         nonce: values['self-nonce'],

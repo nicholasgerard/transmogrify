@@ -50,7 +50,8 @@ function defaultRun(executable, args) {
 // address a follow-up can be sent to. Anything else is `none` with a reason.
 function discoverClaudeWake(options = {}, env = process.env) {
   const run = options.run || defaultRun;
-  const configDir = options.configDir || path.join(env.HOME || os.homedir(), '.claude');
+  // The CLI keeps its session records under CLAUDE_CONFIG_DIR when set.
+  const configDir = options.configDir || env.CLAUDE_CONFIG_DIR || path.join(env.HOME || os.homedir(), '.claude');
   let pid = options.startPid ?? process.ppid;
   for (let depth = 0; depth < MAX_ANCESTRY_DEPTH && pid > 1; depth += 1) {
     const file = path.join(configDir, 'sessions', `${pid}.json`);

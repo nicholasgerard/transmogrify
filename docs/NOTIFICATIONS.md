@@ -172,7 +172,8 @@ works or waits; verified live on the pinned CLI on 2026-09-03 (`Stop`,
 
 Verified: the Claude peer follow-up reaches a Remote-Control session
 (adapter steering, live since 0.2); a session's own bridge id is readable
-from `~/.claude/sessions/<pid>.json` of the ancestor `claude` process;
+from `~/.claude/sessions/<pid>.json` (under `CLAUDE_CONFIG_DIR` when set) of
+the ancestor `claude` process;
 `turn/start` on an idle Codex thread starts a turn the model processes and
 Desktop renders (the `recover --input` path, live in every 0.3 smoke);
 `turn/steer` reaches an in-progress turn (live since 0.2); the app-server

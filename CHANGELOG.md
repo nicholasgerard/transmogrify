@@ -26,6 +26,12 @@
   so a child is read the moment it finishes instead of being polled;
   `TRANSMOGRIFY_CHILD_HOOKS=off` disables it. Verified live on the pinned
   CLI.
+- Both adapters are split along their lifecycle: `lib/codex-runtime.js`,
+  `lib/codex-retire.js`, and `lib/codex-recover.js` beside
+  `lib/codex-adapter.js`; `lib/claude-runtime.js`, `lib/claude-spawn.js`,
+  `lib/claude-retire.js`, and `lib/claude-recover.js` beside
+  `lib/claude-adapter.js`. Pure moves; the adapters' public surfaces are
+  unchanged.
 
 ## 0.3.1
 
