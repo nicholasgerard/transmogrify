@@ -180,23 +180,13 @@ async function resolveSpawnVisibility(options, endpoint, env) {
   );
 }
 
-// Create an exact-owned Codex lane: resolve visibility and profile, reserve the
-// lane, seat, and spawn journal, then start the thread, dispatch the first turn,
-// and verify its input receipt and thread name. A failure before the provider
-// request is failed or notDelivered; any failure after thread/start keeps the
-// returned provider id, marks the lane delivery-unknown, and replays nothing.
+// Spawn a Codex lane: validate the request, reserve the lane and its seat,
+// create the thread, start the first turn, verify the name read-back, and
+// journal every phase before the provider call it precedes. The phases below
+// share one context so a failure at any point settles the journal and the
+// lane from what was actually dispatched.
 async function spawn(options, env = process.env) {
-  if (!options.repoRoot || !path.isAbsolute(options.repoRoot) ||
-      typeof options.input !== 'string' || !options.input) {
-    throw new TransmogrifyError('USAGE_ERROR', 'spawn requires absolute repoRoot, name, and input');
-  }
-  const nameProblem = laneNameError(options.name, 'Codex lane name');
-  if (nameProblem) throw new TransmogrifyError('USAGE_ERROR', nameProblem);
-  options = { ...options, name: canonicalLaneName(options.name) };
-  const canonicalNameProblem = ownedLaneNameError(options.name, 'Codex lane name');
-  if (canonicalNameProblem) {
-    throw new TransmogrifyError('USAGE_ERROR', canonicalNameProblem);
-  }
+  options = validateSpawnRequest(options);
   const receiptVerification = turnReceiptVerificationBounds(options);
   const endpoint = validateUrl(runtimeUrl(options, env));
   const visibility = await resolveSpawnVisibility(options, endpoint, env);
@@ -224,404 +214,421 @@ async function spawn(options, env = process.env) {
     };
   }
   ensureRegistry(options.repoRoot, env);
-  let lane;
-  let seat;
-  let operation;
-  let providerRequestDispatched = false;
-  let spawnVerified = false;
-  let providerId = null;
-
+  const ctx = {
+    options, env, laneId, operationId, endpoint, visibility, dispatchEnvelope, receiptVerification,
+    lane: undefined, seat: undefined, operation: undefined,
+    providerRequestDispatched: false, spawnVerified: false, providerId: null,
+  };
   try {
-    const seatIntent = options.cwd
-      ? null
-      : planManagedSeat(options.repoRoot, worktreesRoot(options, env), laneId, {
-        branchName: options.branchName,
-        baseRef: options.baseRef,
-      });
-    seat = options.cwd
-      ? verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env))
-      : null;
-    const operationDetails = {
-      target: 'codex',
-      name: options.name,
-      inputSha256: crypto.createHash('sha256').update(options.input).digest('hex'),
-      ...(dispatchEnvelope ? {
-        dispatchId: dispatchEnvelope.dispatch.dispatchId,
-        promptReceipts: dispatchEnvelope.receipts,
-      } : {}),
-      ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
-      ...(seat ? { seat } : {}),
-    };
-    ({ operation, lane } = reserveSpawn(options.repoRoot, {
-      operation: {
-        operationId,
-        type: 'spawn',
-        laneId,
-        details: operationDetails,
-      },
-      lane: {
-        laneId,
-        backend: 'codex-app-server',
-        target: 'codex',
-        displayName: options.name,
-        state: 'planned',
-        operationId,
-        ...(options.lineage ? { lineage: options.lineage } : {}),
-        ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
-        seat,
-        ...(seatIntent ? { seatIntent } : {}),
-        runtime: { endpoint },
-        capabilities: {
-          midTurnSteer: true,
-          interrupt: true,
-          retirement: 'archive',
-          recovery: 'reconcile',
-          approvalRelay: false,
-        },
-        visibility,
-      },
-    }, env));
-    if (options.dispatch) markDispatchJournaled(options.dispatch.dispatchId, env);
-    if (seatIntent) {
-      seat = materializeManagedSeat(options.repoRoot, seatIntent);
-      lane = bindLaneSeat(options.repoRoot, laneId, operationId, seat, env);
-      operation = pendingOperationForLane(options.repoRoot, laneId, env);
-    }
+    reserveSpawnLane(ctx);
     return await withClient(options, async (client, initialized) => {
       if (options.onNotification) client.on('notification', options.onNotification);
-      if (options.executionProfile) {
-        const currentModelList = await readModelCatalog(client);
-        const currentCatalogSha256 = crypto.createHash('sha256')
-          .update(stableStringify(currentModelList)).digest('hex');
-        if (currentCatalogSha256 !== options.executionProfile.resolved.catalogSource.catalogSha256 ||
-            initialized.userAgent !== options.executionProfile.resolved.catalogSource.userAgent) {
-          throw new TransmogrifyError(
-            'EXECUTION_PROFILE_UNSUPPORTED',
-            'Codex model capabilities changed between resolution and launch',
-          );
-        }
-      }
-      operation = updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
-        state: 'providerRequestDispatched',
-        details: {
-          ...operation.details,
-          providerDispatchStartedAt: new Date().toISOString(),
-        },
-      }, env);
-      providerRequestDispatched = true;
-      const resolvedModel = options.executionProfile?.resolved.model.selector;
-      const resolvedEffort = options.executionProfile?.resolved.effort.level;
-      const resolvedControl = options.executionProfile?.resolved.speed.nativeControl;
-      if (resolvedControl && (resolvedControl.kind !== 'service-tier' ||
-          !['default', 'priority'].includes(resolvedControl.value))) {
-        throw new TransmogrifyError(
-          'EXECUTION_PROFILE_UNSUPPORTED', 'Codex profile has an invalid service-tier control',
-        );
-      }
-      const resolvedTier = resolvedControl?.value;
-      const started = await client.call('thread/start', {
-        cwd: seat.path,
-        approvalPolicy: options.approvalPolicy || 'never',
-        sandbox: options.sandbox || 'workspace-write',
-        ...(resolvedModel ? { model: resolvedModel } : {}),
-        ...(resolvedTier ? { serviceTier: resolvedTier } : {}),
-      });
-      const threadId = started?.thread?.id;
-      if (!threadId) {
-        throw new TransmogrifyError('PROTOCOL_ERROR', 'thread/start response did not include thread.id');
-      }
-      providerId = threadId;
-      operation = updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
-        state: 'providerCreated',
-        providerId: threadId,
-        details: {
-          ...operation.details,
-          providerObservedAt: new Date().toISOString(),
-        },
-      }, env);
-      lane = bindLaneProvider(options.repoRoot, laneId, threadId, {
-        state: 'created',
-        runtime: client.runtimeIdentity,
-        ownership: {
-          creationReceipt: {
-            providerId: threadId,
-            requestedCwd: seat.path,
-            responseCwd: typeof started.cwd === 'string' ? started.cwd : null,
-            cwd: typeof started.thread.cwd === 'string' ? started.thread.cwd : null,
-            initializedUserAgent: initialized.userAgent,
-            createdAt: new Date().toISOString(),
-          },
-        },
-      }, env);
-
-      try {
-        assertProviderSeat(lane, started.thread, started.cwd, 'thread/start', true);
-        if (resolvedTier && started.serviceTier !== null && started.serviceTier !== undefined &&
-            started.serviceTier !== resolvedTier) {
-          throw new TransmogrifyError(
-            'EXECUTION_PROFILE_UNSUPPORTED',
-            'thread/start reported a service tier that contradicts the resolved profile',
-          );
-        }
-      } catch (error) {
-        updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
-          state: 'partial',
-          details: {
-            ...operation.details,
-            seatVerificationFailedAt: new Date().toISOString(),
-            causeCode: error.code || 'PROTOCOL_ERROR',
-          },
-        }, env);
-        lane = updateLane(options.repoRoot, laneId, { state: 'deliveryUnknown' }, env);
-        throw new TransmogrifyError(
-          'PARTIAL_SUCCESS',
-          'thread was created but a provider postcondition failed',
-          {
-            laneId,
-            providerId: threadId,
-            providerMutation: 'createdNoTurn',
-            causeCode: error.code || 'PROTOCOL_ERROR',
-          },
-        );
-      }
-
-      let observedExecutionProfile = null;
-      if (options.executionProfile) {
-        const observedTier = ['default', 'priority'].includes(started.serviceTier)
-          ? started.serviceTier : null;
-        observedExecutionProfile = withObservedExecution(options.executionProfile, {
-          model: typeof started.model === 'string' ? started.model : null,
-          effort: null,
-          speed: observedTier === 'priority' ? 'fast' : observedTier === 'default' ? 'standard' : null,
-          nativeControl: observedTier === null ? null : {
-            kind: 'service-tier', value: observedTier,
-          },
-          receipt: { method: 'thread/start', userAgent: initialized.userAgent },
-        });
-        if (options.dispatch) {
-          setObservedProfile(options.dispatch.dispatchId, observedExecutionProfile.observed, env);
-        }
-      }
-
-      const completion = options.waitForCompletion
-        ? client.waitForNotification(
-          'turn/completed',
-          (params) => params.threadId === threadId,
-          options.maxExecutionMs ?? 2_147_483_647,
-        )
-        : null;
-      // A later fail-closed receipt or naming error closes the client before this
-      // promise is awaited. Attach a rejection handler immediately so that close
-      // cannot become an unhandled rejection; awaiting the original promise below
-      // still preserves the same error when this path reaches completion.
-      if (completion) completion.catch(() => {});
-      operation = updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
-        state: 'turnRequestDispatched',
-        details: {
-          ...operation.details,
-          turnDispatchStartedAt: new Date().toISOString(),
-        },
-      }, env);
-      const turnStarted = await client.call('turn/start', {
-        threadId,
-        cwd: seat.path,
-        input: [{ type: 'text', text: options.input }],
-        clientUserMessageId: operationId,
-        ...(resolvedModel ? { model: resolvedModel } : {}),
-        ...(resolvedEffort ? { effort: resolvedEffort } : {}),
-        ...(resolvedTier ? { serviceTier: resolvedTier } : {}),
-        ...(resolvedTier ? { serviceTierForTurn: resolvedTier } : {}),
-      }, options.turnStartTimeoutMs ?? 30000);
-      const turn = turnStarted?.turn;
-      const inputReceiptSource = await verifiedUserMessageTurnReceipt(
-        client,
-        threadId,
-        turn,
-        operationId,
-        operation.details.inputSha256,
-        receiptVerification,
-      );
-      lane = updateLane(options.repoRoot, laneId, {
-        state: 'materialized',
-        turnId: turn.id,
-        lastVerifiedAt: new Date().toISOString(),
-      }, env);
-      operation = updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
-        state: 'materialized',
-        details: { ...operation.details, turnId: turn.id },
-      }, env);
-
-      let observedStatus;
-      try {
-        await client.call('thread/name/set', { threadId, name: options.name });
-        const read = await client.call('thread/read', { threadId, includeTurns: false });
-        assertProviderSeat(lane, read?.thread, undefined, 'thread/read');
-        if (read.thread.id !== threadId || read.thread.name !== options.name ||
-            !['active', 'idle', 'notLoaded', 'systemError'].includes(read.thread.status?.type)) {
-          throw new TransmogrifyError('PROTOCOL_ERROR', 'thread name read-back did not match', {
-            expected: options.name,
-            actual: read?.thread?.name,
-          });
-        }
-        try { observedStatus = normalizeThreadStatus(read.thread.status); } catch {
-          throw new TransmogrifyError('PROTOCOL_ERROR', 'thread name read-back returned invalid status');
-        }
-      } catch (error) {
-        updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
-          state: 'partial',
-          details: {
-            ...operation.details,
-            verificationFailedAt: new Date().toISOString(),
-            causeCode: error.code || 'PROTOCOL_ERROR',
-          },
-        }, env);
-        if (error.details?.providerSeatVerification) {
-          lane = updateLane(options.repoRoot, laneId, { state: 'deliveryUnknown' }, env);
-        }
-        throw new TransmogrifyError('PARTIAL_SUCCESS', `turn started but postcondition verification failed: ${error.message}`, {
-          laneId,
-          providerId: threadId,
-          turnId: turn.id,
-          causeCode: error.code || 'PROTOCOL_ERROR',
-        });
-      }
-
-      lane = updateLane(options.repoRoot, laneId, {
-        state: observedStatus.type === 'active'
-          ? 'active'
-          : observedStatus.type === 'systemError' ? 'failed' : 'idle',
-        providerState: observedStatus,
-        lastVerifiedAt: new Date().toISOString(),
-      }, env);
-      completeLaneOperation(options.repoRoot, laneId, operationId, { state: 'complete' }, env);
-      spawnVerified = true;
-      if (options.dispatch) {
-        try {
-          recordEvent({
-            dispatchId: options.dispatch.dispatchId,
-            type: 'child.spawned',
-            fingerprint: `spawn-complete:${operationId}:${threadId}`,
-            data: { state: 'spawned' },
-          }, env);
-        } catch (error) {
-          // The provider effect is verified and journaled; only the durable
-          // parent notification failed. Never project this as not attempted.
-          throw new TransmogrifyError(
-            'PARENT_EVENT_UNRECORDED',
-            'lane launch is verified but the durable parent event could not be recorded',
-            {
-              laneId,
-              providerId: threadId,
-              providerMutation: 'verified',
-              phase: 'parentEvent',
-              code: error.code || 'INVALID_LOCAL_STATE',
-            },
-          );
-        }
-      }
-      const launched = laneResult('spawn', lane, {
+      await assertCatalogUnchanged(ctx, client, initialized);
+      const controls = resolvedExecutionControls(ctx);
+      const started = await startThread(ctx, client, initialized, controls);
+      const observedExecutionProfile = recordObservedProfile(ctx, started, initialized);
+      const completion = completionWatch(ctx, client, started.threadId);
+      const first = await startFirstTurn(ctx, client, controls, started.threadId);
+      const observedStatus = await verifyThreadName(ctx, client, started.threadId, first.turn);
+      completeSpawn(ctx, observedStatus, started.threadId);
+      const launched = laneResult('spawn', ctx.lane, {
         receipt: {
-          providerId: threadId,
-          turnId: turn.id,
+          providerId: started.threadId,
+          turnId: first.turn.id,
           name: options.name,
           userAgent: initialized.userAgent,
           acknowledgedBy: 'response',
-          inputReceiptSource,
+          inputReceiptSource: first.inputReceiptSource,
           ...(observedExecutionProfile ? { executionProfile: observedExecutionProfile } : {}),
         },
       });
-      if (options.onLaunch) {
-        try {
-          await options.onLaunch(launched);
-        } catch {
-          throw new TransmogrifyError(
-            'HOST_CALLBACK_FAILED',
-            'lane launch is verified but the host launch callback failed',
-            { laneId, providerMutation: 'verified', phase: 'launchCallback' },
-          );
-        }
-      }
+      await runLaunchCallback(ctx, launched);
       if (!completion) return launched;
-      let completed;
-      try {
-        completed = await completion;
-        if (completed?.threadId !== threadId || completed.turn?.id !== turn.id ||
-            !['completed', 'interrupted', 'failed'].includes(completed.turn?.status)) {
-          throw new Error('mismatched completion notification');
-        }
-      } catch {
-        throw new TransmogrifyError(
-          'COMPLETION_UNKNOWN',
-          'lane launch is verified but completion observation is unknown',
-          { laneId, providerMutation: 'verified', phase: 'completionObservation' },
-        );
-      }
-      lane = updateLane(options.repoRoot, laneId, {
-        state: completed.turn.status === 'failed' ? 'failed' : 'idle',
-        providerState: { type: completed.turn.status === 'failed' ? 'systemError' : 'idle' },
-        lastVerifiedAt: new Date().toISOString(),
-      }, env);
-      if (options.dispatch) {
-        recordObservation({
-          dispatchId: options.dispatch.dispatchId,
-          phase: completed.turn.status === 'failed' ? 'failed' : 'idle',
-          providerFingerprint: `turn:${completed.turn.id}:${completed.turn.status}`,
-          eventType: completed.turn.status === 'failed'
-            ? 'child.failed' : 'child.turn-completed',
-          data: { state: lane.state, status: completed.turn.status },
-        }, env);
-      }
-      return laneResult('spawn', lane, {
-        operationId: operation.operationId,
-        receipt: {
-          ...launched.receipt,
-          completedTurnId: completed.turn.id,
-          completedStatus: completed.turn.status,
-        },
-      });
+      return awaitFirstTurnCompletion(ctx, completion, started.threadId, first.turn, launched);
     }, env);
   } catch (error) {
-    // A partial success already journaled its exact phase. Every other failure is
-    // settled here: notDelivered while the provider request was never sent, unknown
-    // once it was, with the lane following the same split.
-    if (error.code !== 'PARTIAL_SUCCESS') {
-      try {
-        if (operation && !spawnVerified) {
-          const current = pendingOperationForLane(options.repoRoot, laneId, env);
-          if (current) {
-            if (providerRequestDispatched) {
-              updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
-                state: 'unknown',
-                ...(providerId ? { providerId } : {}),
-                details: {
-                  ...current.details,
-                  deliveryBecameUnknownAt: new Date().toISOString(),
-                },
-              }, env);
-            } else {
-              completeLaneOperation(options.repoRoot, laneId, operationId, {
-                state: 'failed',
-                details: {
-                  ...current.details,
-                  failedBeforeProviderDispatchAt: new Date().toISOString(),
-                },
-              }, env);
-            }
-          }
-        }
-        if (lane && !spawnVerified) {
-          lane = updateLane(options.repoRoot, laneId, {
-            state: providerRequestDispatched ? 'deliveryUnknown' : 'failed',
+    settleFailedSpawn(ctx, error);
+    throw error;
+  }
+}
+
+function validateSpawnRequest(options) {
+  if (!options.repoRoot || !path.isAbsolute(options.repoRoot) ||
+      typeof options.input !== 'string' || !options.input) {
+    throw new TransmogrifyError('USAGE_ERROR', 'spawn requires absolute repoRoot, name, and input');
+  }
+  const nameProblem = laneNameError(options.name, 'Codex lane name');
+  if (nameProblem) throw new TransmogrifyError('USAGE_ERROR', nameProblem);
+  const canonical = { ...options, name: canonicalLaneName(options.name) };
+  const canonicalNameProblem = ownedLaneNameError(canonical.name, 'Codex lane name');
+  if (canonicalNameProblem) throw new TransmogrifyError('USAGE_ERROR', canonicalNameProblem);
+  return canonical;
+}
+
+// Plan or verify the seat, reserve the lane and its spawn journal atomically,
+// mark the parent's dispatch journaled, and materialize a managed seat.
+function reserveSpawnLane(ctx) {
+  const { options, env, laneId, operationId, dispatchEnvelope } = ctx;
+  const seatIntent = options.cwd
+    ? null
+    : planManagedSeat(options.repoRoot, worktreesRoot(options, env), laneId, {
+      branchName: options.branchName,
+      baseRef: options.baseRef,
+    });
+  ctx.seat = options.cwd
+    ? verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env))
+    : null;
+  const operationDetails = {
+    target: 'codex',
+    name: options.name,
+    inputSha256: crypto.createHash('sha256').update(options.input).digest('hex'),
+    ...(dispatchEnvelope ? {
+      dispatchId: dispatchEnvelope.dispatch.dispatchId,
+      promptReceipts: dispatchEnvelope.receipts,
+    } : {}),
+    ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
+    ...(ctx.seat ? { seat: ctx.seat } : {}),
+  };
+  ({ operation: ctx.operation, lane: ctx.lane } = reserveSpawn(options.repoRoot, {
+    operation: { operationId, type: 'spawn', laneId, details: operationDetails },
+    lane: {
+      laneId,
+      backend: 'codex-app-server',
+      target: 'codex',
+      displayName: options.name,
+      state: 'planned',
+      operationId,
+      ...(options.lineage ? { lineage: options.lineage } : {}),
+      ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
+      seat: ctx.seat,
+      ...(seatIntent ? { seatIntent } : {}),
+      runtime: { endpoint: ctx.endpoint },
+      capabilities: {
+        midTurnSteer: true,
+        interrupt: true,
+        retirement: 'archive',
+        recovery: 'reconcile',
+        approvalRelay: false,
+      },
+      visibility: ctx.visibility,
+    },
+  }, env));
+  if (options.dispatch) markDispatchJournaled(options.dispatch.dispatchId, env);
+  if (seatIntent) {
+    ctx.seat = materializeManagedSeat(options.repoRoot, seatIntent);
+    ctx.lane = bindLaneSeat(options.repoRoot, laneId, operationId, ctx.seat, env);
+    ctx.operation = pendingOperationForLane(options.repoRoot, laneId, env);
+  }
+}
+
+// A resolved execution profile was computed against one catalog; the launch
+// refuses to proceed if the runtime's catalog or user agent changed since.
+async function assertCatalogUnchanged(ctx, client, initialized) {
+  const profile = ctx.options.executionProfile;
+  if (!profile) return;
+  const currentModelList = await readModelCatalog(client);
+  const currentCatalogSha256 = crypto.createHash('sha256')
+    .update(stableStringify(currentModelList)).digest('hex');
+  if (currentCatalogSha256 !== profile.resolved.catalogSource.catalogSha256 ||
+      initialized.userAgent !== profile.resolved.catalogSource.userAgent) {
+    throw new TransmogrifyError(
+      'EXECUTION_PROFILE_UNSUPPORTED',
+      'Codex model capabilities changed between resolution and launch',
+    );
+  }
+}
+
+// The model, effort, and service tier the resolved profile pins, validated
+// before the first provider call.
+function resolvedExecutionControls(ctx) {
+  const resolved = ctx.options.executionProfile?.resolved;
+  const control = resolved?.speed.nativeControl;
+  if (control && (control.kind !== 'service-tier' || !['default', 'priority'].includes(control.value))) {
+    throw new TransmogrifyError('EXECUTION_PROFILE_UNSUPPORTED', 'Codex profile has an invalid service-tier control');
+  }
+  return { model: resolved?.model.selector, effort: resolved?.effort.level, tier: control?.value };
+}
+
+function journalSpawnPhase(ctx, state, details = {}, extra = {}) {
+  ctx.operation = updatePendingLaneOperation(ctx.options.repoRoot, ctx.laneId, ctx.operationId, {
+    state, ...extra, details: { ...ctx.operation.details, ...details },
+  }, ctx.env);
+}
+
+// Create the thread at the seat, bind its id with the creation receipt, and
+// verify the seat postcondition; a created thread that fails its
+// postcondition is PARTIAL_SUCCESS with the lane delivery-unknown.
+async function startThread(ctx, client, initialized, controls) {
+  const { options, env, laneId } = ctx;
+  journalSpawnPhase(ctx, 'providerRequestDispatched', { providerDispatchStartedAt: new Date().toISOString() });
+  ctx.providerRequestDispatched = true;
+  const started = await client.call('thread/start', {
+    cwd: ctx.seat.path,
+    approvalPolicy: options.approvalPolicy || 'never',
+    sandbox: options.sandbox || 'workspace-write',
+    ...(controls.model ? { model: controls.model } : {}),
+    ...(controls.tier ? { serviceTier: controls.tier } : {}),
+  });
+  const threadId = started?.thread?.id;
+  if (!threadId) throw new TransmogrifyError('PROTOCOL_ERROR', 'thread/start response did not include thread.id');
+  ctx.providerId = threadId;
+  journalSpawnPhase(ctx, 'providerCreated', { providerObservedAt: new Date().toISOString() }, { providerId: threadId });
+  ctx.lane = bindLaneProvider(options.repoRoot, laneId, threadId, {
+    state: 'created',
+    runtime: client.runtimeIdentity,
+    ownership: {
+      creationReceipt: {
+        providerId: threadId,
+        requestedCwd: ctx.seat.path,
+        responseCwd: typeof started.cwd === 'string' ? started.cwd : null,
+        cwd: typeof started.thread.cwd === 'string' ? started.thread.cwd : null,
+        initializedUserAgent: initialized.userAgent,
+        createdAt: new Date().toISOString(),
+      },
+    },
+  }, env);
+  try {
+    assertProviderSeat(ctx.lane, started.thread, started.cwd, 'thread/start', true);
+    if (controls.tier && started.serviceTier !== null && started.serviceTier !== undefined &&
+        started.serviceTier !== controls.tier) {
+      throw new TransmogrifyError(
+        'EXECUTION_PROFILE_UNSUPPORTED',
+        'thread/start reported a service tier that contradicts the resolved profile',
+      );
+    }
+  } catch (error) {
+    updatePendingLaneOperation(options.repoRoot, laneId, ctx.operationId, {
+      state: 'partial',
+      details: {
+        ...ctx.operation.details,
+        seatVerificationFailedAt: new Date().toISOString(),
+        causeCode: error.code || 'PROTOCOL_ERROR',
+      },
+    }, env);
+    ctx.lane = updateLane(options.repoRoot, laneId, { state: 'deliveryUnknown' }, env);
+    throw new TransmogrifyError('PARTIAL_SUCCESS', 'thread was created but a provider postcondition failed', {
+      laneId,
+      providerId: threadId,
+      providerMutation: 'createdNoTurn',
+      causeCode: error.code || 'PROTOCOL_ERROR',
+    });
+  }
+  return { threadId, started };
+}
+
+// What the runtime applied of the resolved profile, recorded on the dispatch.
+function recordObservedProfile(ctx, { started }, initialized) {
+  const { options, env } = ctx;
+  if (!options.executionProfile) return null;
+  const observedTier = ['default', 'priority'].includes(started.serviceTier) ? started.serviceTier : null;
+  const observed = withObservedExecution(options.executionProfile, {
+    model: typeof started.model === 'string' ? started.model : null,
+    effort: null,
+    speed: observedTier === 'priority' ? 'fast' : observedTier === 'default' ? 'standard' : null,
+    nativeControl: observedTier === null ? null : { kind: 'service-tier', value: observedTier },
+    receipt: { method: 'thread/start', userAgent: initialized.userAgent },
+  });
+  if (options.dispatch) setObservedProfile(options.dispatch.dispatchId, observed.observed, env);
+  return observed;
+}
+
+// When the caller waits for the first turn, subscribe before it starts. A
+// later fail-closed error closes the client before this promise is awaited;
+// the rejection handler keeps that close from becoming an unhandled
+// rejection while the awaited promise still carries the same error.
+function completionWatch(ctx, client, threadId) {
+  if (!ctx.options.waitForCompletion) return null;
+  const completion = client.waitForNotification(
+    'turn/completed',
+    (params) => params.threadId === threadId,
+    ctx.options.maxExecutionMs ?? 2_147_483_647,
+  );
+  completion.catch(() => {});
+  return completion;
+}
+
+// Start the first turn with the lane's input and verify its input receipt.
+async function startFirstTurn(ctx, client, controls, threadId) {
+  const { options, env, laneId, operationId } = ctx;
+  journalSpawnPhase(ctx, 'turnRequestDispatched', { turnDispatchStartedAt: new Date().toISOString() });
+  const turnStarted = await client.call('turn/start', {
+    threadId,
+    cwd: ctx.seat.path,
+    input: [{ type: 'text', text: options.input }],
+    clientUserMessageId: operationId,
+    ...(controls.model ? { model: controls.model } : {}),
+    ...(controls.effort ? { effort: controls.effort } : {}),
+    ...(controls.tier ? { serviceTier: controls.tier } : {}),
+    ...(controls.tier ? { serviceTierForTurn: controls.tier } : {}),
+  }, options.turnStartTimeoutMs ?? 30000);
+  const turn = turnStarted?.turn;
+  const inputReceiptSource = await verifiedUserMessageTurnReceipt(
+    client, threadId, turn, operationId, ctx.operation.details.inputSha256, ctx.receiptVerification,
+  );
+  ctx.lane = updateLane(options.repoRoot, laneId, {
+    state: 'materialized',
+    turnId: turn.id,
+    lastVerifiedAt: new Date().toISOString(),
+  }, env);
+  journalSpawnPhase(ctx, 'materialized', { turnId: turn.id });
+  return { turn, inputReceiptSource };
+}
+
+// Name the thread and read it back at the seat; a failed read-back is
+// PARTIAL_SUCCESS, and a failed seat verification leaves the lane
+// delivery-unknown.
+async function verifyThreadName(ctx, client, threadId, turn) {
+  const { options, env, laneId, operationId } = ctx;
+  try {
+    await client.call('thread/name/set', { threadId, name: options.name });
+    const read = await client.call('thread/read', { threadId, includeTurns: false });
+    assertProviderSeat(ctx.lane, read?.thread, undefined, 'thread/read');
+    if (read.thread.id !== threadId || read.thread.name !== options.name ||
+        !['active', 'idle', 'notLoaded', 'systemError'].includes(read.thread.status?.type)) {
+      throw new TransmogrifyError('PROTOCOL_ERROR', 'thread name read-back did not match', {
+        expected: options.name,
+        actual: read?.thread?.name,
+      });
+    }
+    try { return normalizeThreadStatus(read.thread.status); } catch {
+      throw new TransmogrifyError('PROTOCOL_ERROR', 'thread name read-back returned invalid status');
+    }
+  } catch (error) {
+    updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
+      state: 'partial',
+      details: {
+        ...ctx.operation.details,
+        verificationFailedAt: new Date().toISOString(),
+        causeCode: error.code || 'PROTOCOL_ERROR',
+      },
+    }, env);
+    if (error.details?.providerSeatVerification) {
+      ctx.lane = updateLane(options.repoRoot, laneId, { state: 'deliveryUnknown' }, env);
+    }
+    throw new TransmogrifyError('PARTIAL_SUCCESS', `turn started but postcondition verification failed: ${error.message}`, {
+      laneId,
+      providerId: threadId,
+      turnId: turn.id,
+      causeCode: error.code || 'PROTOCOL_ERROR',
+    });
+  }
+}
+
+// The launch is verified: settle the lane's state from the read-back, close
+// the journal, and record the parent's spawned event. A verified launch whose
+// event cannot be recorded is reported as such, never as not attempted.
+function completeSpawn(ctx, observedStatus, threadId) {
+  const { options, env, laneId, operationId } = ctx;
+  ctx.lane = updateLane(options.repoRoot, laneId, {
+    state: observedStatus.type === 'active' ? 'active' : observedStatus.type === 'systemError' ? 'failed' : 'idle',
+    providerState: observedStatus,
+    lastVerifiedAt: new Date().toISOString(),
+  }, env);
+  completeLaneOperation(options.repoRoot, laneId, operationId, { state: 'complete' }, env);
+  ctx.spawnVerified = true;
+  if (!options.dispatch) return;
+  try {
+    recordEvent({
+      dispatchId: options.dispatch.dispatchId,
+      type: 'child.spawned',
+      fingerprint: `spawn-complete:${operationId}:${threadId}`,
+      data: { state: 'spawned' },
+    }, env);
+  } catch (error) {
+    throw new TransmogrifyError(
+      'PARENT_EVENT_UNRECORDED',
+      'lane launch is verified but the durable parent event could not be recorded',
+      { laneId, providerId: threadId, providerMutation: 'verified', phase: 'parentEvent', code: error.code || 'INVALID_LOCAL_STATE' },
+    );
+  }
+}
+
+async function runLaunchCallback(ctx, launched) {
+  if (!ctx.options.onLaunch) return;
+  try {
+    await ctx.options.onLaunch(launched);
+  } catch {
+    throw new TransmogrifyError(
+      'HOST_CALLBACK_FAILED',
+      'lane launch is verified but the host launch callback failed',
+      { laneId: ctx.laneId, providerMutation: 'verified', phase: 'launchCallback' },
+    );
+  }
+}
+
+// Wait for the first turn to end and settle the lane and the parent's event
+// from the completion notification.
+async function awaitFirstTurnCompletion(ctx, completion, threadId, turn, launched) {
+  const { options, env, laneId } = ctx;
+  let completed;
+  try {
+    completed = await completion;
+    if (completed?.threadId !== threadId || completed.turn?.id !== turn.id ||
+        !['completed', 'interrupted', 'failed'].includes(completed.turn?.status)) {
+      throw new Error('mismatched completion notification');
+    }
+  } catch {
+    throw new TransmogrifyError(
+      'COMPLETION_UNKNOWN',
+      'lane launch is verified but completion observation is unknown',
+      { laneId, providerMutation: 'verified', phase: 'completionObservation' },
+    );
+  }
+  ctx.lane = updateLane(options.repoRoot, laneId, {
+    state: completed.turn.status === 'failed' ? 'failed' : 'idle',
+    providerState: { type: completed.turn.status === 'failed' ? 'systemError' : 'idle' },
+    lastVerifiedAt: new Date().toISOString(),
+  }, env);
+  if (options.dispatch) {
+    recordObservation({
+      dispatchId: options.dispatch.dispatchId,
+      phase: completed.turn.status === 'failed' ? 'failed' : 'idle',
+      providerFingerprint: `turn:${completed.turn.id}:${completed.turn.status}`,
+      eventType: completed.turn.status === 'failed' ? 'child.failed' : 'child.turn-completed',
+      data: { state: ctx.lane.state, status: completed.turn.status },
+    }, env);
+  }
+  return laneResult('spawn', ctx.lane, {
+    operationId: ctx.operation.operationId,
+    receipt: { ...launched.receipt, completedTurnId: completed.turn.id, completedStatus: completed.turn.status },
+  });
+}
+
+// A partial success already journaled its exact phase. Every other failure is
+// settled here: notDelivered while the provider request was never sent,
+// unknown once it was, with the lane following the same split; a spawn that
+// never reserved a lane settles the parent's dispatch so it cannot dangle.
+function settleFailedSpawn(ctx, error) {
+  if (error.code === 'PARTIAL_SUCCESS') return;
+  const { options, env, laneId, operationId } = ctx;
+  try {
+    if (ctx.operation && !ctx.spawnVerified) {
+      const current = pendingOperationForLane(options.repoRoot, laneId, env);
+      if (current) {
+        if (ctx.providerRequestDispatched) {
+          updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
+            state: 'unknown',
+            ...(ctx.providerId ? { providerId: ctx.providerId } : {}),
+            details: { ...current.details, deliveryBecameUnknownAt: new Date().toISOString() },
+          }, env);
+        } else {
+          completeLaneOperation(options.repoRoot, laneId, operationId, {
+            state: 'failed',
+            details: { ...current.details, failedBeforeProviderDispatchAt: new Date().toISOString() },
           }, env);
         }
-        // No lane was reserved: the parent's dispatch would otherwise dangle
-        // with nothing to observe. Settle it so the parent is told once.
-        if (!lane && dispatchEnvelope) {
-          failDispatch(dispatchEnvelope.dispatch.dispatchId, 'spawn-not-registered', env);
-        }
-      } catch {}
+      }
     }
-    throw error;
+    if (ctx.lane && !ctx.spawnVerified) {
+      ctx.lane = updateLane(options.repoRoot, laneId, {
+        state: ctx.providerRequestDispatched ? 'deliveryUnknown' : 'failed',
+      }, env);
+    }
+    if (!ctx.lane && ctx.dispatchEnvelope) {
+      failDispatch(ctx.dispatchEnvelope.dispatch.dispatchId, 'spawn-not-registered', env);
+    }
+  } catch {
+    // The original failure is what the caller reports.
   }
 }
 
