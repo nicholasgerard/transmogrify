@@ -1405,6 +1405,39 @@ test('Codex planned resume proves non-delivery when history changes before dispa
   ), false);
 });
 
+test('Codex recovery closes a resume that never reached turn/start as input not delivered', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, { id: 'thread-owned', status: { type: 'idle' } });
+    }
+    throw new Error(`unexpected provider request ${request.method}`);
+  });
+  t.after(() => server.close());
+  const lane = registerOwned(fixture, server.url, 'idle');
+  const message = 'Resume input that was journaled but never dispatched as a turn.';
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'resume',
+    state: 'resumeAcknowledged',
+    details: {
+      target: 'codex',
+      messageSha256: crypto.createHash('sha256').update(message).digest('hex'),
+      baselineTurnId: 'turn-baseline',
+    },
+  }, fixture.env);
+
+  const result = await recover({ repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(result.recovered[0].delivery, 'notDelivered');
+  assert.deepEqual(result.recovered[0].repaired, ['clearedUndispatchedResume']);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  assert.equal(listOperations(fixture.repoRoot, fixture.env)
+    .find((entry) => entry.operationId === operation.operationId).state, 'notDelivered');
+  assert.equal(server.requests.some((request) =>
+    ['thread/resume', 'turn/start', 'thread/turns/list', 'thread/items/list'].includes(request.method)
+  ), false);
+});
+
 test('Codex recovery clears a terminal operation pointer without provider replay', async (t) => {
   const fixture = createRepoWithSeat(t);
   const server = await startMockAppServer((request) => {

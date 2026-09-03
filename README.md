@@ -397,8 +397,9 @@ operations accept `--timeout-ms` to bound each request.
 Every advertised tool accepts `--help`; use
 `"$SKILL_ROOT/scripts/runtime-up.sh" --help` for the shell launcher and
 `node "$SKILL_ROOT/scripts/<tool>.js" --help` for Node tools.
-`--finish-retirements` applies only to Claude reconciliation and still requires
-the recorded harvest and explicit private archive gates. Use `--input-file -`
+`--finish-retirements` is what lets Claude reconciliation finish a pending
+retirement, still behind the recorded harvest and explicit private archive
+gates; Codex reconciliation finishes eligible retirements on its own. Use `--input-file -`
 for substantial steer and Codex recovery input.
 
 `CLEANUP_BLOCKED` never clears through fleet-wide reconciliation. Preserve the

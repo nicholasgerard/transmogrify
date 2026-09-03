@@ -4,7 +4,7 @@ description: Operate exact-owned, worktree-seated Codex and Claude Code lanes wi
 license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
-  version: "0.2.7"
+  version: "0.2.8"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server 0.151.x"
@@ -398,8 +398,9 @@ node "$SKILL_ROOT/scripts/lane.js" reconcile \
   --repo-root "$REPO_ROOT" --target claude
 ```
 
-Use `--lane` to narrow reconciliation further. The mutating
-`--finish-retirements` option applies only to Claude and only when the pending
+Use `--lane` to narrow reconciliation further. Codex reconciliation finishes
+every eligible retirement on its own; a Claude retirement finishes only with
+the mutating `--finish-retirements` option, and only when the pending
 retirement already contains a valid harvest receipt. Use `--private-archive`
 only when Claude private archival has been explicitly authorized for this run.
 

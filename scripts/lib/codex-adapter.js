@@ -76,6 +76,13 @@ const descriptor = Object.freeze({
   recoverAcceptsInput: true,
 });
 
+// Resume journal states in which turn/start was never sent. thread/resume
+// loads a thread without changing it, so recovery may close these as input
+// not delivered instead of probing for a turn that cannot exist.
+const UNDISPATCHED_RESUME_STATES = new Set([
+  'planned', 'resumeDispatching', 'resumeAcknowledged', 'unknownResume',
+]);
+
 // The complete thread/list source set. Listing every kind is what makes an
 // archived-thread census complete rather than a partial view of one client.
 const SOURCE_KINDS = [
@@ -2216,7 +2223,15 @@ async function recover(options, env = process.env) {
           }
 
           if (pending && ['steer', 'interrupt', 'resume'].includes(pending.type)) {
-            if (pending.state === 'planned') {
+            // A journal that never reached its provider request is proven
+            // undelivered. For a resume, thread/resume only loads the thread;
+            // the input goes out with turn/start, which is journaled as
+            // turnDispatching before it is sent, so every earlier resume state
+            // is undispatched input as well.
+            const undispatched = pending.type === 'resume'
+              ? UNDISPATCHED_RESUME_STATES.has(pending.state)
+              : pending.state === 'planned';
+            if (undispatched) {
               completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
                 state: 'notDelivered',
                 details: {

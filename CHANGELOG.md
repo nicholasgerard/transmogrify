@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.8
+
+- One adapter seam. Each provider adapter publishes a descriptor (its
+  operations, the provider flags it accepts, whether recovery takes input)
+  and `lane.js` dispatches from it; no operation branches on a provider by
+  name any more. Shared invariants live in `scripts/lib/adapter-kit.js`:
+  the coded `AdapterError`, the managed worktrees root, the execution
+  request, the profile-failure projection, and one lane result envelope
+  (Codex results now carry `providerId`, Claude results `operationId`).
+- The unstarted-spawn crash repair is one function in the state store that
+  both adapters call; the Claude identity schema moves to
+  `scripts/lib/claude-identity.js` behind backend-keyed dispatch; loopback
+  listener inspection moves to `scripts/lib/listeners.js` so the Desktop
+  attach tool no longer imports the runtime launcher; the Codex client is
+  injectable through `options.clientFactory`. `test/adapter-contract.test.js`
+  pins the contract a third adapter must satisfy.
+- Codex recovery repairs an unbound reservation locally before comparing
+  runtime endpoints, closes a resume journal that never reached `turn/start`
+  (`resumeDispatching`, `resumeAcknowledged`, `unknownResume`) as input
+  not delivered instead of probing for a turn that cannot exist, and accepts
+  `--finish-retirements` for symmetry with Claude.
+
 ## 0.2.7
 
 - Enumerate the states each operation journal type may hold and refuse any
