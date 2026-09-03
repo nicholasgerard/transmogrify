@@ -352,8 +352,11 @@ External seats are never removed and never passed to `claude rm`.
 
 Retire every lane at its host-defined terminal boundary. At startup and after
 a batch, run the doctor and exact-owned reconciliation to close pending
-journals and clean only eligible seats. Never archive or prune a provider row
-because it looks stale.
+journals and clean only eligible seats; `maintain.js --repo-root "$REPO_ROOT"
+--target all` does both in one bounded pass, and `--retention` moves aged,
+worktree-released journals and superseded install backups into recoverable
+trash. Neither ever spawns, steers, stops, harvests, or infers completion.
+Never archive or prune a provider row because it looks stale.
 
 ## 8. When it fails
 

@@ -17,6 +17,7 @@ const COMMANDS = new Map([
   ['runtime', { file: 'runtime-up.sh', shell: true, summary: 'reuse or launch the detached Codex app-server' }],
   ['probe', { file: 'runtime-probe.js', summary: 'verify the app-server handshake and version line' }],
   ['lane', { file: 'lane.js', summary: 'spawn, steer, observe, recover, retire, reconcile, abandon' }],
+  ['maintain', { file: 'maintain.js', summary: 'bounded maintenance: doctor plus exact-owned reconcile, or --retention cleanup' }],
   ['rpc', { file: 'rpc.js', summary: 'read-only Codex JSON-RPC diagnostics' }],
   ['listen', { file: 'lane-status-listen.js', summary: 'wait for a status transition on owned Codex lanes' }],
 ]);

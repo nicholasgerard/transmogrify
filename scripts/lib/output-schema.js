@@ -153,6 +153,32 @@ const SCHEMAS = Object.freeze({
   },
   ack: { version: true, ok: true, operation: true, eventId: true, acknowledgedAt: true },
   schema: { version: true, ok: true, operation: true, operations: true, phases: true, providerPhases: true, schemas: true },
+  // The bounded maintenance runner and its `--retention` mode share one
+  // operation name; `providers`/`counts`/`setup` and `retention` never appear
+  // together in one result, but both are declared here so either shape
+  // projects cleanly.
+  maintain: {
+    version: true, ok: true, operation: true, dryRun: true,
+    providers: {
+      codex: { available: true, reconciled: true, results: true, notOk: true, skipped: true, code: true },
+      claude: { available: true, reconciled: true, results: true, notOk: true, skipped: true, code: true },
+    },
+    counts: {
+      ownedActive: true, ownedStopped: true, pendingOperations: true, pendingRetirements: true,
+      cleanupBlocked: true, unattendedChildren: true,
+    },
+    setup: {
+      ready: true,
+      ownerActions: { provider: true, reason: true, blocking: true, ownerAction: true },
+    },
+    retention: {
+      dryRun: true, keepDays: true, keepBackups: true,
+      operations: { candidates: true, moved: true },
+      events: { candidates: true, moved: true },
+      backups: { candidates: true, moved: true },
+      trashDir: true,
+    },
+  },
 });
 
 // Project a value through a shape: objects keep only listed keys, arrays are

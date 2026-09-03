@@ -141,6 +141,22 @@ Lane envelope. `receipt`: `archived`, `alreadyRetired`, `worktreeRemoved`,
 
 `operations`, `phases`, `providerPhases`, `schemas`: this contract as data.
 
+### `maintain`
+
+The bounded maintenance runner. `dryRun`, `providers` (`codex`, `claude`,
+each `available`, `reconciled`, `results`, `notOk`, `skipped`, and `code`
+when a reconcile threw), `counts`
+(`ownedActive`, `ownedStopped`, `pendingOperations`, `pendingRetirements`,
+`cleanupBlocked`, `unattendedChildren`), `setup` (the doctor's own setup
+block: `ready`, `ownerActions`). No provider id, lane id, name, or path ever
+appears in this output.
+
+With `--retention`, the result carries `retention` instead of
+`providers`/`counts`/`setup`: `dryRun`, `keepDays`, `keepBackups`,
+`operations`, `events`, `backups` (each `candidates`, `moved`), and
+`trashDir`. Retention only moves matter into a recoverable trash directory;
+it never unlinks anything.
+
 ## Failure envelope
 
 `version`, `ok: false`, `code`, `message`, and optional `details` limited to:
