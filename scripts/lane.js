@@ -487,156 +487,156 @@ function resultExitCode(result) {
 // Register (or re-adopt) the parent context for this session and record how
 // the session can be woken.
 async function parentInit(values, env) {
-    if (!values['host-provider'] || !values['host-app'] || !values.name) {
-      usage('parent-init requires --host-provider, --host-app, and --name');
-    }
-    const wakeMode = values.wake ?? 'auto';
-    if (!['auto', 'none'].includes(wakeMode)) usage('--wake must be auto or none');
-    if (values['self-nonce'] !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/.test(values['self-nonce'])) {
-      usage('--self-nonce must be 8 to 128 characters of letters, digits, dots, dashes, or underscores');
-    }
-    if (values['repo-root'] !== undefined && !path.isAbsolute(values['repo-root'])) {
-      usage('--repo-root must be absolute');
-    }
-    const created = createParentContext({
-      hostProvider: values['host-provider'],
-      hostApp: values['host-app'],
-      displayName: values.name,
-      nativeTaskRef: values['native-task-ref'],
+  if (!values['host-provider'] || !values['host-app'] || !values.name) {
+    usage('parent-init requires --host-provider, --host-app, and --name');
+  }
+  const wakeMode = values.wake ?? 'auto';
+  if (!['auto', 'none'].includes(wakeMode)) usage('--wake must be auto or none');
+  if (values['self-nonce'] !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/.test(values['self-nonce'])) {
+    usage('--self-nonce must be 8 to 128 characters of letters, digits, dots, dashes, or underscores');
+  }
+  if (values['repo-root'] !== undefined && !path.isAbsolute(values['repo-root'])) {
+    usage('--repo-root must be absolute');
+  }
+  const created = createParentContext({
+    hostProvider: values['host-provider'],
+    hostApp: values['host-app'],
+    displayName: values.name,
+    nativeTaskRef: values['native-task-ref'],
+  }, env);
+  let wake = created.parent.wake
+    ? { channel: created.parent.wake.channel, source: created.parent.wake.receipt?.source ?? null }
+    : { channel: 'none', source: null, reason: 'not-requested' };
+  // A re-adopted context (same native task reference) may carry the wake
+  // channel of an earlier session; the channel is always this session's
+  // own, so it is rediscovered and re-recorded on every automatic init.
+  if (wakeMode === 'auto') {
+    const discovered = await discoverWakeForHost(values['host-provider'], {
+      repoRoot: values['repo-root'] ? resolveProject(values['repo-root']).root : undefined,
+      nonce: values['self-nonce'],
+      url: values.url,
     }, env);
-    let wake = created.parent.wake
-      ? { channel: created.parent.wake.channel, source: created.parent.wake.receipt?.source ?? null }
-      : { channel: 'none', source: null, reason: 'not-requested' };
-    // A re-adopted context (same native task reference) may carry the wake
-    // channel of an earlier session; the channel is always this session's
-    // own, so it is rediscovered and re-recorded on every automatic init.
-    if (wakeMode === 'auto') {
-      const discovered = await discoverWakeForHost(values['host-provider'], {
-        repoRoot: values['repo-root'] ? resolveProject(values['repo-root']).root : undefined,
-        nonce: values['self-nonce'],
-        url: values.url,
-      }, env);
-      recordParentWake(created, discovered.record, env);
-      wake = discovered.summary;
-    }
-    return {
-      version: 1,
-      ok: true,
-      operation: 'parent-init',
-      parentRef: created.parent.parentRef,
-      contextFile: created.file,
-      hostProvider: created.parent.hostProvider,
-      hostApp: created.parent.hostApp,
-      displayName: created.parent.displayName,
-      wake,
-    };
+    recordParentWake(created, discovered.record, env);
+    wake = discovered.summary;
+  }
+  return {
+    version: 1,
+    ok: true,
+    operation: 'parent-init',
+    parentRef: created.parent.parentRef,
+    contextFile: created.file,
+    hostProvider: created.parent.hostProvider,
+    hostApp: created.parent.hostApp,
+    displayName: created.parent.displayName,
+    wake,
+  };
 }
 
 function parentList(env) {
-    const parents = listParentContexts(env).map((context) => ({
-      parentRef: context.parent.parentRef,
-      contextFile: context.file,
-      hostProvider: context.parent.hostProvider,
-      hostApp: context.parent.hostApp,
-      displayName: context.parent.displayName,
-      createdAt: context.parent.createdAt,
-      wake: context.parent.wake?.channel ?? 'none',
-      watcher: runningWatcher(context.parent.parentRef, env) ? 'running' : 'stopped',
-      children: listDispatches(context, env).length,
-      unacknowledgedEvents: countEvents(context, {}, env),
-    }));
-    return { version: 1, ok: true, operation: 'parent-list', parents };
+  const parents = listParentContexts(env).map((context) => ({
+    parentRef: context.parent.parentRef,
+    contextFile: context.file,
+    hostProvider: context.parent.hostProvider,
+    hostApp: context.parent.hostApp,
+    displayName: context.parent.displayName,
+    createdAt: context.parent.createdAt,
+    wake: context.parent.wake?.channel ?? 'none',
+    watcher: runningWatcher(context.parent.parentRef, env) ? 'running' : 'stopped',
+    children: listDispatches(context, env).length,
+    unacknowledgedEvents: countEvents(context, {}, env),
+  }));
+  return { version: 1, ok: true, operation: 'parent-list', parents };
 }
 
 function capabilitiesFor(values, env) {
-    if (!TARGETS.includes(values.target)) {
-      usage('capabilities requires --target codex|claude');
-    }
-    const provider = providerForTarget(values.target);
-    rejectForeignFlags(provider, values, 'capabilities');
-    const { adapter } = provider;
-    if (typeof adapter.executionCapabilities !== 'function') {
-      usage(`${values.target} execution capabilities are unavailable`);
-    }
-    return adapter.executionCapabilities({ url: values.url, claudeBin: values['claude-bin'] }, env);
+  if (!TARGETS.includes(values.target)) {
+    usage('capabilities requires --target codex|claude');
+  }
+  const provider = providerForTarget(values.target);
+  rejectForeignFlags(provider, values, 'capabilities');
+  const { adapter } = provider;
+  if (typeof adapter.executionCapabilities !== 'function') {
+    usage(`${values.target} execution capabilities are unavailable`);
+  }
+  return adapter.executionCapabilities({ url: values.url, claudeBin: values['claude-bin'] }, env);
 }
 
 // The parent's view of every child: lane state (live phase with --observe),
 // unacknowledged events, and the watcher and wake channel.
 async function childrenSummary(parentContext, values, env) {
-    const repoFilter = values['repo-root'];
-    if (repoFilter !== undefined && !path.isAbsolute(repoFilter)) usage('--repo-root must be absolute');
-    const project = repoFilter ? resolveProject(repoFilter) : null;
-    const projectKey = project ? digest(project.commonDir) : undefined;
-    // --observe refreshes every child through its provider first, so the
-    // summary below reflects the live phase and the events that observation
-    // just recorded.
-    let observed = new Map();
-    if (values.observe === true) {
-      const round = await observeParentChildren(parentContext, {
-        ...values, 'repo-root': project ? project.root : undefined,
-      }, env, Date.now() + OBSERVATION_ROUND_MS);
-      observed = new Map(round.observed.map((entry) => [entry.dispatchId, entry]));
-    }
-    const pendingEvents = listEvents(parentContext, { projectKey }, env);
-    const children = listDispatches(parentContext, env)
-      .filter((dispatch) => !project || dispatch.child.repoRoot === project.root)
-      .map((dispatch) => {
-        const summary = dispatchSummary(dispatch, resolveDispatchLane(dispatch, env));
-        const mine = pendingEvents.filter((event) => event.dispatchId === dispatch.dispatchId);
-        const latest = mine.at(-1) || null;
-        const live = observed.get(dispatch.dispatchId);
-        return {
-          ...summary,
-          ...(live ? { phase: live.phase } : {}),
-          unacknowledgedEvents: mine.length,
-          latestEventType: latest?.type ?? null,
-          latestEventKind: latest ? kindForEvent(latest.type) : null,
-        };
-      });
-    const unacknowledgedEvents = pendingEvents.length;
-    return {
-      version: 1,
-      ok: true,
-      operation: 'children',
-      parentRef: parentContext.parent.parentRef,
-      wake: parentContext.parent.wake?.channel ?? 'none',
-      watcher: runningWatcher(parentContext.parent.parentRef, env) ? 'running' : 'stopped',
-      children,
-      unacknowledgedEvents,
-    };
+  const repoFilter = values['repo-root'];
+  if (repoFilter !== undefined && !path.isAbsolute(repoFilter)) usage('--repo-root must be absolute');
+  const project = repoFilter ? resolveProject(repoFilter) : null;
+  const projectKey = project ? digest(project.commonDir) : undefined;
+  // --observe refreshes every child through its provider first, so the
+  // summary below reflects the live phase and the events that observation
+  // just recorded.
+  let observed = new Map();
+  if (values.observe === true) {
+    const round = await observeParentChildren(parentContext, {
+      ...values, 'repo-root': project ? project.root : undefined,
+    }, env, Date.now() + OBSERVATION_ROUND_MS);
+    observed = new Map(round.observed.map((entry) => [entry.dispatchId, entry]));
+  }
+  const pendingEvents = listEvents(parentContext, { projectKey }, env);
+  const children = listDispatches(parentContext, env)
+    .filter((dispatch) => !project || dispatch.child.repoRoot === project.root)
+    .map((dispatch) => {
+      const summary = dispatchSummary(dispatch, resolveDispatchLane(dispatch, env));
+      const mine = pendingEvents.filter((event) => event.dispatchId === dispatch.dispatchId);
+      const latest = mine.at(-1) || null;
+      const live = observed.get(dispatch.dispatchId);
+      return {
+        ...summary,
+        ...(live ? { phase: live.phase } : {}),
+        unacknowledgedEvents: mine.length,
+        latestEventType: latest?.type ?? null,
+        latestEventKind: latest ? kindForEvent(latest.type) : null,
+      };
+    });
+  const unacknowledgedEvents = pendingEvents.length;
+  return {
+    version: 1,
+    ok: true,
+    operation: 'children',
+    parentRef: parentContext.parent.parentRef,
+    wake: parentContext.parent.wake?.channel ?? 'none',
+    watcher: runningWatcher(parentContext.parent.parentRef, env) ? 'running' : 'stopped',
+    children,
+    unacknowledgedEvents,
+  };
 }
 
 // Acknowledge one event by id, or every pending event through a sequence.
 function acknowledge(parentContext, values, env) {
-    if (values.through !== undefined) {
-      // Acknowledge every pending event the parent has seen, by the highest
-      // sequence a wait or wake named; events recorded after it stay pending.
-      if (values.event !== undefined) usage('ack takes --event or --through, not both');
-      if (!/^[1-9][0-9]*$/.test(values.through)) usage('--through must be a positive integer sequence');
-      const through = Number(values.through);
-      const seen = listEvents(parentContext, {}, env).filter((event) => event.sequence <= through);
-      const acknowledged = seen.map((event) => acknowledgeEvent(parentContext, event.eventId, env));
-      return {
-        version: 1,
-        ok: true,
-        operation: 'ack',
-        through,
-        acknowledged: acknowledged.map((entry) => entry.eventId),
-        count: acknowledged.length,
-      };
-    }
-    if (!values.event) usage('ack requires --event or --through');
-    const acknowledgement = acknowledgeEvent(parentContext, values.event, env);
+  if (values.through !== undefined) {
+    // Acknowledge every pending event the parent has seen, by the highest
+    // sequence a wait or wake named; events recorded after it stay pending.
+    if (values.event !== undefined) usage('ack takes --event or --through, not both');
+    if (!/^[1-9][0-9]*$/.test(values.through)) usage('--through must be a positive integer sequence');
+    const through = Number(values.through);
+    const seen = listEvents(parentContext, {}, env).filter((event) => event.sequence <= through);
+    const acknowledged = seen.map((event) => acknowledgeEvent(parentContext, event.eventId, env));
     return {
       version: 1,
       ok: true,
       operation: 'ack',
-      eventId: acknowledgement.eventId,
-      acknowledgedAt: acknowledgement.acknowledgedAt,
-      acknowledged: [acknowledgement.eventId],
-      count: 1,
+      through,
+      acknowledged: acknowledged.map((entry) => entry.eventId),
+      count: acknowledged.length,
     };
+  }
+  if (!values.event) usage('ack requires --event or --through');
+  const acknowledgement = acknowledgeEvent(parentContext, values.event, env);
+  return {
+    version: 1,
+    ok: true,
+    operation: 'ack',
+    eventId: acknowledgement.eventId,
+    acknowledgedAt: acknowledgement.acknowledgedAt,
+    acknowledged: [acknowledgement.eventId],
+    count: 1,
+  };
 }
 
 async function main(argv, env = process.env) {

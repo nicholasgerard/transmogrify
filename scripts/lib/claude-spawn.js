@@ -195,25 +195,12 @@ async function finalizeSpawn(options, env, surface, runtime, lane, operation, jo
 // guessing. ENOENT or EACCES is proven NOT_DELIVERED; every other launch or
 // attribution failure is SPAWN_UNCERTAIN and the launch is never repeated.
 async function spawnLane(options, env = process.env) {
-  if (!options.repoRoot || !path.isAbsolute(options.repoRoot) ||
-      typeof options.name !== 'string' || !options.name ||
-      typeof options.input !== 'string' || !options.input) {
-    throw new ClaudeTransmogrifyError('USAGE_ERROR', 'spawn requires absolute repoRoot, name, and input');
-  }
-  const nameProblem = laneNameError(options.name, 'Claude lane name');
-  if (nameProblem) throw new ClaudeTransmogrifyError('USAGE_ERROR', nameProblem);
-  options = { ...options, name: canonicalLaneName(options.name) };
-  const canonicalNameProblem = ownedLaneNameError(options.name, 'Claude lane name');
-  if (canonicalNameProblem) {
-    throw new ClaudeTransmogrifyError('USAGE_ERROR', canonicalNameProblem);
-  }
-  if (options.model !== undefined) assertSafeModelSelector(options.model);
+  options = validateClaudeSpawnRequest(options);
   const surface = surfaceFor(options);
   const runtime = preflight(options, env, surface);
   if (options.parentContext || options.executionProfile !== undefined) {
     options = { ...options, executionProfile: resolveSpawnProfile(options, runtime) };
   }
-  const resolvedExecution = executionArgs(options.executionProfile);
   const laneId = options.laneId || crypto.randomUUID();
   const dispatchEnvelope = options.parentContext ? reserveDispatch({
     parentContext: options.parentContext,
@@ -234,7 +221,48 @@ async function spawnLane(options, env = process.env) {
     };
   }
   ensureRegistry(options.repoRoot, env);
-  const operationId = crypto.randomUUID();
+  const ctx = {
+    options, env, surface, runtime, laneId, dispatchEnvelope,
+    operationId: crypto.randomUUID(), lane: null, operation: null, argv: null, stdoutPath: null, stderrPath: null,
+  };
+  await reserveClaudeSpawn(ctx);
+  const launch = await launchSession(ctx);
+  const jobId = readJobId(ctx, launch);
+  const finalized = await attributeSession(ctx, jobId, launch);
+  recordSpawnedEvent(ctx, finalized);
+  return laneResult('spawn', finalized.lane, {
+    operationId: ctx.operation.operationId,
+    receipt: {
+      jobId, sessionId: finalized.lane.providerId,
+      bridgeIdSha256: sha256(finalized.lane.providerIdentity.bridgeId),
+      presentation: finalized.presentation.state,
+      requestedModelSelector: finalized.lane.ownership.spawnIntent.modelSelector || null,
+      ...(finalized.lane.executionProfile ? { executionProfile: finalized.lane.executionProfile } : {}),
+    },
+  });
+}
+
+function validateClaudeSpawnRequest(options) {
+  if (!options.repoRoot || !path.isAbsolute(options.repoRoot) ||
+      typeof options.name !== 'string' || !options.name ||
+      typeof options.input !== 'string' || !options.input) {
+    throw new ClaudeTransmogrifyError('USAGE_ERROR', 'spawn requires absolute repoRoot, name, and input');
+  }
+  const nameProblem = laneNameError(options.name, 'Claude lane name');
+  if (nameProblem) throw new ClaudeTransmogrifyError('USAGE_ERROR', nameProblem);
+  const canonical = { ...options, name: canonicalLaneName(options.name) };
+  const canonicalNameProblem = ownedLaneNameError(canonical.name, 'Claude lane name');
+  if (canonicalNameProblem) throw new ClaudeTransmogrifyError('USAGE_ERROR', canonicalNameProblem);
+  if (canonical.model !== undefined) assertSafeModelSelector(canonical.model);
+  return canonical;
+}
+
+// Take the preflight census, build the exact argv (prompt marker, pinned
+// execution, child hooks), plan or verify the seat, and reserve the lane with
+// its spawn journal. A failure before the reservation settles the parent's
+// dispatch; the seat is materialized once the journal exists.
+async function reserveClaudeSpawn(ctx) {
+  const { options, env, surface, runtime, laneId, dispatchEnvelope, operationId } = ctx;
   let preflightAgents;
   try {
     preflightAgents = await surface.agents(runtime);
@@ -245,17 +273,17 @@ async function spawnLane(options, env = process.env) {
   const spawnNonce = crypto.randomUUID();
   const marker = `[transmogrify spawn ${spawnNonce}]`;
   const prompt = `${options.input}\n\n${marker}`;
-  const execution = options.executionProfile ? resolvedExecution : { model: options.model };
+  const execution = options.executionProfile ? executionArgs(options.executionProfile) : { model: options.model };
   const settingsFile = (dispatchEnvelope && childHooksEnabled(env)
     ? writeChildHooksSettings(laneId, dispatchEnvelope.dispatch.parentRef, execution, env)
     : null) || undefined;
-  const argv = claudeSpawnArgs(options.name, prompt, {
+  ctx.argv = claudeSpawnArgs(options.name, prompt, {
     ...execution,
     ...(settingsFile ? { fastMode: undefined, settingsFile } : {}),
   });
   const paths = projectPaths(options.repoRoot, env);
-  const stdoutPath = path.join(paths.operations, `${operationId}.spawn.stdout`);
-  const stderrPath = path.join(paths.operations, `${operationId}.spawn.stderr`);
+  ctx.stdoutPath = path.join(paths.operations, `${operationId}.spawn.stdout`);
+  ctx.stderrPath = path.join(paths.operations, `${operationId}.spawn.stderr`);
   let seatIntent;
   let externalSeat;
   try {
@@ -269,79 +297,84 @@ async function spawnLane(options, env = process.env) {
     failReservedDispatch(dispatchEnvelope, env);
     throw error;
   }
+  const modelSelector = options.executionProfile?.resolved.model.selector ?? options.model;
   const spawnIntent = {
     operationId, spawnNonce, displayName: options.name, promptSha256: sha256(options.input),
     promptMarkerSha256: sha256(marker),
-    modelSelector: options.executionProfile?.resolved.model.selector ?? options.model,
+    modelSelector,
     preflightSessionIds: preflightAgents
       .filter((agent) => typeof agent.sessionId === 'string')
       .map((agent) => agent.sessionId.toLowerCase()).sort(),
-    stdoutPath, stderrPath,
+    stdoutPath: ctx.stdoutPath, stderrPath: ctx.stderrPath,
   };
-  let lane;
-  let operation;
   try {
-    ({ lane, operation } = reserveSpawn(options.repoRoot, {
-    operation: {
-      operationId, type: 'spawn', laneId,
-      details: {
-        target: 'claude', name: options.name, promptSha256: sha256(options.input),
-        promptMarkerSha256: sha256(marker), spawnNonce, stdoutPath, stderrPath,
-        modelSelector: options.executionProfile?.resolved.model.selector ?? options.model,
+    ({ lane: ctx.lane, operation: ctx.operation } = reserveSpawn(options.repoRoot, {
+      operation: {
+        operationId, type: 'spawn', laneId,
+        details: {
+          target: 'claude', name: options.name, promptSha256: sha256(options.input),
+          promptMarkerSha256: sha256(marker), spawnNonce, stdoutPath: ctx.stdoutPath, stderrPath: ctx.stderrPath,
+          modelSelector,
+          ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
+          ...(dispatchEnvelope ? {
+            dispatchId: dispatchEnvelope.dispatch.dispatchId,
+            promptReceipts: dispatchEnvelope.receipts,
+          } : {}),
+        },
+      },
+      lane: {
+        laneId, backend: BACKEND, target: 'claude', displayName: options.name,
+        state: 'planned', operationId,
+        ...(options.lineage ? { lineage: options.lineage } : {}),
         ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
-        ...(dispatchEnvelope ? {
-          dispatchId: dispatchEnvelope.dispatch.dispatchId,
-          promptReceipts: dispatchEnvelope.receipts,
-        } : {}),
+        capabilities: capabilities(), runtime: publicRuntime(runtime), seat: externalSeat, seatIntent,
+        providerIdentity: {
+          version: 1, sessionId: null, jobId: null, bridgeId: null,
+          executionEpochs: [], runtimeEpochs: [],
+        },
+        spawnIntent,
       },
-    },
-    lane: {
-      laneId, backend: BACKEND, target: 'claude', displayName: options.name,
-      state: 'planned', operationId,
-      ...(options.lineage ? { lineage: options.lineage } : {}),
-      ...(options.executionProfile ? { executionProfile: options.executionProfile } : {}),
-      capabilities: capabilities(), runtime: publicRuntime(runtime), seat: externalSeat, seatIntent,
-      providerIdentity: {
-        version: 1, sessionId: null, jobId: null, bridgeId: null,
-        executionEpochs: [], runtimeEpochs: [],
-      },
-      spawnIntent,
-    },
-  }, env));
+    }, env));
   } catch (error) {
     failReservedDispatch(dispatchEnvelope, env);
     throw error;
   }
   if (options.dispatch) markDispatchJournaled(options.dispatch.dispatchId, env);
-  if (!lane.seat) {
-    const seat = materializeManagedSeat(options.repoRoot, lane.seatIntent);
-    lane = bindLaneSeat(options.repoRoot, lane.laneId, operation.operationId, seat, env);
-    operation = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+  if (!ctx.lane.seat) {
+    const seat = materializeManagedSeat(options.repoRoot, ctx.lane.seatIntent);
+    ctx.lane = bindLaneSeat(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, seat, env);
+    ctx.operation = pendingOperationForLane(options.repoRoot, ctx.lane.laneId, env);
   }
-  const dispatchStartedAt = nowMs(options);
-  operation = updatePending(options.repoRoot, lane.laneId, operation, {
-    state: 'dispatching', details: { ...operation.details, dispatchStartedAt },
+}
+
+// Launch the background session with the journal in dispatching. A launch
+// the operating system refused is NOT_DELIVERED with its receipts removed;
+// any other failure is SPAWN_UNCERTAIN and nothing is repeated.
+async function launchSession(ctx) {
+  const { options, env, surface, runtime, lane } = ctx;
+  ctx.operation = updatePending(options.repoRoot, lane.laneId, ctx.operation, {
+    state: 'dispatching', details: { ...ctx.operation.details, dispatchStartedAt: nowMs(options) },
   }, env);
   let launch;
   try {
-    launch = await surface.launch(runtime, argv, {
-      cwd: lane.seat.path, stdoutPath, stderrPath, timeoutMs: options.launchTimeoutMs,
+    launch = await surface.launch(runtime, ctx.argv, {
+      cwd: lane.seat.path, stdoutPath: ctx.stdoutPath, stderrPath: ctx.stderrPath, timeoutMs: options.launchTimeoutMs,
     });
   } catch (error) {
     const definitelyNotStarted = ['ENOENT', 'EACCES'].includes(error.code);
     if (definitelyNotStarted) {
-      operation = updatePending(options.repoRoot, lane.laneId, operation, {
+      ctx.operation = updatePending(options.repoRoot, lane.laneId, ctx.operation, {
         state: 'notDeliveredCaptureCleanup',
-        details: { ...operation.details, errorCode: error.code },
+        details: { ...ctx.operation.details, errorCode: error.code },
       }, env);
       updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
       removeDurableSpawnReceipts(options.repoRoot, lane, env);
       removeChildHooksSettings(lane.laneId, env);
-      completePending(options.repoRoot, lane.laneId, operation, {
-        state: 'notDelivered', details: { ...operation.details, errorCode: error.code },
+      completePending(options.repoRoot, lane.laneId, ctx.operation, {
+        state: 'notDelivered', details: { ...ctx.operation.details, errorCode: error.code },
       }, env);
     } else {
-      updatePending(options.repoRoot, lane.laneId, operation, { state: 'spawnUnknown' }, env);
+      updatePending(options.repoRoot, lane.laneId, ctx.operation, { state: 'spawnUnknown' }, env);
       updateLane(options.repoRoot, lane.laneId, { state: 'deliveryUnknown' }, env);
     }
     throw new ClaudeTransmogrifyError(
@@ -349,23 +382,34 @@ async function spawnLane(options, env = process.env) {
       { laneId: lane.laneId },
     );
   }
-  operation = updatePending(options.repoRoot, lane.laneId, operation, {
+  ctx.operation = updatePending(options.repoRoot, lane.laneId, ctx.operation, {
     state: 'dispatched',
     details: {
-      ...operation.details, dispatchFinishedAt: nowMs(options),
+      ...ctx.operation.details, dispatchFinishedAt: nowMs(options),
       stdoutSha256: sha256(launch.stdout), stderrSha256: sha256(launch.stderr),
     },
   }, env);
-  let jobId;
-  try { jobId = parseJobId(launch.stdout); } catch (error) {
-    updatePending(options.repoRoot, lane.laneId, operation, { state: 'spawnUnknown' }, env);
+  return launch;
+}
+
+function readJobId(ctx, launch) {
+  const { options, env, lane } = ctx;
+  try { return parseJobId(launch.stdout); } catch (error) {
+    updatePending(options.repoRoot, lane.laneId, ctx.operation, { state: 'spawnUnknown' }, env);
     updateLane(options.repoRoot, lane.laneId, { state: 'deliveryUnknown' }, env);
     throw new ClaudeTransmogrifyError('SPAWN_UNCERTAIN', error.message, { laneId: lane.laneId });
   }
-  let finalized;
+}
+
+// Attribute the launched job to its exact session and bind it; a failure
+// leaves the journal unknown with its cause and the lane delivery-unknown
+// unless a later phase already advanced it.
+async function attributeSession(ctx, jobId, launch) {
+  const { options, env, surface, runtime, lane, operation } = ctx;
   try {
-    finalized = await finalizeSpawn(options, env, surface, runtime, lane, operation, jobId, launch.stdout);
+    const finalized = await finalizeSpawn(options, env, surface, runtime, lane, operation, jobId, launch.stdout);
     if (options.onLaunch) options.onLaunch(finalized.lane);
+    return finalized;
   } catch (error) {
     const current = requireOwnedLane(options.repoRoot, lane.laneId, env);
     const cause = spawnCause(error);
@@ -382,42 +426,33 @@ async function spawnLane(options, env = process.env) {
       ...(ownerActionFor(cause.causeCode) ? { ownerAction: ownerActionFor(cause.causeCode) } : {}),
     });
   }
-  if (options.dispatch) {
-    try {
-      recordEvent({
-        dispatchId: options.dispatch.dispatchId,
-        type: 'child.spawned',
-        fingerprint: `spawn-complete:${operation.operationId}:${finalized.lane.providerId}`,
-        data: { state: 'spawned' },
-      }, env);
-    } catch (error) {
-      // The provider effect is verified and journaled; only the durable parent
-      // notification failed. Never project this as uncertain or not attempted.
-      throw new ClaudeTransmogrifyError(
-        'PARENT_EVENT_UNRECORDED',
-        'lane launch is verified but the durable parent event could not be recorded',
-        {
-          laneId: lane.laneId,
-          providerId: finalized.lane.providerId,
-          providerMutation: 'verified',
-          phase: 'parentEvent',
-          code: error.code || 'INVALID_LOCAL_STATE',
-        },
-      );
-    }
+}
+
+// The provider effect is verified and journaled; a parent event that cannot
+// be recorded is reported as such, never as uncertain or not attempted.
+function recordSpawnedEvent(ctx, finalized) {
+  const { options, env, lane, operation } = ctx;
+  if (!options.dispatch) return;
+  try {
+    recordEvent({
+      dispatchId: options.dispatch.dispatchId,
+      type: 'child.spawned',
+      fingerprint: `spawn-complete:${operation.operationId}:${finalized.lane.providerId}`,
+      data: { state: 'spawned' },
+    }, env);
+  } catch (error) {
+    throw new ClaudeTransmogrifyError(
+      'PARENT_EVENT_UNRECORDED',
+      'lane launch is verified but the durable parent event could not be recorded',
+      {
+        laneId: lane.laneId,
+        providerId: finalized.lane.providerId,
+        providerMutation: 'verified',
+        phase: 'parentEvent',
+        code: error.code || 'INVALID_LOCAL_STATE',
+      },
+    );
   }
-  return laneResult('spawn', finalized.lane, {
-    operationId: operation.operationId,
-    receipt: {
-      jobId, sessionId: finalized.lane.providerId,
-      bridgeIdSha256: sha256(finalized.lane.providerIdentity.bridgeId),
-      presentation: finalized.presentation.state,
-      requestedModelSelector: finalized.lane.ownership.spawnIntent.modelSelector || null,
-      ...(finalized.lane.executionProfile ? {
-        executionProfile: finalized.lane.executionProfile,
-      } : {}),
-    },
-  });
 }
 
 // Settle a spawn journal without relaunching. A bound lane is verified and
