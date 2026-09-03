@@ -420,29 +420,6 @@ function transcriptFixture(t) {
   };
 }
 
-test('Claude transcript receipt observes exact queue enqueue and later user consumption shapes', async (t) => {
-  const fixture = transcriptFixture(t);
-  const surface = createClaudeSurface();
-  const content = 'steer me\n\n[transmogrify delivery 11111111-1111-4111-8111-111111111111]';
-
-  let snapshot = surface.transcriptSnapshot(fixture.runtime, SESSION_ID);
-  fs.appendFileSync(fixture.transcript, `${JSON.stringify({
-    type: 'queue-operation',
-    operation: 'enqueue',
-    timestamp: '2026-09-01T19:00:00.000Z',
-    sessionId: SESSION_ID,
-    content,
-  })}\n`);
-  assert.equal((await surface.waitForTranscriptDelivery(snapshot, content, 500)).state, 'queuedObserved');
-
-  snapshot = surface.transcriptSnapshot(fixture.runtime, SESSION_ID);
-  fs.appendFileSync(fixture.transcript, `${JSON.stringify({
-    type: 'user',
-    message: { role: 'user', content },
-  })}\n`);
-  assert.equal((await surface.waitForTranscriptDelivery(snapshot, content, 500)).state, 'consumedObserved');
-});
-
 test('Claude delivery reconciliation finds a content-free exact marker receipt without replay', (t) => {
   const fixture = transcriptFixture(t);
   const surface = createClaudeSurface();
@@ -466,36 +443,6 @@ test('Claude delivery reconciliation finds a content-free exact marker receipt w
     messageSha256: '0'.repeat(64),
     deliveryToken: token,
   }), /not uniquely receipted/);
-});
-
-test('Claude transcript receipt rejects replacement after snapshot', async (t) => {
-  const fixture = transcriptFixture(t);
-  const surface = createClaudeSurface();
-  const snapshot = surface.transcriptSnapshot(fixture.runtime, SESSION_ID);
-  fs.renameSync(fixture.transcript, `${fixture.transcript}.old`);
-  fs.writeFileSync(fixture.transcript, `${JSON.stringify({
-    type: 'queue-operation', operation: 'enqueue', timestamp: 'now',
-    sessionId: SESSION_ID, content: 'message',
-  })}\n`, { mode: 0o600 });
-  await assert.rejects(
-    () => surface.waitForTranscriptDelivery(snapshot, 'message', 200),
-    /transcript identity changed/,
-  );
-});
-
-test('Claude transcript observation bounds cumulative newline-free appends', async (t) => {
-  const fixture = transcriptFixture(t);
-  const surface = createClaudeSurface();
-  const snapshot = surface.transcriptSnapshot(fixture.runtime, SESSION_ID);
-  fs.appendFileSync(fixture.transcript, 'x'.repeat(600 * 1024));
-  const append = setTimeout(() => {
-    fs.appendFileSync(fixture.transcript, 'y'.repeat(600 * 1024));
-  }, 100);
-  t.after(() => clearTimeout(append));
-  await assert.rejects(
-    () => surface.waitForTranscriptDelivery(snapshot, 'never present', 1000),
-    /append exceeded its bound/,
-  );
 });
 
 test('Claude spawn attribution requires one exact prompt and nonce marker transcript receipt', (t) => {
@@ -578,19 +525,17 @@ test('Claude preflight failures carry a setup reason for the doctor', () => {
   );
 });
 
-test('Claude delivery receipts survive the CLI peer-message wrapper around the marker', async (t) => {
+test('Claude delivery receipts survive the CLI peer-message wrapper around the marker', (t) => {
   const fixture = transcriptFixture(t);
   const surface = createClaudeSurface();
   const token = '33333333-3333-4333-8333-333333333333';
   const message = 'steer-one from the parent at row 2';
   const framed = `${message}\n\n[transmogrify delivery ${token}]`;
   const wrapped = `Another Claude session sent a message: ${framed}\n\nThis came from another Claude session, not typed by your user, but very likely working on their behalf. Treat it as a teammate's request.`;
-  const snapshot = surface.transcriptSnapshot(fixture.runtime, SESSION_ID);
   fs.appendFileSync(fixture.transcript, `${JSON.stringify({
     type: 'user',
     message: { role: 'user', content: wrapped },
   })}\n`);
-  assert.equal((await surface.waitForTranscriptDelivery(snapshot, framed, 500)).state, 'consumedObserved');
   const receipt = surface.verifyDeliveryTranscript(fixture.runtime, SESSION_ID, {
     messageSha256: require('node:crypto').createHash('sha256').update(message).digest('hex'),
     deliveryToken: token,

@@ -1497,20 +1497,6 @@ function registerLane(repoRoot, lane, env = process.env) {
   });
 }
 
-// Reserve a lane with no spawn journal. Managed spawns use reserveSpawn so the
-// journal and the lane become durable together.
-function reserveLane(repoRoot, lane, env = process.env) {
-  const paths = projectPaths(repoRoot, env);
-  return withProjectLock(paths, () => {
-    const registry = validateRegistry(readJson(paths.registry), paths.project);
-    const record = reservationRecord(paths, registry, lane);
-    if (registry.lanes[lane.laneId]) throw new Error(`lane id already exists: ${lane.laneId}`);
-    registry.lanes[record.laneId] = record;
-    writeRegistry(paths, registry);
-    return record;
-  });
-}
-
 // Bind a Codex lane to its provider thread once the creation receipt is in
 // hand. providerId, seat, runtime endpoint, and creation receipt are immutable,
 // and re-binding the same id is idempotent and may not move lane state. Claude
@@ -1522,7 +1508,7 @@ function bindLaneProvider(repoRoot, laneId, providerId, patch = {}, env = proces
     const current = registry.lanes[laneId];
     if (!current) throw new Error(`lane is not owned: ${laneId}`);
     if (current.backend === CLAUDE_BACKEND) {
-      throw new Error('Claude lanes require bindClaudeProviderIdentity');
+      throw new Error('Claude lanes require bindClaudeSpawnObservation');
     }
     assertExactKeys(patch, new Set(['state', 'runtime', 'ownership']), 'provider binding patch');
     if (current.providerId && current.providerId !== providerId) {
@@ -1684,109 +1670,6 @@ function bindClaudeSpawnObservation(repoRoot, laneId, binding, env = process.env
         bridgeReceipt: binding.bridgeReceipt,
       },
       state: nextState,
-      updatedAt: new Date().toISOString(),
-    };
-    registry.lanes[laneId] = updated;
-    writeRegistry(paths, registry);
-    return updated;
-  });
-}
-
-// Bind only the Claude session and job, leaving bridge and epoch unbound.
-// Managed spawns use bindClaudeSpawnObservation; this partial form is exercised
-// by the state tests.
-function bindClaudeProviderIdentity(repoRoot, laneId, binding, env = process.env) {
-  const paths = projectPaths(repoRoot, env);
-  return withProjectLock(paths, () => {
-    const registry = validateRegistry(readJson(paths.registry), paths.project);
-    const current = registry.lanes[laneId];
-    if (!current) throw new Error(`lane is not owned: ${laneId}`);
-    if (current.backend !== CLAUDE_BACKEND) throw new Error(`lane ${laneId} is not a Claude lane`);
-    if (current.providerIdentity === undefined || current.providerIdentity.version !== 1) {
-      throw new Error(`lane ${laneId} has no Claude provider identity reservation`);
-    }
-    const sessionId = binding?.sessionId;
-    const jobId = binding?.jobId;
-    if (!UUID_PATTERN.test(sessionId || '') || !CLAUDE_JOB_PATTERN.test(jobId || '') ||
-        sessionId !== sessionId.toLowerCase() || jobId !== jobId.toLowerCase() ||
-        sessionId.slice(0, 8) !== jobId) {
-      throw new Error('Claude provider binding requires a matching session UUID and job id');
-    }
-    assertReceipt(binding?.creationReceipt, 'Claude creation receipt');
-    const identity = current.providerIdentity;
-    if ((current.providerId && current.providerId !== sessionId) ||
-        (identity.sessionId && identity.sessionId !== sessionId) ||
-        (identity.jobId && identity.jobId !== jobId)) {
-      throw new Error('cannot change immutable Claude provider identity');
-    }
-    if (current.providerId === sessionId && identity.sessionId === sessionId && identity.jobId === jobId) {
-      if (!sameJson(binding.creationReceipt, current.ownership.creationReceipt)) {
-        throw new Error('cannot change immutable Claude creation receipt');
-      }
-      return current;
-    }
-    if (!['planned', 'deliveryUnknown'].includes(current.state)) {
-      throw new Error(`cannot bind Claude provider identity from lane state ${current.state}`);
-    }
-    const collision = Object.values(registry.lanes).find((entry) =>
-      entry.laneId !== laneId && entry.backend === current.backend &&
-      (entry.providerId === sessionId || entry.providerIdentity?.jobId === jobId)
-    );
-    if (collision) throw new Error(`Claude provider is already owned as lane ${collision.laneId}`);
-    const updated = {
-      ...current,
-      providerId: sessionId,
-      providerIdentity: { ...identity, sessionId, jobId },
-      ownership: {
-        ...current.ownership,
-        creationReceipt: binding.creationReceipt,
-      },
-      updatedAt: new Date().toISOString(),
-    };
-    registry.lanes[laneId] = updated;
-    writeRegistry(paths, registry);
-    return updated;
-  });
-}
-
-// Bind the Claude bridge id to a lane whose session is already bound. The
-// bridge is immutable and exclusive across lanes; an exact re-bind returns the
-// lane unchanged.
-function bindLaneProviderBridge(repoRoot, laneId, bridgeId, receipt, env = process.env) {
-  const paths = projectPaths(repoRoot, env);
-  return withProjectLock(paths, () => {
-    const registry = validateRegistry(readJson(paths.registry), paths.project);
-    const current = registry.lanes[laneId];
-    if (!current) throw new Error(`lane is not owned: ${laneId}`);
-    if (current.backend !== CLAUDE_BACKEND || RETIRED_LANE_STATES.has(current.state)) {
-      throw new Error(`lane ${laneId} cannot bind a Claude bridge from state ${current.state}`);
-    }
-    if (!current.providerIdentity?.sessionId || !current.providerIdentity?.jobId) {
-      throw new Error('Claude provider session must be bound before its bridge');
-    }
-    if (!CLAUDE_BRIDGE_PATTERN.test(bridgeId || '')) throw new Error('Claude bridge id is invalid');
-    assertReceipt(receipt, 'Claude bridge receipt');
-    if (current.providerIdentity.bridgeId && current.providerIdentity.bridgeId !== bridgeId) {
-      throw new Error('cannot change immutable Claude bridge id');
-    }
-    if (current.providerIdentity.bridgeId === bridgeId) {
-      if (!sameJson(receipt, current.ownership.bridgeReceipt)) {
-        throw new Error('cannot change immutable Claude bridge receipt');
-      }
-      return current;
-    }
-    const collision = Object.values(registry.lanes).find((entry) =>
-      entry.laneId !== laneId && entry.backend === current.backend &&
-      entry.providerIdentity?.bridgeId === bridgeId
-    );
-    if (collision) throw new Error(`Claude bridge is already owned as lane ${collision.laneId}`);
-    const updated = {
-      ...current,
-      providerIdentity: { ...current.providerIdentity, bridgeId },
-      ownership: {
-        ...current.ownership,
-        bridgeReceipt: receipt,
-      },
       updatedAt: new Date().toISOString(),
     };
     registry.lanes[laneId] = updated;
@@ -2114,11 +1997,9 @@ module.exports = {
   atomicWriteJson,
   beginLaneOperation,
   beginOperation,
-  bindClaudeProviderIdentity,
   bindClaudeSpawnObservation,
   bindLaneSeat,
   bindLaneProvider,
-  bindLaneProviderBridge,
   completeLaneOperation,
   ensureRegistry,
   listLanes,
@@ -2132,7 +2013,6 @@ module.exports = {
   projectPaths,
   readRegistry,
   registerLane,
-  reserveLane,
   reserveSpawn,
   releaseLock,
   requireOwnedLane,

@@ -18,9 +18,7 @@ const {
   acquireLock,
   beginLaneOperation,
   beginOperation,
-  bindClaudeProviderIdentity,
   bindClaudeSpawnObservation,
-  bindLaneProviderBridge,
   bindLaneSeat,
   bindLaneProvider,
   completeLaneOperation,
@@ -36,7 +34,6 @@ const {
   rebindClaudeRuntime,
   registerLane,
   releaseLock,
-  reserveLane,
   reserveSpawn,
   requireOwnedLane,
   requireOwnedProviderLane,
@@ -664,47 +661,49 @@ test('terminal Claude receipts preserve legacy project-directory identity shape'
 test('Claude spawn intent validates a recorded model selector and preserves legacy omission', (t) => {
   const fixture = createStateFixture(t);
   const displayName = '[test] Claude model selector';
-  const operation = beginOperation(fixture.repoRoot, {
-    type: 'spawn', laneId: 'claude-model-selector',
-  }, fixture.env);
-  reserveLane(fixture.repoRoot, {
-    laneId: 'claude-model-selector',
-    backend: 'claude-code',
-    displayName,
-    operationId: operation.operationId,
-    runtime: {
-      protocolGeneration: 1,
-      platform: 'darwin',
-      arch: 'arm64',
-      cliPath: '/tmp/claude-2.1.258',
-      cliVersion: '2.1.258',
-      cliSha256: 'c'.repeat(64),
-      configDir: '/tmp/claude-config',
-      configDevice: 1,
-      configInode: 2,
-      projectsDirectory: '/tmp/claude-config/projects',
-      projectsDevice: 1,
-      projectsInode: 3,
-      accountFingerprint: 'd'.repeat(64),
-    },
-    providerIdentity: {
-      version: 1, sessionId: null, jobId: null, bridgeId: null,
-      executionEpochs: [], runtimeEpochs: [],
-    },
-    spawnIntent: {
-      ...claudeSpawnIntent(operation.operationId, displayName, '7'),
-      modelSelector: 'claude-opus-5',
+  const laneId = 'claude-model-selector';
+  const operationId = '71717171-7171-4717-8717-717171717171';
+  reserveSpawn(fixture.repoRoot, {
+    operation: { operationId, type: 'spawn', laneId, details: {} },
+    lane: {
+      laneId,
+      backend: 'claude-code',
+      displayName,
+      operationId,
+      runtime: {
+        protocolGeneration: 1,
+        platform: 'darwin',
+        arch: 'arm64',
+        cliPath: '/tmp/claude-2.1.258',
+        cliVersion: '2.1.258',
+        cliSha256: 'c'.repeat(64),
+        configDir: '/tmp/claude-config',
+        configDevice: 1,
+        configInode: 2,
+        projectsDirectory: '/tmp/claude-config/projects',
+        projectsDevice: 1,
+        projectsInode: 3,
+        accountFingerprint: 'd'.repeat(64),
+      },
+      providerIdentity: {
+        version: 1, sessionId: null, jobId: null, bridgeId: null,
+        executionEpochs: [], runtimeEpochs: [],
+      },
+      spawnIntent: {
+        ...claudeSpawnIntent(operationId, displayName, '7'),
+        modelSelector: 'claude-opus-5',
+      },
     },
   }, fixture.env);
   assert.equal(
-    readRegistry(fixture.repoRoot, fixture.env).registry.lanes['claude-model-selector']
+    readRegistry(fixture.repoRoot, fixture.env).registry.lanes[laneId]
       .ownership.spawnIntent.modelSelector,
     'claude-opus-5',
   );
 
   const { registry } = projectPaths(fixture.repoRoot, fixture.env);
   const raw = JSON.parse(fs.readFileSync(registry, 'utf8'));
-  raw.lanes['claude-model-selector'].ownership.spawnIntent.modelSelector = '--unsafe';
+  raw.lanes[laneId].ownership.spawnIntent.modelSelector = '--unsafe';
   fs.writeFileSync(registry, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
   assert.throws(() => readRegistry(fixture.repoRoot, fixture.env), /spawn intent model is invalid/);
 
@@ -792,30 +791,64 @@ test('Claude provider handle collisions and corrupt identities fail closed', (t)
     bridgeId: null,
     executionEpochs: [],
   };
+  const operationIds = {
+    'claude-a': 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1',
+    'claude-b': 'b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2',
+  };
   for (const laneId of ['claude-a', 'claude-b']) {
-    const operation = beginOperation(fixture.repoRoot, {
-      type: 'spawn',
-      laneId,
-    }, fixture.env);
-    reserveLane(fixture.repoRoot, {
-      laneId,
-      backend: 'claude-code',
-      displayName: `[test] ${laneId}`,
-      operationId: operation.operationId,
-      runtime: claudeRuntimeReceipt(),
-      providerIdentity: identity,
-      spawnIntent: claudeSpawnIntent(operation.operationId, `[test] ${laneId}`, laneId === 'claude-a' ? 'a' : 'b'),
+    const operationId = operationIds[laneId];
+    reserveSpawn(fixture.repoRoot, {
+      operation: { operationId, type: 'spawn', laneId, details: {} },
+      lane: {
+        laneId,
+        backend: 'claude-code',
+        displayName: `[test] ${laneId}`,
+        operationId,
+        runtime: claudeRuntimeReceipt(),
+        providerIdentity: identity,
+        spawnIntent: claudeSpawnIntent(operationId, `[test] ${laneId}`, laneId === 'claude-a' ? 'a' : 'b'),
+      },
     }, fixture.env);
   }
-  bindClaudeProviderIdentity(fixture.repoRoot, 'claude-a', {
+  bindClaudeSpawnObservation(fixture.repoRoot, 'claude-a', {
     sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     jobId: 'aaaaaaaa',
+    bridgeId: 'session_testA',
     creationReceipt: { source: 'test-a' },
+    bridgeReceipt: { source: 'test-a-bridge' },
+    epoch: {
+      epochId: 'a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3',
+      pid: 111,
+      processBirth: 'Tue Sep  1 15:00:00 2026',
+      socket: {
+        path: '/tmp/transmogrify-owned/claude-a.sock',
+        device: 1,
+        inode: 2,
+        uid: 501,
+        mode: 0o600,
+      },
+      observedAt: '2026-09-01T19:00:00.000Z',
+    },
   }, fixture.env);
-  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, 'claude-b', {
+  assert.throws(() => bindClaudeSpawnObservation(fixture.repoRoot, 'claude-b', {
     sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     jobId: 'aaaaaaaa',
+    bridgeId: 'session_testB',
     creationReceipt: { source: 'test-b' },
+    bridgeReceipt: { source: 'test-b-bridge' },
+    epoch: {
+      epochId: 'b4b4b4b4-b4b4-4b4b-8b4b-b4b4b4b4b4b4',
+      pid: 222,
+      processBirth: 'Tue Sep  1 15:00:00 2026',
+      socket: {
+        path: '/tmp/transmogrify-owned/claude-b.sock',
+        device: 1,
+        inode: 2,
+        uid: 501,
+        mode: 0o600,
+      },
+      observedAt: '2026-09-01T19:00:00.000Z',
+    },
   }, fixture.env), /already owned/);
 
   const { registry } = projectPaths(fixture.repoRoot, fixture.env);
@@ -834,42 +867,69 @@ test('Claude identity reservation requires exact backend, intent, receipts, and 
     bridgeId: null,
     executionEpochs: [],
   };
-  const operation = beginOperation(fixture.repoRoot, {
-    type: 'spawn',
-    laneId: 'claude-invalid',
-  }, fixture.env);
-  assert.throws(() => reserveLane(fixture.repoRoot, {
-    laneId: 'claude-invalid',
-    backend: 'codex-app-server',
-    displayName: '[test] invalid backend',
-    operationId: operation.operationId,
-    providerIdentity: identity,
-    spawnIntent: claudeSpawnIntent(operation.operationId, '[test] invalid backend', 'c'),
+  const invalidOperationId = 'c5c5c5c5-c5c5-4c5c-8c5c-c5c5c5c5c5c5';
+  assert.throws(() => reserveSpawn(fixture.repoRoot, {
+    operation: { operationId: invalidOperationId, type: 'spawn', laneId: 'claude-invalid', details: {} },
+    lane: {
+      laneId: 'claude-invalid',
+      backend: 'codex-app-server',
+      displayName: '[test] invalid backend',
+      operationId: invalidOperationId,
+      providerIdentity: identity,
+      spawnIntent: claudeSpawnIntent(invalidOperationId, '[test] invalid backend', 'c'),
+    },
   }, fixture.env), /carries a provider identity for backend/);
 
-  const lane = reserveLane(fixture.repoRoot, {
-    laneId: 'claude-valid',
-    backend: 'claude-code',
-    displayName: '[test] valid lifecycle',
-    operationId: operation.operationId,
-    runtime: claudeRuntimeReceipt(),
-    providerIdentity: identity,
-    spawnIntent: claudeSpawnIntent(operation.operationId, '[test] valid lifecycle', 'd'),
+  const validOperationId = 'd6d6d6d6-d6d6-4d6d-8d6d-d6d6d6d6d6d6';
+  const { lane } = reserveSpawn(fixture.repoRoot, {
+    operation: { operationId: validOperationId, type: 'spawn', laneId: 'claude-valid', details: {} },
+    lane: {
+      laneId: 'claude-valid',
+      backend: 'claude-code',
+      displayName: '[test] valid lifecycle',
+      operationId: validOperationId,
+      runtime: claudeRuntimeReceipt(),
+      providerIdentity: identity,
+      spawnIntent: claudeSpawnIntent(validOperationId, '[test] valid lifecycle', 'd'),
+    },
   }, fixture.env);
-  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, lane.laneId, {
+  const validBridgeId = 'session_testValid';
+  const validEpoch = {
+    epochId: 'd7d7d7d7-d7d7-4d7d-8d7d-d7d7d7d7d7d7',
+    pid: 333,
+    processBirth: 'Tue Sep  1 15:00:00 2026',
+    socket: {
+      path: '/tmp/transmogrify-owned/claude-valid.sock',
+      device: 1,
+      inode: 2,
+      uid: 501,
+      mode: 0o600,
+    },
+    observedAt: '2026-09-01T19:00:00.000Z',
+  };
+  assert.throws(() => bindClaudeSpawnObservation(fixture.repoRoot, lane.laneId, {
     sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
     jobId: 'dddddddd',
+    bridgeId: validBridgeId,
+    bridgeReceipt: { source: 'test-valid-bridge' },
+    epoch: validEpoch,
   }, fixture.env), /creation receipt is required/);
-  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, lane.laneId, {
+  assert.throws(() => bindClaudeSpawnObservation(fixture.repoRoot, lane.laneId, {
     sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
     jobId: 'dddddddd',
+    bridgeId: validBridgeId,
     creationReceipt: { accessToken: 'must-not-persist' },
+    bridgeReceipt: { source: 'test-valid-bridge' },
+    epoch: validEpoch,
   }, fixture.env), /secret-bearing field accessToken/);
   updateLane(fixture.repoRoot, lane.laneId, { state: 'failed' }, fixture.env);
-  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, lane.laneId, {
+  assert.throws(() => bindClaudeSpawnObservation(fixture.repoRoot, lane.laneId, {
     sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
     jobId: 'dddddddd',
+    bridgeId: validBridgeId,
     creationReceipt: { source: 'too-late' },
+    bridgeReceipt: { source: 'test-valid-bridge' },
+    epoch: validEpoch,
   }, fixture.env), /from lane state failed/);
 });
 

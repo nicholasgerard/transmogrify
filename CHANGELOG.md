@@ -32,6 +32,11 @@
   superseded installer backups.
 - Observation and provider lookup live in `lib/observe.js` and
   `lib/providers.js`; wake discovery and delivery in `lib/wake.js`.
+- Retired the test-only `reserveLane`/`bindClaudeProviderIdentity`/
+  `bindLaneProviderBridge` state primitives, superseded by the atomic
+  `reserveSpawn`/`bindClaudeSpawnObservation` path, and the dead
+  `waitForTranscriptDelivery` transcript-polling helper in
+  `lib/claude-surface.js` (steer now polls `verifyDeliveryTranscript`).
 
 ## 0.3.0
 

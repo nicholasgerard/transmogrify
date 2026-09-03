@@ -14,7 +14,6 @@ const path = require('node:path');
 const { execFile, execFileSync, spawn } = require('node:child_process');
 const { processBirth } = require('./state');
 const { ownedLaneNameError } = require('./validation');
-const { sleep } = require('./async');
 const { readOwnedJson } = require('./record-guards');
 
 // The CLI builds this adapter has been measured against, by version and SHA-256.
@@ -30,7 +29,6 @@ const BRIDGE_PATTERN = /^(?:session_|cse_)(?:staging_)?[0-9A-Za-z]{1,64}$/;
 const MAX_CAPTURE_BYTES = 64 * 1024;
 const MAX_STEER_BYTES = 64 * 1024;
 const MAX_SPAWN_BYTES = 1024 * 1024;
-const MAX_TRANSCRIPT_APPEND_BYTES = 1024 * 1024;
 const MAX_TRANSCRIPT_SCAN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const CLAUDE_ENV_KEYS = new Set([
@@ -909,26 +907,6 @@ function createClaudeSurface(dependencies = {}) {
     return texts.length === 1 ? texts[0] : null;
   }
 
-  // Whether a record is this exact content queued for the session or already
-  // consumed by it.
-  // The framed content ends with a unique delivery marker, so it is matched
-  // as a substring: the CLI wraps a peer follow-up with its own prefix and
-  // trailing guidance before the session sees it.
-  function carriesFramedContent(text, content) {
-    return typeof text === 'string' && (text === content || text.includes(content));
-  }
-  function transcriptObservation(record, sessionId, content) {
-    if (record?.type === 'queue-operation' && record.operation === 'enqueue' &&
-        record.sessionId === sessionId && carriesFramedContent(record.content, content) &&
-        typeof record.timestamp === 'string') {
-      return 'queuedObserved';
-    }
-    if (carriesFramedContent(transcriptContent(record), content) &&
-        (record.sessionId === undefined || record.sessionId === sessionId)) {
-      return 'consumedObserved';
-    }
-    return null;
-  }
   // The message that precedes a delivery marker, with the CLI's peer-message
   // prefix removed when present. Returns every candidate the caller may hash.
   const PEER_MESSAGE_PREFIX = /^Another Claude session sent a message:\s*/u;
@@ -961,65 +939,6 @@ function createClaudeSurface(dependencies = {}) {
       throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'owned Claude transcript identity changed');
     }
     return { descriptor, stat };
-  }
-
-  // Follow the transcript forward from the snapshot until this exact content is
-  // observed queued or consumed. Truncation, an oversized append, invalid JSONL,
-  // or the timeout is DELIVERY_UNCERTAIN, and nothing is ever resent from here.
-  async function waitForTranscriptDelivery(snapshot, content, timeoutMs = 30_000) {
-    if (!snapshot || !UUID_PATTERN.test(snapshot.sessionId || '')) {
-      throw new ClaudeSurfaceError('OWNERSHIP_MISMATCH', 'Claude transcript snapshot has no exact session identity');
-    }
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120_000) {
-      throw new ClaudeSurfaceError('USAGE_ERROR', 'invalid Claude transcript observation timeout');
-    }
-    const started = Date.now();
-    let appendedBytes = 0;
-    let trailing = '';
-    let offset = snapshot.offset;
-    while (Date.now() - started < timeoutMs) {
-      const opened = openOwnedTranscript(snapshot);
-      const { descriptor, stat } = opened;
-      try {
-        if (stat.size < offset) {
-          throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'owned Claude transcript was truncated');
-        }
-        if (stat.size > offset) {
-          const length = stat.size - offset;
-          appendedBytes += length;
-          if (length > MAX_TRANSCRIPT_APPEND_BYTES ||
-              appendedBytes > MAX_TRANSCRIPT_APPEND_BYTES) {
-            throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'owned Claude transcript append exceeded its bound');
-          }
-          const buffer = Buffer.alloc(length);
-          const bytesRead = fs.readSync(descriptor, buffer, 0, length, offset);
-          if (bytesRead !== length) {
-            throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'owned Claude transcript changed while reading');
-          }
-          offset = stat.size;
-          const lines = `${trailing}${buffer.toString('utf8')}`.split('\n');
-          trailing = lines.pop();
-          if (Buffer.byteLength(trailing, 'utf8') > MAX_TRANSCRIPT_APPEND_BYTES) {
-            throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'owned Claude transcript line exceeded its bound');
-          }
-          for (const line of lines) {
-            if (!line) continue;
-            let record;
-            try { record = JSON.parse(line); } catch {
-              throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'owned Claude transcript appended invalid JSONL');
-            }
-            const state = transcriptObservation(record, snapshot.sessionId, content);
-            if (state) {
-              return { state, offset };
-            }
-          }
-        }
-      } finally {
-        fs.closeSync(descriptor);
-      }
-      await sleep(50);
-    }
-    throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'queued Claude input was not observed in the owned transcript');
   }
 
   // Prove the spawn prompt landed in the session's own transcript: exactly one
@@ -1159,7 +1078,6 @@ function createClaudeSurface(dependencies = {}) {
     transcriptSnapshot,
     verifyDeliveryTranscript,
     verifySpawnTranscript,
-    waitForTranscriptDelivery,
   };
 }
 
