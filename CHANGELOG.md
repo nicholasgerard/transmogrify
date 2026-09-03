@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0
 
 - Wake economy ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md#cost-model)):
   the watcher delivers one wake per observation round naming every event

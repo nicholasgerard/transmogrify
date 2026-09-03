@@ -146,6 +146,22 @@ reported `differentRuntime` on every reconcile. Not exercised live: a
 Codex host acting as the parent end to end (its mechanisms are verified
 individually), and the two owner-present rows below.
 
+2026-09-03, wave 0.5 (0.5.0), unattended maintainer run with disposable
+probes on the shared runtime from a Claude Code host, after the adapter
+split and the phase decompositions. Exercised and green: a Claude child's
+session hook nudged the watcher at its turn end and the parent was woken
+within four seconds; a Codex runtime notification nudged the watcher at
+turn completion and the parent was woken at once; wakes carried
+`ack --through` and their acknowledgements were accepted by the CLI; the
+parent's own stop and retirements were acknowledged at observation and
+produced no wake and no pending event; the child hook settings file was
+removed with the lane; the watcher exited on request. Found and fixed
+during the pass: wake discovery ignored `CLAUDE_CONFIG_DIR`, a re-adopted
+parent context kept an earlier session's bridge, the maintenance tests
+still used the pre-unification reconcile shape, and a scratch `pkill`
+during the test-runner investigation stopped a test run from another
+project on the same machine (reported to the owner).
+
 ## Priority 1: compatibility and acceptance hardening
 
 - Claude resume lineage. On CLI `2.1.258` a background resume of a stopped
