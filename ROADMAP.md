@@ -87,6 +87,25 @@ No GUI automation is part of the control plane. Native deep links may present an
 already-owned session, but session identity and lifecycle control come from
 provider or measured local interfaces.
 
+### Run record
+
+2026-09-03, releases 0.2.2 through 0.2.5, Nick at Codex Desktop, Claude
+Desktop, and iPhone. Exercised and green: skill loaded in both hosts; doctor
+with runtime reuse and `setup.ready`; Claude lane from the Claude host with
+live Desktop and iPhone visibility; Codex lane from the Claude host with the
+measured Desktop attachment, mid-turn steer, interrupt, and archive; Claude
+lane from a Codex Desktop thread; directed steer receipts on both providers;
+mobile-originated input on Claude; whole-session stop; unacknowledged-event
+redelivery to a new process with single acknowledgement; private-archive
+retirement with guarded managed-seat removal and local record removal;
+dirty-seat refusal and manual-removal acknowledgement; the logged-out-CLI
+setup path; unbound-spawn settlement. Found and fixed during the run: the
+spawn receipt window, the wrapped delivery marker, the provenance block
+wording, fork containment on recovery, and the null-effort provenance refusal.
+Not available: in-place resume of a stopped Claude lane (a fork on this CLI,
+now contained). Not exercised live: mobile reattachment after a Desktop host
+restart, and seeded same-name foreign sessions (unit-tested only).
+
 ## Priority 1: compatibility and acceptance hardening
 
 - Claude resume lineage. On CLI `2.1.258` a background resume of a stopped
