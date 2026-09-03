@@ -66,6 +66,28 @@ document per text frame. The standalone client uses that framing; JSONL is not
 used on its WebSocket path. Framing is a dated transport receipt, not a claim
 derived from the generated message schemas.
 
+**Live-verified.** The `userAgent` returned by `initialize` is not the server's
+own identity. Its leading originator token is fixed by the first client that
+completes `initialize` on that process, or by
+`CODEX_INTERNAL_ORIGINATOR_OVERRIDE` when the app-server was started with it,
+and it then stays fixed for the process lifetime; only the version segment
+describes the running build. The trailing `(name; version)` pair echoes the
+calling client. Measured 2026-09-03 against `codex_cli_rs` 0.151.0 on macOS
+15.6.0 arm64: a first client announcing `clientInfo.name`
+`transmogrify-runtime-probe` was answered
+`transmogrify-runtime-probe/0.151.0 (Mac OS 15.6.0; arm64) unknown
+(transmogrify-runtime-probe; 0.3.1)`, and a later client on the same process
+announcing `codex_cli_rs` still received the `transmogrify-runtime-probe`
+originator.
+
+Two consequences follow. A runtime that this installation launches is first
+contacted by its own probe, so `scripts/runtime-launch.js` starts it with the
+originator override pinned to `codex_cli_rs`; without that pin the probe would
+name the runtime after itself and refuse a supported build. The originator is
+therefore never treated as authentication: it is client-settable, so the
+identity evidence is the bounded shape of `codexHome`, `platformFamily`, and
+`platformOs`, and the gate is the version segment.
+
 ## Native app visibility
 
 A Codex lane renders and streams in Codex Desktop only while the app is a client

@@ -10,6 +10,8 @@ const { once } = require('node:events');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
+  RUNTIME_ORIGINATOR,
+  RUNTIME_ORIGINATOR_ENV,
   ensureRuntime,
   normalizeListenUrl,
   openRuntimeLog,
@@ -18,6 +20,7 @@ const {
   spawnRuntime,
   terminateOwnedProcess,
 } = require('../scripts/runtime-launch');
+const { execFileResult } = require('../scripts/lib/listeners');
 const { processBirth } = require('../scripts/lib/state');
 const { REPO_ROOT } = require('./helpers/run-cli');
 
@@ -290,6 +293,57 @@ test('runtime child receives only the bounded Codex environment allowlist', asyn
   assert.equal(childOptions.options.env.PATH, '/usr/bin:/bin');
   assert.equal('OPENAI_API_KEY' in childOptions.options.env, false);
   assert.equal('UNRELATED_TOKEN' in childOptions.options.env, false);
+  // An owned runtime reports a deterministic originator so its own probe can
+  // verify it; the value is set by the launcher, never inherited.
+  assert.equal(childOptions.options.env[RUNTIME_ORIGINATOR_ENV], RUNTIME_ORIGINATOR);
+  assert.equal(sanitizedRuntimeEnv({ [RUNTIME_ORIGINATOR_ENV]: 'operator-supplied' })[RUNTIME_ORIGINATOR_ENV], undefined);
+});
+
+test('an owned runtime originator cannot be steered by the operator environment', async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-runtime-originator-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let childOptions;
+  const child = new EventEmitter();
+  child.pid = 44002;
+  child.exitCode = null;
+  child.unref = () => {};
+  const receiptPromise = spawnRuntime({
+    bin: process.execPath,
+    listenUrl: 'ws://127.0.0.1:49123',
+    log: path.join(root, 'runtime.log'),
+  }, {
+    env: { HOME: '/tmp/home', PATH: '/usr/bin:/bin', [RUNTIME_ORIGINATOR_ENV]: 'attacker-chosen' },
+    processBirth: () => 'owned-birth',
+    spawn(binary, args, options) {
+      childOptions = { binary, args, options };
+      queueMicrotask(() => child.emit('spawn'));
+      return child;
+    },
+  });
+  await receiptPromise;
+  assert.equal(childOptions.options.env[RUNTIME_ORIGINATOR_ENV], RUNTIME_ORIGINATOR);
+});
+
+test('a tolerated non-zero exit is the caller\'s verdict, not an inspection failure', async () => {
+  // `/bin/sh` keeps this a cheap exit-status check rather than another process
+  // start this suite has to wait on.
+  const exit3 = ['-c', 'exit 3'];
+  // Without the opt-in a non-zero exit is a tool failure, which is what lsof's
+  // empty-result convention needs.
+  await assert.rejects(
+    () => execFileResult('/bin/sh', exit3, { timeoutMs: 10_000 }),
+    /failed while inspecting the runtime/,
+  );
+  // With it, the exit status is returned so the caller can read its own table.
+  const tolerated = await execFileResult('/bin/sh', exit3, {
+    timeoutMs: 10_000,
+    tolerateExitCodes: true,
+  });
+  assert.equal(tolerated.code, 3);
+  // A process that never ran is still a failure, tolerance or not.
+  await assert.rejects(
+    () => execFileResult(path.join(os.tmpdir(), 'transmogrify-no-such-tool'), [], { timeoutMs: 10_000, tolerateExitCodes: true }),
+  );
 });
 
 test('shell launcher starts and then reuses an isolated detached mock runtime', async (t) => {

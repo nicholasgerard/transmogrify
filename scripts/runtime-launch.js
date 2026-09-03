@@ -48,6 +48,20 @@ const RUNTIME_ENV_KEYS = new Set([
   'XDG_STATE_HOME',
 ]);
 
+// The app-server reports a user-agent whose leading originator token is not its
+// own identity: it is fixed by the first client that completes `initialize`, or
+// by this override when the process is started with it. A runtime this
+// installation launches is therefore first contacted by the Transmogrify probe,
+// which would pin the originator to `transmogrify-runtime-probe` and fail the
+// verified `codex_cli_rs`/`Codex Desktop` line check against a runtime that is
+// in fact a supported build. Pinning the override at spawn makes an owned
+// runtime present a deterministic identity that the probe can verify. It is set
+// explicitly rather than inherited, so the operator environment can never steer
+// the identity an owned runtime reports.
+// Verified 2026-09-03 against codex_cli_rs 0.151.0 on macOS 15.6.0 arm64.
+const RUNTIME_ORIGINATOR_ENV = 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE';
+const RUNTIME_ORIGINATOR = 'codex_cli_rs';
+
 // Launcher failure. USAGE_ERROR exits 2; every other code exits 1.
 class RuntimeLaunchError extends Error {
   constructor(message, code = 'RUNTIME_LAUNCH_FAILED') {
@@ -57,12 +71,18 @@ class RuntimeLaunchError extends Error {
 }
 
 // Run the read-only probe against the endpoint. True only when it completed a
-// verified Codex app-server handshake.
+// verified Codex app-server handshake. Every clean exit is the probe's verdict,
+// so an unverified runtime is `false` and never a launcher failure; only a probe
+// that could not run at all rejects.
 async function probeRuntime(probePath, clientUrl, dependencies = {}) {
   const run = dependencies.execFileResult || execFileResult;
   const result = await run(process.execPath, [
     probePath, '--url', clientUrl, '--timeout-ms', String(PROBE_TIMEOUT_MS),
-  ], { timeoutMs: PROBE_TIMEOUT_MS + 1500, env: dependencies.env || process.env });
+  ], {
+    timeoutMs: PROBE_TIMEOUT_MS + 1500,
+    env: dependencies.env || process.env,
+    tolerateExitCodes: true,
+  });
   return result.code === 0;
 }
 
@@ -174,7 +194,10 @@ async function spawnRuntime(options, dependencies = {}) {
       'app-server', '--listen', options.listenUrl,
     ], {
       detached: true,
-      env: sanitizedRuntimeEnv(dependencies.env || process.env),
+      env: {
+        ...sanitizedRuntimeEnv(dependencies.env || process.env),
+        [RUNTIME_ORIGINATOR_ENV]: RUNTIME_ORIGINATOR,
+      },
       stdio: ['ignore', logFd, logFd],
     });
   } finally {
@@ -354,6 +377,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  RUNTIME_ORIGINATOR,
+  RUNTIME_ORIGINATOR_ENV,
   RuntimeLaunchError,
   ensureRuntime,
   inspectListeners,
