@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.6
+
+- Fix a `wait` failure path introduced in 0.2.4: a child whose observation
+  failed made the command throw instead of returning `OBSERVATION_FAILED`
+  with the failing children named.
+- Mark each doctor owner action `blocking` or advisory. A Codex Desktop that
+  is not attached no longer makes `setup.ready` false, since Codex lanes stay
+  available protocol-only; a logged-out Claude CLI or a missing runtime does.
+- Keep `FORKED_COPY` as the public code when a Claude recovery forks, pass the
+  census deadline through the absent-job settlement, make the ownership lock
+  loop sleep instead of spinning when its holder is not yet observable, and
+  reject an empty or repeated `--url` in `runtime-up.sh`.
+- Document the per-provider status phases, correct the examples that branched
+  on the Codex vocabulary for Claude lanes, link the troubleshooting index and
+  the phase table from SKILL.md, show `--worktrees` in the spawn example, and
+  add a test that the skill's published pins equal the enforced constants.
+
 ## 0.2.5
 
 - Render a provenance block for a model that has no effort selector. Since

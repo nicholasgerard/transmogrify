@@ -468,17 +468,35 @@ test('doctor names the owner action for every unmet setup precondition', async (
   assert.deepEqual(blocked.providers.claude.error, { code: 'UNSUPPORTED_ENVIRONMENT' });
   assert.deepEqual(blocked.providers.claude.setup, {
     reason: 'not-logged-in',
+    blocking: true,
     ownerAction: 'Run `claude auth login`, then rerun the doctor.',
   });
   assert.equal(blocked.providers.codex.setup.reason, 'desktop-unattached');
+  assert.equal(blocked.providers.codex.setup.blocking, false);
   assert.match(blocked.providers.codex.setup.ownerAction, /desktop-attach\.js ensure --relaunch-desktop/);
   assert.deepEqual(blocked.setup, {
     ready: false,
     ownerActions: [
-      { provider: 'codex', reason: 'desktop-unattached', ownerAction: blocked.providers.codex.setup.ownerAction },
-      { provider: 'claude', reason: 'not-logged-in', ownerAction: 'Run `claude auth login`, then rerun the doctor.' },
+      { provider: 'codex', reason: 'desktop-unattached', blocking: false, ownerAction: blocked.providers.codex.setup.ownerAction },
+      { provider: 'claude', reason: 'not-logged-in', blocking: true, ownerAction: 'Run `claude auth login`, then rerun the doctor.' },
     ],
   });
+  // An unattached Desktop alone is advisory: Codex lanes stay available
+  // protocol-only, so setup is ready.
+  const advisory = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'codex',
+    '--url', server.url,
+  ], fixture.env, {
+    desktopAttachment: async () => ({
+      attachment: { state: 'unattached', evidence: 'no-established-connection-to-runtime' },
+      desktop: { running: true },
+      nextAction: 'run-desktop-attach-ensure',
+    }),
+  });
+  assert.equal(advisory.setup.ready, true);
+  assert.equal(advisory.setup.ownerActions.length, 1);
+  assert.equal(advisory.setup.ownerActions[0].blocking, false);
   assert.equal(JSON.stringify(blocked).includes('private@example.invalid'), false);
   assert.equal(JSON.stringify(blocked).includes('/Users/private/.claude'), false);
 
@@ -488,6 +506,8 @@ test('doctor names the owner action for every unmet setup precondition', async (
     '--url', 'ws://127.0.0.1:65534',
   ], fixture.env, {});
   assert.equal(unavailable.providers.codex.setup.reason, 'runtime-unavailable');
+  assert.equal(unavailable.providers.codex.setup.blocking, true);
+  assert.equal(unavailable.setup.ready, false);
   assert.match(unavailable.providers.codex.setup.ownerAction, /runtime-up\.sh/);
 
   const claudeCalls = [];

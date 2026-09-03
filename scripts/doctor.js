@@ -40,25 +40,28 @@ const CLAUDE_SETUP_ACTIONS = new Map([
   ['custom-config-dir', 'Unset CLAUDE_CONFIG_DIR for Transmogrify commands; only the default config directory is measured.'],
 ]);
 const CLAUDE_SETUP_FALLBACK = 'Run \`claude --version\` and \`claude auth status\`, fix what they report, then rerun the doctor.';
+// Blocking actions stop every lane on that provider; advisory ones only
+// withhold native visibility, because a Codex lane can still be spawned
+// protocol-only with --allow-protocol-only.
 const CODEX_SETUP_ACTIONS = new Map([
-  ['runtime-unavailable', 'Reuse an existing Codex app-server runtime through TRANSMOGRIFY_URL, or authorize this installation to start one with \`runtime-up.sh\`, then rerun the doctor.'],
-  ['sandbox-loopback-denied', 'Grant the doctor and lane commands loopback access on this host, then rerun the doctor.'],
-  ['desktop-unattached', 'Allow Transmogrify to relaunch Codex Desktop attached to the runtime (\`desktop-attach.js ensure --relaunch-desktop\`), or set TRANSMOGRIFY_DESKTOP_RELAUNCH=auto.'],
-  ['desktop-not-running', 'Run \`desktop-attach.js ensure\` to launch Codex Desktop attached to the runtime.'],
-  ['desktop-not-installed', 'Install Codex Desktop, or use \`--allow-protocol-only\` for lanes that need no native visibility.'],
-  ['desktop-attached-elsewhere', 'Point TRANSMOGRIFY_URL at the runtime Codex Desktop is already attached to (see nativeVisibility.nextAction).'],
-  ['desktop-unsupported-platform', 'Codex Desktop attachment is macOS-only here; Codex lanes on this host need \`--allow-protocol-only\`.'],
-  ['desktop-attach-disabled', 'Unset TRANSMOGRIFY_DESKTOP_ATTACH=off for live-visible Codex lanes.'],
-  ['desktop-tool-unavailable', 'Restore lsof, ps, and osascript on this host so the attachment can be measured.'],
+  ['runtime-unavailable', { blocking: true, ownerAction: 'Reuse an existing Codex app-server runtime through TRANSMOGRIFY_URL, or authorize this installation to start one with \`runtime-up.sh\`, then rerun the doctor.' }],
+  ['sandbox-loopback-denied', { blocking: true, ownerAction: 'Grant the doctor and lane commands loopback access on this host, then rerun the doctor.' }],
+  ['desktop-unattached', { blocking: false, ownerAction: 'Allow Transmogrify to relaunch Codex Desktop attached to the runtime (\`desktop-attach.js ensure --relaunch-desktop\`), or set TRANSMOGRIFY_DESKTOP_RELAUNCH=auto; otherwise Codex lanes are protocol-only.' }],
+  ['desktop-not-running', { blocking: false, ownerAction: 'Run \`desktop-attach.js ensure\` to launch Codex Desktop attached to the runtime; otherwise Codex lanes are protocol-only.' }],
+  ['desktop-not-installed', { blocking: false, ownerAction: 'Install Codex Desktop, or use \`--allow-protocol-only\` for lanes that need no native visibility.' }],
+  ['desktop-attached-elsewhere', { blocking: false, ownerAction: 'Point TRANSMOGRIFY_URL at the runtime Codex Desktop is already attached to (see nativeVisibility.nextAction).' }],
+  ['desktop-unsupported-platform', { blocking: false, ownerAction: 'Codex Desktop attachment is macOS-only; Codex lanes on this host need \`--allow-protocol-only\`.' }],
+  ['desktop-attach-disabled', { blocking: false, ownerAction: 'Unset TRANSMOGRIFY_DESKTOP_ATTACH=off for live-visible Codex lanes; otherwise use \`--allow-protocol-only\`.' }],
+  ['desktop-tool-unavailable', { blocking: false, ownerAction: 'Restore lsof, ps, and osascript on this host so the attachment can be measured; until then use \`--allow-protocol-only\`.' }],
 ]);
 
 function claudeSetup(error) {
   const reason = typeof error?.details?.reason === 'string' ? error.details.reason : 'unavailable';
-  return { reason, ownerAction: CLAUDE_SETUP_ACTIONS.get(reason) || CLAUDE_SETUP_FALLBACK };
+  return { reason, blocking: true, ownerAction: CLAUDE_SETUP_ACTIONS.get(reason) || CLAUDE_SETUP_FALLBACK };
 }
 function codexSetup(reason) {
-  const ownerAction = CODEX_SETUP_ACTIONS.get(reason);
-  return ownerAction ? { reason, ownerAction } : null;
+  const entry = CODEX_SETUP_ACTIONS.get(reason);
+  return entry ? { reason, blocking: entry.blocking, ownerAction: entry.ownerAction } : null;
 }
 function attachmentSetupReason(attachment) {
   return new Map([
@@ -75,9 +78,13 @@ function setupSummary(providers) {
   const ownerActions = [];
   for (const provider of ['codex', 'claude']) {
     const setup = providers[provider]?.setup;
-    if (setup) ownerActions.push({ provider, reason: setup.reason, ownerAction: setup.ownerAction });
+    if (setup) {
+      ownerActions.push({
+        provider, reason: setup.reason, blocking: setup.blocking === true, ownerAction: setup.ownerAction,
+      });
+    }
   }
-  return { ready: ownerActions.length === 0, ownerActions };
+  return { ready: !ownerActions.some((action) => action.blocking), ownerActions };
 }
 const HELP = `usage: doctor.js --repo-root <absolute-path> [options]
 

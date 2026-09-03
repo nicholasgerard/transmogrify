@@ -254,3 +254,32 @@ test('a verified spawn whose parent event cannot be recorded reports the provide
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].state, 'complete');
 });
+
+test('parent wait names each child whose observation failed', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'codex', hostApp: 'codex-desktop', displayName: 'Observation parent',
+  }, fixture.env);
+  const server = await startMockAppServer(() => { throw new Error('unexpected'); });
+  const laneId = crypto.randomUUID();
+  const dispatch = reserveDispatch({
+    parentContext, repoRoot: fixture.repoRoot, laneId, targetProvider: 'codex',
+    backend: 'codex-app-server', displayName: '::: unreachable child', prompt: 'Work.',
+  }, fixture.env);
+  registerLane(fixture.repoRoot, {
+    laneId, backend: 'codex-app-server', target: 'codex', providerId: 'thread-gone',
+    displayName: '::: unreachable child', state: 'idle', runtime: runtimeFor(server.url),
+    seat: verifySeat(fixture.repoRoot, fixture.seat, fixture.worktreesRoot), lineage: dispatch.lineage,
+  }, fixture.env);
+  // The runtime this child was recorded on is gone, so its observation fails.
+  server.close();
+  await sleep(50);
+  await assert.rejects(
+    () => main([
+      'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '3000',
+    ], fixture.env),
+    (error) => error.code === 'OBSERVATION_FAILED' && error.details.attempted === 1 &&
+      error.details.failures.length === 1 && error.details.failures[0].dispatchId === dispatch.dispatch.dispatchId &&
+      typeof error.details.failures[0].code === 'string',
+  );
+});

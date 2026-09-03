@@ -165,6 +165,23 @@ back to a prior phase receives a new monotonic sequence and may produce a new
 attention event. Payloads carry safe state and receipt metadata only: never
 child output, prompts, provider IDs, paths, transcripts, or credentials.
 
+## Status phases
+
+`lane.js status` reports a provider-specific `phase` beside the lane
+`state`. The vocabularies differ, so branch on the provider before the phase:
+
+| Provider | Phases | Meaning |
+| --- | --- | --- |
+| Codex | `executing` | the newest turn is in progress; `steer` and `interrupt` apply |
+| Codex | `idle`, `interrupted`, `failed` | no turn is active; `recover` with input starts a new turn at the boundary |
+| Codex | `notLoaded` | the thread persists on the runtime but is not loaded; normal between turns |
+| Codex | `unknown` | the runtime answered without a recognizable turn status |
+| Claude | `working` | the session is executing; `steer` queues to its next safe point |
+| Claude | `waiting` | the session is blocked on user input or approval; `steer` still queues |
+| Claude | `idle` | the session finished its turn and is listening |
+| Claude | `stopped` | the whole session was stopped; it is retired or replaced, not resumed in place |
+| Claude | `unknown` | the CLI row carried no recognizable status |
+
 ## Required parent listen loop
 
 A parent with outstanding children must stay in an explicit listen loop. Do

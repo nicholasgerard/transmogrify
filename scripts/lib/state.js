@@ -1033,10 +1033,9 @@ function acquireLock(lockDirectory, options = {}) {
     if (claimLock(lockDirectory, pendingOwner)) return pendingOwner;
 
     const observed = staleLockObservation(lockDirectory, ownerlessGraceMs);
-    if (!observed) continue;
-    if (observed.stale) {
-      if (reapStaleLock(lockDirectory, observed, ownerlessGraceMs)) continue;
-    }
+    if (observed?.stale && reapStaleLock(lockDirectory, observed, ownerlessGraceMs)) continue;
+    // A holder that is not observable yet, or a live holder, both fall through
+    // to the deadline check and the poll sleep so the loop cannot spin.
 
     if (Date.now() - started >= waitMs) {
       const error = new Error(`timed out waiting for ownership lock: ${lockDirectory}`);

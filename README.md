@@ -179,9 +179,11 @@ shows as unattached until Desktop is relaunched against it, while exact-owned
 recovery and retirement on that runtime remain available.
 
 The doctor also prints `setup.ownerActions`: every precondition only the owner
-can satisfy, such as a logged-out or unpinned Claude CLI, a Codex runtime that
-needs authorization, or a Codex Desktop relaunch, each with the exact command.
-An operator asks for those before spawning anything.
+can satisfy, each with the exact command and a `blocking` flag. A blocking
+action (a logged-out or unpinned Claude CLI, a Codex runtime that needs
+authorization) stops lanes on that provider until it is done; an advisory one
+(Codex Desktop not attached) only withholds native visibility, so Codex lanes
+remain available protocol-only. `setup.ready` is true when nothing blocks.
 
 The registry is private local control state. Transmogrify creates its
 directories with mode `0700` and JSON records with mode `0600`; existing state

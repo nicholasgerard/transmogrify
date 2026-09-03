@@ -169,7 +169,9 @@ it is not permission to archive or delete the lane.
 The templates include packet amendment 1 and its matching `directive 001`.
 After replacing their placeholders, send only the short directive reference.
 First inspect status. This Codex example chooses active-turn steering or an
-explicit boundary recovery from the measured phase:
+explicit boundary recovery from the measured Codex phase (Claude phases are
+`working`, `waiting`, `idle`, `stopped`; see
+[docs/DISPATCH.md](../docs/DISPATCH.md#status-phases)):
 
 ```bash
 STATUS_JSON=$(node "$SKILL_ROOT/scripts/lane.js" status \
@@ -192,7 +194,9 @@ printf '%s\n' 'Read directive 001 from the durable mailbox and acknowledge it be
     --input-file -
 ```
 
-If a Claude lane is stopped, run `recover` without input, then use `steer`.
+For a Claude lane, `steer` queues to the session's next safe point whether it
+is `working`, `waiting`, or `idle`. A stopped Claude lane is not resumed in
+place on the pinned CLI: retire it and spawn a new lane.
 
 The operator host appends the lane's exact acknowledgment and provider receipt
 to `mailbox.md`. It does not grant new authority from chat text alone.

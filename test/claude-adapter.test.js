@@ -64,6 +64,9 @@ function createFakeSurface(configuration = {}) {
       return runtime;
     },
     async agents(_runtime, options = {}) {
+      // The real surface reads only timeoutMs; any other key is a caller bug
+      // that would silently drop a deadline.
+      assert.ok(Object.keys(options).every((key) => key === 'timeoutMs'), `agents options ${JSON.stringify(options)}`);
       calls.push({ method: 'agents', options });
       if (surface.onAgents) surface.onAgents(rows);
       return rows.map((row) => ({ ...row }));
@@ -1433,7 +1436,7 @@ test('Claude recovery ignores unrelated concurrent rows but rejects a correlated
     surface: correlated.surface,
     recoveryVerifyAttempts: 1,
   }, correlated.fixture.env), (error) =>
-    error.code === 'RECOVERY_UNCERTAIN' && error.details.causeCode === 'FORKED_COPY' &&
+    error.code === 'FORKED_COPY' && error.details.causeCode === 'FORKED_COPY' &&
     error.details.copiesStopped === 1 && /fork/.test(error.details.ownerAction)
   );
   // The fork was created by this recovery's own command, so it is stopped,
@@ -2036,9 +2039,13 @@ test('Claude reconcile settles a dispatched spawn whose job vanished as failed',
   const runsBefore = surface.calls.filter((call) => call.method === 'run').length;
   const result = await reconcile({
     repoRoot: fixture.repoRoot, surface, discoveryAttempts: 2, discoveryDelayMs: 0, spawnAbsenceGraceMs: 0,
+    commandTimeoutMs: 5000,
   }, fixture.env);
   assert.equal(result.ok, true);
   assert.equal(result.results[0].outcome, 'spawnJobAbsent');
+  // The census polls inside the settle path inherit the command deadline.
+  const censusCalls = surface.calls.filter((call) => call.method === 'agents' && call.options.timeoutMs !== undefined);
+  assert.ok(censusCalls.length >= 2, 'census polls carried a deadline');
   const [settled] = listLanes(fixture.repoRoot, fixture.env);
   assert.equal(settled.state, 'failed');
   assert.equal(settled.providerId, null);

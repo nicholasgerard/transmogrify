@@ -1356,7 +1356,9 @@ async function recover(options, env = process.env) {
           },
         });
       } catch (error) {
-        throw new ClaudeTransmogrifyError('RECOVERY_UNCERTAIN', error.message, {
+        // A settled fork keeps its own code so the public message names what
+        // happened; every other cause stays a recovery uncertainty.
+        throw new ClaudeTransmogrifyError(error.code === 'FORKED_COPY' ? 'FORKED_COPY' : 'RECOVERY_UNCERTAIN', error.message, {
           ...(error.details || {}),
           ...(error.code ? { causeCode: error.code } : {}),
         });
@@ -1433,7 +1435,7 @@ async function recover(options, env = process.env) {
           updateLane(options.repoRoot, lane.laneId, { state: 'deliveryUnknown' }, env);
         }
       }
-      throw new ClaudeTransmogrifyError('RECOVERY_UNCERTAIN', error.message, {
+      throw new ClaudeTransmogrifyError(error.code === 'FORKED_COPY' ? 'FORKED_COPY' : 'RECOVERY_UNCERTAIN', error.message, {
         ...(error.details || {}),
         ...(error.code ? { causeCode: error.code } : {}),
       });
@@ -2162,7 +2164,7 @@ async function observeSpawnJobAbsence(options, surface, runtime, lane, operation
   const preflight = lane.ownership?.spawnIntent?.preflightSessionIds || [];
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const agents = await surface.agents(runtime, deadline === null ? {} : {
-      commandTimeoutMs: remainingCommandMs(deadline, 100),
+      timeoutMs: remainingCommandMs(deadline, 100),
     });
     const present = agents.some((agent) => {
       if (typeof agent?.id === 'string' && agent.id.toLowerCase() === jobId) return true;

@@ -811,7 +811,7 @@ async function waitForParentEvent(context, values, env) {
       error.code = 'OBSERVATION_FAILED';
       error.details = {
         attempted: observed.dispatches.length,
-        failures: errors.map((entry) => ({ dispatchId: entry.dispatchId, code: entry.code })),
+        failures: observed.errors.map((entry) => ({ dispatchId: entry.dispatchId, code: entry.code })),
       };
       throw error;
     }

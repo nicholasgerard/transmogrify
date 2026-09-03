@@ -36,7 +36,8 @@ URL_FLAG=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --url)
-      [ "$#" -ge 2 ] || usage
+      [ "$#" -ge 2 ] && [ -n "$2" ] || usage
+      [ -z "$URL_FLAG" ] || usage
       URL_FLAG="$2"
       shift 2
       ;;
@@ -53,7 +54,7 @@ else
 fi
 
 command -v lsof >/dev/null 2>&1 || {
-  echo "lsof is required to verify the shared runtime port; refusing to launch"
+  echo "lsof is required to verify the shared runtime port; refusing to launch" >&2
   exit 1
 }
 command -v node >/dev/null 2>&1 || {

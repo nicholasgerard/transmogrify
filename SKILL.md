@@ -4,7 +4,7 @@ description: Operate exact-owned, worktree-seated Codex and Claude Code lanes wi
 license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
-  version: "0.2.5"
+  version: "0.2.6"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server 0.151.x"
@@ -117,13 +117,16 @@ Interpret the result as follows:
 ### Setup the doctor asks for
 
 The doctor's `setup.ownerActions` lists every precondition that only the owner
-can satisfy: a Claude CLI that is logged out or unpinned, a Codex runtime that
-needs authorization, a Codex Desktop relaunch. For each entry, do what the
-operator may do itself (launch Desktop, reuse a listed runtime), then ask the
-owner in one plain message for the rest, quoting the exact command from
-`ownerAction`, and rerun the doctor until `setup.ready` is true. Never spawn a
-lane on a provider that still has an open owner action, and never work around
-a failed precondition through a private path.
+can satisfy, each marked `blocking`. A blocking action (a Claude CLI that is
+logged out or unpinned, a Codex runtime that needs authorization, a sandbox
+that denies loopback) stops every lane on that provider: do what the operator
+may do itself (reuse a listed runtime), ask the owner in one plain message for
+the rest, quoting the exact command from `ownerAction`, and rerun the doctor
+until `setup.ready` is true. An advisory action (Codex Desktop not attached,
+not installed, or unsupported on this platform) only withholds native
+visibility: ask the owner once whether to attach Desktop, and if that is
+declined or impossible, spawn Codex lanes with `--allow-protocol-only` and say
+so. Never work around a failed precondition through a private path.
 
 ### Attach Codex Desktop (macOS)
 
@@ -251,6 +254,7 @@ Use stdin for substantial input:
 ```bash
 printf '%s\n' "$KICKOFF" | node "$SKILL_ROOT/scripts/lane.js" spawn \
   --repo-root "$REPO_ROOT" \
+  --worktrees "$WORKTREES" \
   --target codex \
   --name "$THREAD_NAME" \
   --parent-context-file "$PARENT_CONTEXT" \
@@ -540,7 +544,15 @@ The public and measured boundaries live in
 `lane.js` prints structured JSON. Exit 0 means the stated receipt was confirmed.
 Exit 2 means a safe refusal or precondition failure. Exit 3 means a provider,
 transport, protocol, or delivery-unknown failure. Never turn exit 3 into a
-success receipt and never retry it by intuition; reconcile first.
+success receipt and never retry it by intuition; reconcile first. The other
+tools document their own codes in `--help`; `doctor.js` exits 3 when a
+requested provider is not reusable and `desktop-attach.js check` exits 3 when
+Desktop is simply not attached, neither of which is a provider failure.
+
+Every code named in this file has a symptom row and a repair in
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#symptom-index); read that
+index before improvising. Status `phase` values differ per provider and are
+listed in [docs/DISPATCH.md](docs/DISPATCH.md#status-phases).
 
 Report the lane ID, provider, lifecycle state, durable harvest location,
 verification results, and any blocked cleanup. Do not report credentials,
