@@ -7,6 +7,12 @@ const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const test = require('node:test');
 const {
+  ABANDONABLE_OPERATION_TYPES,
+  LANE_TRANSITIONS,
+  OPERATION_SCHEMA_VERSION,
+  OPERATION_STATES,
+  OPERATION_TYPES,
+  abandonPendingLaneOperation,
   appendLaneExecutionEpoch,
   ensureRegistry,
   acquireLock,
@@ -427,17 +433,17 @@ test('pending lane operation pointers reject stale writers and clear only after 
   assert.equal(operation.laneId, lane.laneId);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).operationId, operationId);
   assert.throws(() => beginLaneOperation(fixture.repoRoot, lane.laneId, {
-    type: 'status',
+    type: 'steer',
   }, fixture.env), /already has pending operation/);
   assert.throws(() => updateOperation(fixture.repoRoot, operationId, {
     laneId: 'another-lane',
   }, fixture.env), /immutable operation field laneId/);
   assert.throws(() => updatePendingLaneOperation(
-    fixture.repoRoot, lane.laneId, 'abababab-abab-4aba-8aba-abababababab', { state: 'sent' }, fixture.env,
+    fixture.repoRoot, lane.laneId, 'abababab-abab-4aba-8aba-abababababab', { state: 'queued' }, fixture.env,
   ), /not pending/);
   assert.equal(updatePendingLaneOperation(
-    fixture.repoRoot, lane.laneId, operationId, { state: 'sent' }, fixture.env,
-  ).state, 'sent');
+    fixture.repoRoot, lane.laneId, operationId, { state: 'queued' }, fixture.env,
+  ).state, 'queued');
   const completed = completeLaneOperation(
     fixture.repoRoot, lane.laneId, operationId, { state: 'complete' }, fixture.env,
   );
@@ -1175,4 +1181,137 @@ test('a live stale-lock reaper is not stolen and contenders still time out', (t)
     ownerlessGraceMs: 1,
   }), /timed out waiting/);
   releaseLock(reaperDirectory, reaperOwner);
+});
+
+test('operation journals accept only the states enumerated for their type', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'enum-provider',
+    displayName: '[test] enum lane',
+    state: 'active',
+  }, fixture.env);
+  assert.throws(() => beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'teleport',
+  }, fixture.env), /unknown operation type: teleport/);
+  assert.throws(() => beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'steer', state: 'providerRetired',
+  }, fixture.env), /providerRetired is not valid for a steer operation/);
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, { type: 'steer' }, fixture.env);
+  assert.equal(operation.schemaVersion, OPERATION_SCHEMA_VERSION);
+  assert.equal(operation.state, 'planned');
+  assert.throws(() => updatePendingLaneOperation(
+    fixture.repoRoot, lane.laneId, operation.operationId, { state: 'materialized' }, fixture.env,
+  ), /materialized is not valid for a steer operation/);
+  assert.throws(() => completeLaneOperation(
+    fixture.repoRoot, lane.laneId, operation.operationId, { state: 'done' }, fixture.env,
+  ), /done is not valid for a steer operation/);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).state, 'planned');
+  for (const type of OPERATION_TYPES) {
+    const states = OPERATION_STATES.get(type);
+    assert.ok(states.has('planned') && states.has('complete') && states.has('failed') && states.has('notDelivered'),
+      `${type} must allow planned and every terminal state`);
+  }
+  assert.ok(!ABANDONABLE_OPERATION_TYPES.has('retire'));
+});
+
+test('operation records tolerate an absent schema version and refuse a newer one', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'schema-provider',
+    displayName: '[test] schema lane',
+    state: 'active',
+  }, fixture.env);
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, { type: 'steer' }, fixture.env);
+  const paths = projectPaths(fixture.repoRoot, fixture.env);
+  const file = path.join(paths.operations, `${operation.operationId}.json`);
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(stored.schemaVersion, 1);
+  delete stored.schemaVersion;
+  fs.writeFileSync(file, JSON.stringify(stored));
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).operationId, operation.operationId);
+  const rewritten = updatePendingLaneOperation(
+    fixture.repoRoot, lane.laneId, operation.operationId, { state: 'dispatching' }, fixture.env,
+  );
+  assert.equal(rewritten.schemaVersion, 1);
+  fs.writeFileSync(file, JSON.stringify({ ...stored, schemaVersion: 2 }));
+  assert.throws(() => pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env),
+    /operation record schema 2 is not supported/);
+});
+
+test('a registry written by a newer schema is refused with an upgrade instruction', (t) => {
+  const fixture = createStateFixture(t);
+  registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'newer-provider',
+    displayName: '[test] newer registry',
+    state: 'active',
+  }, fixture.env);
+  const paths = projectPaths(fixture.repoRoot, fixture.env);
+  const registry = JSON.parse(fs.readFileSync(paths.registry, 'utf8'));
+  fs.writeFileSync(paths.registry, JSON.stringify({ ...registry, schemaVersion: registry.schemaVersion + 1 }));
+  assert.throws(() => listLanes(fixture.repoRoot, fixture.env), /written by a newer Transmogrify/);
+  fs.writeFileSync(paths.registry, JSON.stringify({ ...registry, schemaVersion: 0 }));
+  assert.throws(() => listLanes(fixture.repoRoot, fixture.env), /unsupported or corrupt registry schema: 0/);
+});
+
+test('abandon closes a stranded operation as failed without touching a bound lane', (t) => {
+  const fixture = createStateFixture(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'claude-code-remote-control',
+    providerId: 'abandon-provider',
+    displayName: '[test] abandon lane',
+    state: 'active',
+  }, fixture.env);
+  assert.throws(() => abandonPendingLaneOperation(
+    fixture.repoRoot, lane.laneId, { reason: 'nothing pending' }, fixture.env,
+  ), /no pending operation to abandon/);
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'steer', details: { inputSha256: 'd'.repeat(64) },
+  }, fixture.env);
+  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, { state: 'unknown' }, fixture.env);
+  assert.throws(() => abandonPendingLaneOperation(
+    fixture.repoRoot, lane.laneId, { reason: '' }, fixture.env,
+  ), /single-line reason/);
+  assert.throws(() => abandonPendingLaneOperation(
+    fixture.repoRoot, lane.laneId, { reason: 'two\nlines' }, fixture.env,
+  ), /single-line reason/);
+  const result = abandonPendingLaneOperation(
+    fixture.repoRoot, lane.laneId, { reason: 'operator crashed mid-steer' }, fixture.env,
+  );
+  assert.equal(result.operation.state, 'failed');
+  assert.equal(result.operation.details.inputSha256, 'd'.repeat(64));
+  assert.equal(result.operation.details.abandoned.reason, 'operator crashed mid-steer');
+  assert.equal(result.operation.details.abandoned.fromState, 'unknown');
+  assert.equal(result.operation.details.providerOutcome, 'unknown');
+  assert.equal(result.lane.state, 'active');
+  assert.equal(result.lane.providerId, 'abandon-provider');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  const next = beginLaneOperation(fixture.repoRoot, lane.laneId, { type: 'retire' }, fixture.env);
+  assert.throws(() => abandonPendingLaneOperation(
+    fixture.repoRoot, lane.laneId, { reason: 'retire stuck' }, fixture.env,
+  ), /retire operation cannot be abandoned/);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).operationId, next.operationId);
+});
+
+// Journal writers in the adapters and the state module. A state literal in the
+// first argument object after one of these calls must belong to some journal
+// enum; states chosen through variables are covered by the adapter suites.
+const JOURNAL_WRITERS = /\b(?:updatePending|completePending|updateOperationJournal|completeOperationJournal|beginOperation|operationForType|beginLaneOperation|updatePendingLaneOperation|completeLaneOperation|reserveSpawn)\(/gu;
+
+test('every operation state literal handed to a journal writer belongs to an enumerated journal type', () => {
+  const journalStates = new Set();
+  for (const states of OPERATION_STATES.values()) for (const state of states) journalStates.add(state);
+  const unknown = [];
+  for (const file of ['codex-adapter.js', 'claude-adapter.js', 'state.js']) {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'lib', file), 'utf8');
+    for (const call of source.matchAll(JOURNAL_WRITERS)) {
+      const window = source.slice(call.index, source.indexOf(');', call.index) + 1);
+      const state = /\bstate: '([A-Za-z]+)'/u.exec(window);
+      if (state && !journalStates.has(state[1])) unknown.push(`${file}: ${state[1]}`);
+    }
+  }
+  assert.deepEqual(unknown, []);
+  assert.ok(LANE_TRANSITIONS.get('planned').has('failed'), 'an unbound abandoned spawn lane must be able to fail');
 });

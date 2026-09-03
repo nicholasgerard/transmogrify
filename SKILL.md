@@ -4,7 +4,7 @@ description: Operate exact-owned, worktree-seated Codex and Claude Code lanes wi
 license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
-  version: "0.2.6"
+  version: "0.2.7"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server 0.151.x"
@@ -425,6 +425,21 @@ that exact session by its short job id, run `reconcile` so the lane settles
 as `spawnJobAbsent`, `retire` it to free its seat, then spawn again. A
 dispatched spawn whose job is absent from every census after a grace period
 settles the same way on its own.
+
+When reconciliation keeps a spawn, steer, stop, recover, resume, or interrupt
+journal open and the user has decided to stop waiting, close it on their
+authority:
+
+```bash
+node "$SKILL_ROOT/scripts/lane.js" abandon \
+  --repo-root "$REPO_ROOT" --lane "$LANE_ID" --reason "<why, one line>"
+```
+
+The journal ends as failed with the reason and `providerOutcome: unknown`;
+nothing is claimed about the provider, so treat the lane as if the request
+may have landed. A lane that never bound a provider identity becomes failed
+and can be retired; a bound lane keeps its state for the next observation.
+Retirements are never abandoned: reconcile settles them.
 
 ## 8. Harvest, retirement, and cleanup
 

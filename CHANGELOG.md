@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.7
+
+- Enumerate the states each operation journal type may hold and refuse any
+  other write before it reaches disk. A Claude retirement's nested stop and
+  the observation-bound `providerObserved` spawn phase are part of the table,
+  and a test checks every state literal handed to a journal writer against it.
+- Stamp operation records with `schemaVersion` (absent reads as 1), migrate
+  the registry on read when an upgrade path exists, and refuse a state
+  directory written by a newer Transmogrify with an upgrade instruction.
+- Add `lane.js abandon --lane <id> --reason <text>`: closes a stranded
+  spawn, steer, stop, recover, resume, or interrupt journal as failed with the
+  owner's reason and `providerOutcome: unknown`. It never abandons a
+  retirement (`ABANDON_REFUSED`) and never implies a provider outcome.
+
 ## 0.2.6
 
 - Fix a `wait` failure path introduced in 0.2.4: a child whose observation

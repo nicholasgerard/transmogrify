@@ -38,7 +38,7 @@ Add `--url` only to Codex commands when the runtime is not the default
 | Claude CLI, account, Desktop, or Keychain refusal | [Claude compatibility or authentication problems](#claude-compatibility-or-authentication-problems) |
 | `SPAWN_UNCERTAIN` with `causeCode` `TRANSCRIPT_RECEIPT_PENDING` or `REMOTE_CONTROL_UNAVAILABLE`, `spawnJobAbsent` | [Claude spawn did not verify](#claude-spawn-did-not-verify) |
 | `FORKED_COPY`, `forkedCopyStopped`, `recoveryNotAchieved` | [Claude recovery forked or did not resume](#claude-recovery-forked-or-did-not-resume) |
-| `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
+| `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, `NO_PENDING_OPERATION`, `ABANDON_REFUSED`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
 | `CLEANUP_RETRYABLE`, `CLEANUP_BLOCKED` | [Cleanup is blocked](#cleanup-is-blocked) |
 
 ## Installation and upgrades
@@ -370,6 +370,23 @@ digest of whatever output exists; retirement re-inspects the thread, refuses
 while a turn is active, closes the spawn journal, and archives the empty
 thread. A lane that never received its thread ID keeps its attention event and
 its seat for owner review; no provider call can be replayed for it.
+
+When reconciliation leaves a spawn, steer, stop, recover, resume, or interrupt
+journal open and the owner decides to stop waiting, `abandon` closes it:
+
+```bash
+node "$SKILL_ROOT/scripts/lane.js" abandon \
+  --repo-root "$REPO_ROOT" --lane <laneId> --reason "<one line>"
+```
+
+The journal is closed as failed with the reason recorded and
+`providerOutcome: unknown`. Nothing is inferred about the provider: the
+request may still have landed, so observe the lane before steering it again.
+A lane with no bound provider identity becomes `failed` and can be retired
+to free its seat; a bound lane keeps its state. A pending retirement is
+refused (`ABANDON_REFUSED`, exit 2) because retirement receipts record
+provider effects; reconcile settles those. `NO_PENDING_OPERATION` (exit 2)
+means there was nothing to close.
 
 `PARENT_EVENT_UNRECORDED` with exit code 3 means the spawn itself is verified
 and journaled, but the durable parent event could not be written, most often

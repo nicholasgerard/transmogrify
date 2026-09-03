@@ -26,6 +26,7 @@ const {
   recordObservation,
 } = require('./lib/dispatch');
 const {
+  ABANDONABLE_OPERATION_TYPES, abandonPendingLaneOperation,
   listOperations, pendingOperationForLane, requireOwnedLane, resolveProject,
   settleTerminalLaneOperationPointer, withLaneLease,
 } = require('./lib/state');
@@ -88,6 +89,9 @@ operations:
              [--accept-manual-seat-removal]   after an owner-removed blocked seat
   reconcile  --target codex|claude [--lane <lane-id>]
              [--finish-retirements] [--private-archive] [--no-cleanup-worktree]
+  abandon    --lane <lane-id> --reason <text>
+             Owner-authorized: closes a stranded pending spawn, steer, stop, recover,
+             resume, or interrupt as failed with an unknown provider outcome
 
 provider options:
   --url <loopback-ws-url>       Codex only (or TRANSMOGRIFY_URL)
@@ -113,6 +117,7 @@ const OPERATIONS = new Set([
   'recover',
   'retire',
   'reconcile',
+  'abandon',
 ]);
 const OPERATION_OPTIONS = {
   'parent-init': new Set([
@@ -132,6 +137,7 @@ const OPERATION_OPTIONS = {
   ack: new Set(['parent-context-file', 'event']),
   steer: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin']),
   status: new Set(['repo-root', 'lane', 'url', 'claude-bin']),
+  abandon: new Set(['repo-root', 'lane', 'reason']),
   interrupt: new Set(['repo-root', 'lane', 'url']),
   stop: new Set(['repo-root', 'lane', 'claude-bin']),
   recover: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin']),
@@ -148,6 +154,8 @@ const OPERATION_OPTIONS = {
 // dropped, so a provider handle cannot leak through a failure path.
 const SAFE_DETAIL_KEYS = new Set([
   'alreadyStopped',
+  'pendingState',
+  'pendingType',
   'attempted',
   'archive',
   'causeCode',
@@ -192,6 +200,8 @@ const SAFE_REFUSALS = new Set([
   'NOT_DELIVERED',
   'NO_ACTIVE_TURN',
   'NO_EVENT',
+  'NO_PENDING_OPERATION',
+  'ABANDON_REFUSED',
   'NOT_OWNED',
   'LOCAL_STATE_LIMIT',
   'NATIVE_VISIBILITY_REQUIRED',
@@ -237,6 +247,8 @@ const PUBLIC_ERROR_MESSAGES = new Map([
   ['OBSERVATION_FAILED', 'one or more exact child lanes could not be observed safely'],
   ['OWNERSHIP_MISMATCH', 'live provider identity does not match the owned receipt'],
   ['PARENT_EVENT_UNRECORDED', 'lane launch is verified; the durable parent event could not be recorded'],
+  ['NO_PENDING_OPERATION', 'the owned lane has no pending operation to abandon'],
+  ['ABANDON_REFUSED', 'a retirement cannot be abandoned; settle it with reconcile'],
   ['OPERATION_PENDING', 'the owned lane has an unresolved operation'],
   ['PENDING_OPERATION', 'the owned lane has an unresolved operation'],
   ['PRIVATE_API_DISABLED', 'Claude retirement requires explicit private archive authorization'],
@@ -841,6 +853,45 @@ function publicSuccess(value, exempt = false) {
     ]));
 }
 
+// Owner-authorized closure of a stranded pending operation. The journal is
+// settled as failed with an abandonment receipt; nothing is claimed about the
+// provider, so the projection reports providerOutcome unknown and the lane keeps
+// any provider identity it already bound.
+function abandonLaneOperation(repoRoot, values, env) {
+  if (typeof values.reason !== 'string' || !values.reason.trim()) usage('abandon requires --reason');
+  const pending = pendingOperationForLane(repoRoot, values.lane, env);
+  if (!pending) {
+    const error = new Error(`lane ${values.lane} has no pending operation`);
+    error.code = 'NO_PENDING_OPERATION';
+    throw error;
+  }
+  if (!ABANDONABLE_OPERATION_TYPES.has(pending.type)) {
+    const error = new Error(`a ${pending.type} operation cannot be abandoned`);
+    error.code = 'ABANDON_REFUSED';
+    error.details = { pendingType: pending.type, pendingState: pending.state };
+    throw error;
+  }
+  const { operation, lane } = abandonPendingLaneOperation(
+    repoRoot, values.lane, { reason: values.reason }, env,
+  );
+  return {
+    version: 1,
+    ok: true,
+    operation: 'abandon',
+    laneId: lane.laneId,
+    lane: { laneId: lane.laneId, state: lane.state, backend: lane.backend },
+    abandoned: {
+      operationId: operation.operationId,
+      type: operation.type,
+      fromState: operation.details.abandoned.fromState,
+      reason: operation.details.abandoned.reason,
+      at: operation.details.abandoned.at,
+    },
+    providerOutcome: 'unknown',
+    delivery: { providerMutation: 'unknown' },
+  };
+}
+
 // Each operation accepts only its own options, so a flag is never silently
 // ignored on the wrong command.
 function validateOptionGrammar(operation, usedOptions) {
@@ -937,6 +988,7 @@ async function main(argv, env = process.env) {
       event: { type: 'string' },
       after: { type: 'string' },
       'timeout-ms': { type: 'string' },
+      reason: { type: 'string' },
       input: { type: 'string' },
       'input-file': { type: 'string' },
       cwd: { type: 'string' },
@@ -1110,6 +1162,7 @@ async function main(argv, env = process.env) {
   if (values['private-archive'] !== undefined && adapter !== claude) {
     usage('--private-archive is valid only for Claude retirement');
   }
+  if (operation === 'abandon') return abandonLaneOperation(repoRoot, values, env);
   if (operation === 'interrupt') {
     if (adapter !== codex) usage('interrupt is supported only for Codex turn cancellation');
     return codex.interrupt(options, env);

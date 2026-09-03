@@ -22,6 +22,7 @@ const {
 } = require('../scripts/lib/dispatch');
 const {
   completeLaneOperation,
+  beginLaneOperation,
   pendingOperationForLane,
   registerLane,
   reserveSpawn,
@@ -610,4 +611,48 @@ test('lane CLI input files are no-follow, owner-safe, and bounded', (t) => {
 
 test('public messages cover the Remote Control failure code', () => {
   assert.match(publicErrorMessage('REMOTE_CONTROL_UNAVAILABLE'), /Remote Control/);
+});
+
+test('lane CLI abandon closes a stranded operation and refuses retirements', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'abandon-cli-provider',
+    displayName: '[test] abandon cli lane',
+    state: 'active',
+  }, fixture.env);
+  const none = await runNodeScript('scripts/lane.js', [
+    'abandon', '--repo-root', fixture.repoRoot, '--lane', lane.laneId, '--reason', 'nothing pending',
+  ], { env: { TRANSMOGRIFY_STATE_DIR: fixture.stateDir } });
+  assert.equal(none.code, 2);
+  assert.equal(JSON.parse(none.stderr).code, 'NO_PENDING_OPERATION');
+  const steer = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'steer', state: 'unknown', details: { inputSha256: 'e'.repeat(64) },
+  }, fixture.env);
+  const missingReason = await runNodeScript('scripts/lane.js', [
+    'abandon', '--repo-root', fixture.repoRoot, '--lane', lane.laneId,
+  ], { env: { TRANSMOGRIFY_STATE_DIR: fixture.stateDir } });
+  assert.equal(missingReason.code, 2);
+  assert.equal(JSON.parse(missingReason.stderr).code, 'USAGE_ERROR');
+  const abandoned = await runNodeScript('scripts/lane.js', [
+    'abandon', '--repo-root', fixture.repoRoot, '--lane', lane.laneId, '--reason', 'operator process was killed',
+  ], { env: { TRANSMOGRIFY_STATE_DIR: fixture.stateDir } });
+  assert.equal(abandoned.code, 0, abandoned.stderr);
+  const result = JSON.parse(abandoned.stdout);
+  assert.equal(result.operation, 'abandon');
+  assert.equal(result.abandoned.operationId, steer.operationId);
+  assert.equal(result.abandoned.type, 'steer');
+  assert.equal(result.abandoned.fromState, 'unknown');
+  assert.equal(result.providerOutcome, 'unknown');
+  assert.equal(result.lane.state, 'active');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  beginLaneOperation(fixture.repoRoot, lane.laneId, { type: 'retire' }, fixture.env);
+  const refused = await runNodeScript('scripts/lane.js', [
+    'abandon', '--repo-root', fixture.repoRoot, '--lane', lane.laneId, '--reason', 'retire looks stuck',
+  ], { env: { TRANSMOGRIFY_STATE_DIR: fixture.stateDir } });
+  assert.equal(refused.code, 2);
+  const error = JSON.parse(refused.stderr);
+  assert.equal(error.code, 'ABANDON_REFUSED');
+  assert.equal(error.details.pendingType, 'retire');
+  assert.equal(error.delivery, 'notAttempted');
 });

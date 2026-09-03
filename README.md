@@ -363,7 +363,7 @@ a complete packet, handback, digest, and retirement walkthrough in
 | Tool | Purpose |
 | --- | --- |
 | `scripts/doctor.js` | Read-only startup discovery and aggregate ownership check |
-| `scripts/lane.js` | Provider-neutral spawn, steer, status, interrupt/stop, recover, retire, and reconcile |
+| `scripts/lane.js` | Provider-neutral spawn, steer, status, interrupt/stop, recover, retire, reconcile, and abandon |
 | `scripts/runtime-up.sh` | Reuse or explicitly launch a detached Codex app-server |
 | `scripts/desktop-attach.js` | Measure, launch, or (with owner authorization) relaunch Codex Desktop as a client of the shared runtime |
 | `scripts/lane-status-listen.js` | Listen for state transitions on exact owned Codex lanes |
@@ -386,6 +386,7 @@ a complete packet, handback, digest, and retirement walkthrough in
 | `recover` | Codex, Claude | Codex observes/reconciles by default or resumes the same thread with input; Claude resumes the same recorded session |
 | `retire` | Codex, Claude | Requires a harvest digest; Claude also requires `--private-archive` and defers local removal unless a managed seat is safely removed first; a manually removed blocked seat requires exact-lane `--accept-manual-seat-removal` |
 | `reconcile` | Codex, Claude | Repairs exact-owned pending state and eligible cleanup; never name-adopts or replays an unknown mutation |
+| `abandon` | Codex, Claude | Closes a stranded pending spawn, steer, stop, recover, resume, or interrupt as failed on the owner's authority with an unknown provider outcome; never a retirement |
 
 Every advertised tool accepts `--help`; use
 `"$SKILL_ROOT/scripts/runtime-up.sh" --help` for the shell launcher and

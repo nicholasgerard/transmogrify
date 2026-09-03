@@ -42,6 +42,48 @@ const RETIRED_LANE_STATES = new Set([
   'worktreeRemoved',
 ]);
 const TERMINAL_OPERATION_STATES = new Set(['complete', 'failed', 'notDelivered']);
+// Operation records carry their own schema version so a future format change
+// can be migrated on read instead of locking an operator out of their lanes.
+const OPERATION_SCHEMA_VERSION = 1;
+// Every state a journal of the given type may hold, including the three
+// terminal states. A write outside this table is a programming error and is
+// refused before it reaches disk, so no adapter can invent a phase that no
+// reconcile branch settles.
+const OPERATION_TYPES = new Set(['spawn', 'steer', 'stop', 'recover', 'resume', 'interrupt', 'retire']);
+const OPERATION_STATES = new Map([
+  ['spawn', new Set([
+    'planned', 'seatReady', 'dispatching', 'dispatched', 'providerRequestDispatched', 'providerCreated',
+    'providerObserved', 'materialized', 'turnRequestDispatched', 'partial', 'spawnUnknown', 'notDeliveredCaptureCleanup',
+    'unknown', ...TERMINAL_OPERATION_STATES,
+  ])],
+  ['steer', new Set(['planned', 'dispatching', 'queued', 'unknown', ...TERMINAL_OPERATION_STATES])],
+  ['stop', new Set(['planned', 'dispatching', 'dispatched', 'unknown', ...TERMINAL_OPERATION_STATES])],
+  ['recover', new Set(['planned', 'dispatching', 'dispatched', 'unknown', ...TERMINAL_OPERATION_STATES])],
+  ['resume', new Set([
+    'planned', 'resumeDispatching', 'resumeAcknowledged', 'unknownResume', 'turnDispatching', 'unknownTurn',
+    ...TERMINAL_OPERATION_STATES,
+  ])],
+  ['interrupt', new Set(['planned', 'dispatching', 'unknown', ...TERMINAL_OPERATION_STATES])],
+  // A Claude retirement journals its nested whole-session stop (dispatching,
+  // dispatched, unknown) into the same record before the archive phases.
+  ['retire', new Set([
+    'planned', 'dispatching', 'dispatched', 'providerRequestDispatched', 'providerAcknowledged',
+    'providerRetired', 'unknown',
+    'archiveNotDispatched', 'remoteArchived', 'cleanupDeferred', 'providerRetiredCleanupDeferred',
+    'providerRetiredCleanupBlocked', 'worktreeRemoved', 'localRemovalDispatching', 'localRemovalDispatched',
+    'localRemovalUnknown', 'localRemoved', ...TERMINAL_OPERATION_STATES,
+  ])],
+]);
+// Operation types an owner may abandon. A retirement has its own settlement
+// paths (reconcile, --finish-retirements, --accept-manual-seat-removal) and
+// records provider effects that must never be declared away.
+const ABANDONABLE_OPERATION_TYPES = new Set(['spawn', 'steer', 'stop', 'recover', 'resume', 'interrupt']);
+function assertOperationState(type, state) {
+  if (!OPERATION_TYPES.has(type)) throw new Error(`unknown operation type: ${type}`);
+  if (!OPERATION_STATES.get(type).has(state)) {
+    throw new Error(`operation state ${state} is not valid for a ${type} operation`);
+  }
+}
 // The complete set of legal lane state edges. An edge that is not listed here
 // cannot be written, so no repair path can invent a shortcut through the
 // lifecycle.
@@ -656,9 +698,29 @@ function validateProviderIdentities(registry) {
 // Whole-registry gate on every read and before every write. The recorded
 // project identity must equal the resolved one; a mismatch requires explicit
 // adoption rather than silently re-homing another repository's lanes.
+// Read-side migrations, keyed by the schema version they upgrade from. Each
+// returns the registry at the next version. Empty today; the hook exists so a
+// format bump ships with its upgrade instead of refusing installed operators.
+const REGISTRY_MIGRATIONS = new Map();
+function migrateRegistry(registry) {
+  let current = registry;
+  while (current && Number.isInteger(current.schemaVersion) && current.schemaVersion < SCHEMA_VERSION) {
+    const migrate = REGISTRY_MIGRATIONS.get(current.schemaVersion);
+    if (!migrate) break;
+    current = migrate(current);
+  }
+  return current;
+}
 function validateRegistry(registry, project) {
+  if (registry && Number.isInteger(registry.schemaVersion) && registry.schemaVersion < SCHEMA_VERSION) {
+    registry = migrateRegistry(registry);
+  }
   if (!registry || registry.schemaVersion !== SCHEMA_VERSION) {
-    throw new Error(`unsupported or corrupt registry schema: ${registry?.schemaVersion ?? '(missing)'}`);
+    const observed = registry?.schemaVersion ?? '(missing)';
+    const newer = Number.isInteger(observed) && observed > SCHEMA_VERSION;
+    throw new Error(newer
+      ? `ownership registry schema ${observed} was written by a newer Transmogrify; upgrade before operating these lanes`
+      : `unsupported or corrupt registry schema: ${observed}`);
   }
   if (!registry.project || registry.project.root !== project.root ||
       registry.project.commonDir !== project.commonDir ||
@@ -1143,6 +1205,11 @@ function validateOperationRecord(record, expectedOperationId) {
   }
   if (typeof record.type !== 'string' || !record.type) throw new Error('operation type is required');
   if (typeof record.state !== 'string' || !record.state) throw new Error('operation state is required');
+  const version = record.schemaVersion === undefined ? OPERATION_SCHEMA_VERSION : record.schemaVersion;
+  if (version !== OPERATION_SCHEMA_VERSION) {
+    throw new Error(`operation record schema ${version} is not supported by this version; upgrade Transmogrify or migrate the state directory`);
+  }
+  assertOperationState(record.type, record.state);
   if (record.laneId !== null && (typeof record.laneId !== 'string' || !record.laneId)) {
     throw new Error('operation laneId must be a non-empty string or null');
   }
@@ -1160,6 +1227,7 @@ function validateOperationRecord(record, expectedOperationId) {
 function newOperationRecord(operation, operationId = operation.operationId || crypto.randomUUID()) {
   const now = new Date().toISOString();
   return validateOperationRecord({
+    schemaVersion: OPERATION_SCHEMA_VERSION,
     operationId,
     type: operation.type,
     state: operation.state || 'planned',
@@ -1201,6 +1269,8 @@ function patchedOperationRecord(current, patch) {
   return validateOperationRecord({
     ...current,
     ...patch,
+    // Records written before schema versioning are stamped on their next write.
+    schemaVersion: current.schemaVersion ?? OPERATION_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
   }, current.operationId);
 }
@@ -1524,6 +1594,45 @@ function completeLaneOperation(repoRoot, laneId, operationId, patch = {}, env = 
     writeRegistry(paths, registry);
     return updated;
   });
+}
+
+// Close a stranded pending operation on the owner's explicit authority. The
+// journal ends as failed with an abandonment receipt and an unknown provider
+// outcome; nothing is inferred about the provider. A lane that never bound a
+// provider identity becomes failed; a bound lane keeps its state so the next
+// observation can classify it. Retirements are never abandoned this way.
+function abandonPendingLaneOperation(repoRoot, laneId, options = {}, env = process.env) {
+  const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
+  if (!reason || reason.length > 200 || /[\u0000-\u001f\u007f]/u.test(reason)) {
+    throw new Error('abandon requires a single-line reason of at most 200 characters');
+  }
+  const pending = pendingOperationForLane(repoRoot, laneId, env);
+  if (!pending) throw new Error(`lane ${laneId} has no pending operation to abandon`);
+  if (!ABANDONABLE_OPERATION_TYPES.has(pending.type)) {
+    throw new Error(`a ${pending.type} operation cannot be abandoned; settle it through reconcile`);
+  }
+  const abandonedAt = new Date().toISOString();
+  const operation = completeLaneOperation(repoRoot, laneId, pending.operationId, {
+    state: 'failed',
+    details: {
+      ...pending.details,
+      abandoned: { reason, at: abandonedAt, fromState: pending.state },
+      providerOutcome: 'unknown',
+    },
+  }, env);
+  const paths = projectPaths(repoRoot, env);
+  const lane = withProjectLock(paths, () => {
+    const registry = validateRegistry(readJson(paths.registry), paths.project);
+    const current = registry.lanes[laneId];
+    if (!current) throw new Error(`lane is not owned: ${laneId}`);
+    if (!current.providerId && current.state !== 'failed') {
+      assertLaneTransition(current.state, 'failed');
+      registry.lanes[laneId] = { ...current, state: 'failed', updatedAt: abandonedAt };
+      writeRegistry(paths, registry);
+    }
+    return registry.lanes[laneId];
+  });
+  return { operation, lane };
 }
 
 // Clear a lane pointer left behind when its journal already reached a terminal
@@ -2195,6 +2304,11 @@ function activeLanes(repoRoot, backend, env = process.env) {
 }
 
 module.exports = {
+  ABANDONABLE_OPERATION_TYPES,
+  OPERATION_SCHEMA_VERSION,
+  OPERATION_STATES,
+  OPERATION_TYPES,
+  abandonPendingLaneOperation,
   ACTIVE_LANE_STATES,
   LANE_TRANSITIONS,
   RETIRED_LANE_STATES,

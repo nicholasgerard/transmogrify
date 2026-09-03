@@ -382,6 +382,16 @@ monotonic: phase transitions atomically replace the record, existing detail keys
 are immutable, and later phases may add new receipt keys. The record is durable,
 but it is not an append-only transition log.
 
+Every operation record names one of seven types (`spawn`, `steer`, `stop`,
+`recover`, `resume`, `interrupt`, `retire`) and holds only a state
+enumerated for that type; a write outside the table is refused before it
+reaches disk. Records carry `schemaVersion` (absent means 1). The registry
+and the records are migrated on read when an upgrade path exists; a state
+directory written by a newer Transmogrify is refused with an upgrade
+instruction rather than reinterpreted. `abandon` is the only owner-authorized
+way to close a journal without a provider receipt: it ends a non-retirement
+operation as failed with the owner's reason and an unknown provider outcome.
+
 State directories are current-user-owned mode `0700`, and JSON records are mode
 `0600`. Managed `WORKTREES` roots are current-user-owned mode `0700`; configured
 roots refuse a group/world-writable nearest existing ancestor.
