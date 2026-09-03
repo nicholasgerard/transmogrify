@@ -3,9 +3,9 @@
 export const SITE_NAME = 'Transmogrify';
 export const SITE_ORIGIN = 'https://transmogrify.sh';
 export const SITE_TAGLINE =
-  'Operate exact-owned, worktree-seated Codex and Claude Code lanes with receipt-gated native app visibility.';
+  'One skill that lets your coding agents put each other to work.';
 export const SITE_DESCRIPTION =
-  'Transmogrify is an open-source operator skill and zero-framework Node tools that let Codex or Claude Code create and manage exact-owned, worktree-seated agent lanes — with receipt-gated native visibility, provider-specific steering, recovery, and verified retirement.';
+  'Transmogrify is an open-source skill for Claude Code and Codex. Install it and either app can put the other to work — each job in its own worktree, visible in the desktop and mobile apps you already use, and steerable while it runs.';
 
 /** Social card. Regenerate with `node scripts/make-images.mjs`. */
 export const OG_IMAGE = { path: '/og.png', width: 1200, height: 630 } as const;

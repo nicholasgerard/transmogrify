@@ -1,60 +1,49 @@
 ---
-order: 3
-anchor: matrix
-label: Host to target
-number: '03'
-title: Which combinations exist, and what is still gated
+order: 2
+anchor: how
+label: How it works
+number: '02'
+title: How it works
 lede: >-
-  Either host can drive either target. The table below is rendered from the
-  repository's own support matrix at build time, so it cannot drift from the
-  README.
+  Each provider keeps its own native channel. What they share is the lifecycle,
+  so a job looks the same whichever agent is running it.
 module: matrix
 gated:
   - >-
-    Native Claude Code behavior is not claimed for Desktop or mobile client
-    builds outside the exact live-verified tuple recorded in the skill and
-    Claude integration contract.
+    A Codex lane only streams into Codex Desktop when the app is attached to the
+    same runtime. Attachment is measured on macOS by `desktop-attach.js`; a lane
+    created without that receipt is marked protocol-only and needs
+    `--allow-protocol-only`. Run `desktop-attach.js ensure` again after a
+    Desktop restart or update.
   - >-
-    A compatible Codex app-server handshake does not prove that Codex Desktop
-    is attached to that runtime. Attachment is measured separately on macOS by
-    `desktop-attach.js`; a lane created without that receipt is recorded
-    protocol-only and requires `--allow-protocol-only` at spawn. After a
-    Desktop restart or update, run `desktop-attach.js ensure` before new
-    cross-host dispatches.
+    Claude lanes are created and controlled only on Apple Silicon macOS, with
+    the pinned Claude Code CLI and a first-party `claude.ai` account. An
+    unmeasured build fails closed rather than guessing.
   - >-
-    Claude lifecycle mutations run only on Apple Silicon macOS with the pinned
-    Claude Code CLI, a first-party `claude.ai` account, and the default config
-    directory. An unmeasured CLI build fails closed.
+    Archiving a Claude session uses one narrowly pinned private request, because
+    there is no public one. It stays off unless you pass `--private-archive`,
+    and turning it off does not disable anything else.
   - >-
-    Claude's native archive has no documented public API for an exact Remote
-    Control session, so it uses one narrowly pinned private request. It stays
-    disabled unless the caller passes `--private-archive`, and an unmeasured
-    Claude Desktop build disables that step without disabling the public
-    lifecycle.
+    macOS and Linux only. Windows is not a supported host in this release.
   - >-
-    The standalone Codex tools are CI-tested on macOS and Linux. Windows is not
-    a supported host in this release.
-  - >-
-    Codex `thread/start` exposes no client idempotency key, so a lost response
-    leaves a window the adapter records as unknown and refuses to replay. This
-    is a known recovery boundary, not a solved problem.
-  - >-
-    Releases are cut only after the acceptance gate in the roadmap is green on
-    one fresh installation.
+    Codex `thread/start` has no idempotency key, so a lost response leaves a
+    window that is recorded as unknown and never replayed. It is reconciled by
+    looking at the provider, not by trying again.
 footnote: >-
-  Roadmap intent is never presented as current support. If a capability is not
-  on this page as implemented and verified, treat it as unavailable.
+  Nothing on the roadmap is presented here as working. If a capability is not on
+  this page as implemented and verified, treat it as unavailable.
 ---
 
-On the recorded compatibility tuple, both orchestrators created Codex lanes
-that rendered in Codex Desktop and the ChatGPT mobile app. A current-launch
-visibility receipt remains required because the app can own a different runtime
-after restart. The Claude adapter creates named local Claude Code Remote Control
-sessions, which execute on your machine and connect outward through Anthropic
-over TLS.
+Transmogrify installs as a skill. When your agent needs another agent, it calls
+a handful of local Node scripts: one to open a lane, one to steer it, one to
+collect what came back.
 
-A same-provider orchestrator may prefer its own built-in task tool — but only
-when that tool exposes the full contract: exact identity, native visibility,
-directed steering, status, stop, recovery, archival, and a durable ownership
-receipt. Otherwise the standalone adapter is used, so that the guarantees on
-this page keep holding.
+Underneath, nothing is faked. Codex lanes speak JSON-RPC to a shared
+`codex app-server`; Claude lanes run as named Remote Control sessions on your
+machine. That is why the work shows up in the real apps instead of a hidden
+terminal — and why a lane can survive the agent that started it.
+
+Before it touches a provider, Transmogrify writes down exactly which lane,
+which seat, and which operation it is about to run. Every later command
+re-resolves that exact record. A session with the right name in the right
+directory is not good enough: an ambiguous match is a refusal, not a guess.

@@ -10,6 +10,6 @@
 /issues    https://github.com/nicholasgerard/transmogrify/issues    302
 
 # In-site conveniences.
-/docs      /#read     301
-/install   /#install  301
+/docs      /#docs     301
+/install   /#start    301
 /home      /          301
