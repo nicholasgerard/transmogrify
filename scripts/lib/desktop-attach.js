@@ -33,6 +33,8 @@ const DEFAULT_ATTACH_TIMEOUT_MS = 20_000;
 const MAX_ATTACH_TIMEOUT_MS = 120_000;
 const QUIT_TIMEOUT_MS = 30_000;
 const POLL_MS = 500;
+const LAUNCH_ATTEMPTS = 4;
+const LAUNCH_RETRY_MS = 750;
 const MAX_ELSEWHERE_PORTS = 8;
 
 // Desktop builds on which an attached launch was observed to render and stream
@@ -424,12 +426,29 @@ async function quitDesktop(run, desktop, env, dependencies) {
 // Launch Desktop with the attach variable set to the runtime URL. A launch that
 // reports the app was already running is DESKTOP_STILL_RUNNING, because that
 // launch could not have carried the environment.
-async function launchDesktopAttached(run, desktop, runtimeUrl, env) {
-  const launched = await requireTool(run, 'open', [
-    '-b', desktop.bundleId, '--env', `${ATTACH_ENV}=${runtimeUrl.replace(/\/$/, '')}`,
-  ], env, 15_000);
+async function launchDesktopAttached(run, desktop, runtimeUrl, env, dependencies = {}) {
+  const sleep = dependencies.sleep || delay;
+  const attachArg = `${ATTACH_ENV}=${runtimeUrl.replace(/\/$/, '')}`;
+  // LaunchServices can still be tearing down the application this tool just
+  // quit when the relaunch is requested, and `open` then reports a launch
+  // failure for an app that starts cleanly a moment later. A relaunch that gave
+  // up on the first refusal left the owner with a quit application and no
+  // attachment, so the bounded, idempotent launch is retried, and the exact
+  // bundle path is tried once when bundle-id resolution keeps failing.
+  let launched = null;
+  for (let attempt = 0; attempt < LAUNCH_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await sleep(LAUNCH_RETRY_MS);
+    launched = await requireTool(run, 'open', ['-b', desktop.bundleId, '--env', attachArg], env, 15_000);
+    if (launched.code === 0) break;
+  }
+  if (launched.code !== 0 && desktop.appPath) {
+    launched = await requireTool(run, 'open', ['-a', desktop.appPath, '--env', attachArg], env, 15_000);
+  }
   if (launched.code !== 0) {
-    throw new DesktopAttachError(`open failed to launch ${desktop.bundleId}`, 'DESKTOP_LAUNCH_FAILED');
+    throw new DesktopAttachError(
+      `open failed to launch ${desktop.bundleId} after ${LAUNCH_ATTEMPTS} attempts; Codex Desktop is not running, so start it before retrying`,
+      'DESKTOP_LAUNCH_FAILED',
+    );
   }
   if (/already running/i.test(launched.stderr)) {
     throw new DesktopAttachError(
@@ -515,7 +534,7 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
   } else {
     action = 'launched';
   }
-  await launchDesktopAttached(run, initial.desktop, initial.runtimeUrl, env);
+  await launchDesktopAttached(run, initial.desktop, initial.runtimeUrl, env, dependencies);
   const deadline = clock() + timeoutMs;
   let latest = initial;
   for (;;) {
