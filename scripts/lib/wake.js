@@ -10,13 +10,12 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { AppServerClient, validateUrl } = require('./app-server');
-const { readOwnedJson } = require('./record-guards');
+const { UUID_PATTERN, readOwnedJson } = require('./record-guards');
 const { createClaudeSurface } = require('./claude-surface');
 const { VERSION } = require('./version');
 
 const CHANNELS = Object.freeze(['claude-bridge', 'codex-thread', 'none']);
 const BRIDGE_PATTERN = /^(?:session_|cse_)(?:staging_)?[0-9A-Za-z]{1,64}$/;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_ANCESTRY_DEPTH = 12;
 const MAX_METADATA_BYTES = 64 * 1024;
 const MAX_LIST_PAGES = 20;

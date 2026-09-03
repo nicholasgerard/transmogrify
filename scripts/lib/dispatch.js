@@ -10,7 +10,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { readOwnedJson } = require('./record-guards');
+const { UUID_PATTERN, readOwnedJson } = require('./record-guards');
 const {
   acquireLock,
   atomicWriteJson,
@@ -20,7 +20,6 @@ const {
 } = require('./state');
 
 const VERSION = 1;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SLUG_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 // The complete child event vocabulary. A type outside this set cannot be

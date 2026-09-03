@@ -1083,14 +1083,10 @@ function createClaudeSurface(dependencies = {}) {
 
 module.exports = {
   BRIDGE_PATTERN,
-  CLAUDE_ENV_KEYS,
-  ClaudeSurfaceError,
-  JOB_PATTERN,
   MAX_STEER_BYTES,
   PINNED_CLI_SHA256,
   PINNED_CLI_VERSION,
   VERIFIED_CLI_BUILDS,
-  UUID_PATTERN,
   assertSafeLaneValue,
   assertSafeModelSelector,
   assertUniqueShortJobId,
@@ -1103,7 +1099,6 @@ module.exports = {
   parseAuthStatus,
   parseJobId,
   parseVersion,
-  isVerifiedCliBuild,
   sanitizedClaudeEnv,
   sha256,
 };
