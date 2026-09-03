@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.1
+
+- Turnkey child notifications ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)).
+  `parent-init` discovers and records how the running session can be woken
+  (a Claude Code session's own Remote Control bridge, or a Codex thread from
+  `CODEX_THREAD_ID` verified on the runtime by the command it is running).
+  `spawn` starts a per-parent watcher (`scripts/watch.js`) that observes every
+  child every few seconds and delivers a short fixed message into the
+  parent's session when a child completes, needs attention, or ends; the
+  message names the lane, the event kind, and the two commands to run, and
+  never carries child output. Events read back carry `kind` (`progress`,
+  `complete`, `attention`, `terminal`) and `terminal`; both providers report
+  a finished assignment as `child.turn-completed`.
+- `wait` observes every outstanding child on every call and returns old and
+  new unacknowledged events together, so an old event can never hide a new
+  completion; it takes `--until any|complete|terminal` and blocks up to
+  thirty minutes for background use. `children --observe` refreshes every
+  child's live phase and reports the watcher and wake channel.
+- Claude `steer` retries transcript verification for up to 20 s within the
+  command deadline before reporting `DELIVERY_UNCERTAIN`.
+- Codex reconciliation settles a spawn whose input never appeared
+  (`spawnInputAbsent`) after a bounded grace period and settles a steer
+  left unknown from its `clientUserMessageId` receipt (`steerInputReceipt`,
+  `steerInputAbsent`); steers now carry that id.
+- Every Claude adapter deadline reads the injected clock; the timing tests
+  advance a fake clock instead of waiting.
+- `scripts/maintain.js`: a bounded maintenance runner (doctor plus each
+  available provider's exact-owned reconcile, aggregate counts only) and a
+  recoverable `--retention` pass over aged, worktree-released journals and
+  superseded installer backups.
+- Observation and provider lookup live in `lib/observe.js` and
+  `lib/providers.js`; wake discovery and delivery in `lib/wake.js`.
+
 ## 0.3.0
 
 - Output contract. Success output is now an allowlist per operation

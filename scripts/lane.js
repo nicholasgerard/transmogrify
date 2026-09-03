@@ -15,6 +15,8 @@ const {
   PROVIDER_FLAGS, PROVIDERS, TARGETS, providerForBackend, providerForTarget, targetsAccepting,
 } = require('./lib/providers');
 const { observeParentChildren, resolveDispatchLane } = require('./lib/observe');
+const { discoverClaudeWake, discoverCodexWake } = require('./lib/wake');
+const { ensureWatcher, runningWatcher } = require('./watch');
 const { sleep } = require('./lib/async');
 const {
   WAIT_THRESHOLDS,
@@ -28,6 +30,7 @@ const {
   listEvents,
   listParentContexts,
   loadParentContext,
+  recordParentWake,
 } = require('./lib/dispatch');
 const {
   SAFE_REFUSALS, exitCodeForError, failureBody, publicErrorMessage, safeDetails, safeString,
@@ -54,7 +57,8 @@ const HELP = `usage: lane.js <operation> [options]
 
 operations:
   parent-init --host-provider <slug> --host-app <slug> --name <parent task>
-              [--native-task-ref <private-ref>]
+              [--native-task-ref <private-ref>] [--wake auto|none]
+              [--self-nonce <token>] [--repo-root <absolute>] [--url <loopback-ws-url>]
   parent-list
   schema                                             print the public output contract
   capabilities --target codex|claude
@@ -62,7 +66,7 @@ operations:
              --parent-context-file <absolute>
              [--cwd <absolute>] [--worktrees <absolute> (or WORKTREES)]
              [--intent <intent>] [--model <provider-model>] [--effort <level>]
-             [--speed standard|fast] [--allow-protocol-only]
+             [--speed standard|fast] [--allow-protocol-only] [--no-watch]
   children   --parent-context-file <absolute> [--observe]
   wait       --parent-context-file <absolute> [--after <sequence>] [--timeout-ms <0..1800000>]
              [--until any|complete|terminal]
@@ -119,7 +123,7 @@ const OPERATIONS = new Set([
 ]);
 const OPERATION_OPTIONS = {
   'parent-init': new Set([
-    'host-provider', 'host-app', 'name', 'native-task-ref',
+    'host-provider', 'host-app', 'name', 'native-task-ref', 'wake', 'self-nonce', 'repo-root', 'url',
   ]),
   'parent-list': new Set(),
   schema: new Set(),
@@ -127,7 +131,7 @@ const OPERATION_OPTIONS = {
   spawn: new Set([
     'repo-root', 'target', 'name', 'input', 'input-file', 'cwd', 'worktrees',
     'url', 'claude-bin', 'parent-context-file', 'intent', 'model', 'effort', 'speed',
-    'allow-protocol-only', 'timeout-ms',
+    'allow-protocol-only', 'timeout-ms', 'no-watch',
   ]),
   children: new Set(['repo-root', 'parent-context-file', 'observe', 'url', 'claude-bin']),
   wait: new Set([
@@ -338,6 +342,43 @@ async function waitForParentEvent(context, values, env) {
 // lib/output-schema.js, kept under the name the tests and callers use.
 const publicSuccess = publicResult;
 
+// Discover the wake channel for the host that is running parent-init. A
+// Claude host is found through its own session metadata; a Codex host through
+// the thread id Codex hands to the commands a turn runs, verified on the
+// runtime. Returns the private record to store and the public summary.
+async function discoverWakeForHost(hostProvider, options, env) {
+  let discovered;
+  if (hostProvider === 'claude') {
+    discovered = discoverClaudeWake({}, env);
+  } else if (hostProvider === 'codex' && (env.CODEX_THREAD_ID || options.nonce)) {
+    try {
+      discovered = await discoverCodexWake({
+        threadIdHint: env.CODEX_THREAD_ID, repoRoot: options.repoRoot, nonce: options.nonce, url: options.url,
+      }, env);
+    } catch (error) {
+      discovered = { channel: 'none', reason: 'runtime-unreachable', cause: error.code };
+    }
+  } else {
+    discovered = { channel: 'none', reason: 'no-codex-thread-hint' };
+  }
+  if (discovered.channel === 'claude-bridge') {
+    return {
+      record: { channel: 'claude-bridge', id: discovered.bridgeId, cwd: null, receipt: discovered.receipt },
+      summary: { channel: 'claude-bridge', source: discovered.receipt.source },
+    };
+  }
+  if (discovered.channel === 'codex-thread' && !discovered.unverified) {
+    return {
+      record: { channel: 'codex-thread', id: discovered.threadId, cwd: discovered.cwd ?? null, receipt: discovered.receipt },
+      summary: { channel: 'codex-thread', source: discovered.receipt.source },
+    };
+  }
+  return {
+    record: { channel: 'none', id: null, cwd: null, receipt: { reason: discovered.reason || discovered.channel, observedAt: new Date().toISOString() } },
+    summary: { channel: 'none', source: null, reason: discovered.reason || (discovered.unverified ? 'codex-thread-unverified' : 'unavailable') },
+  };
+}
+
 // Owner-authorized closure of a stranded pending operation. The journal is
 // settled as failed with an abandonment receipt; nothing is claimed about the
 // provider, so the projection reports providerOutcome unknown and the lane keeps
@@ -464,6 +505,8 @@ async function main(argv, env = process.env) {
       'host-provider': { type: 'string' },
       'host-app': { type: 'string' },
       'native-task-ref': { type: 'string' },
+      wake: { type: 'string' },
+      'self-nonce': { type: 'string' },
       'parent-context-file': { type: 'string' },
       event: { type: 'string' },
       after: { type: 'string' },
@@ -482,6 +525,7 @@ async function main(argv, env = process.env) {
       effort: { type: 'string' },
       speed: { type: 'string' },
       'allow-protocol-only': { type: 'boolean' },
+      'no-watch': { type: 'boolean' },
       'private-archive': { type: 'boolean' },
       'accept-manual-seat-removal': { type: 'boolean' },
       'finish-retirements': { type: 'boolean' },
@@ -502,12 +546,32 @@ async function main(argv, env = process.env) {
     if (!values['host-provider'] || !values['host-app'] || !values.name) {
       usage('parent-init requires --host-provider, --host-app, and --name');
     }
+    const wakeMode = values.wake ?? 'auto';
+    if (!['auto', 'none'].includes(wakeMode)) usage('--wake must be auto or none');
+    if (values['self-nonce'] !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/.test(values['self-nonce'])) {
+      usage('--self-nonce must be 8 to 128 characters of letters, digits, dots, dashes, or underscores');
+    }
+    if (values['repo-root'] !== undefined && !path.isAbsolute(values['repo-root'])) {
+      usage('--repo-root must be absolute');
+    }
     const created = createParentContext({
       hostProvider: values['host-provider'],
       hostApp: values['host-app'],
       displayName: values.name,
       nativeTaskRef: values['native-task-ref'],
     }, env);
+    let wake = created.parent.wake
+      ? { channel: created.parent.wake.channel, source: created.parent.wake.receipt?.source ?? null }
+      : { channel: 'none', source: null, reason: 'not-requested' };
+    if (wakeMode === 'auto' && !created.parent.wake) {
+      const discovered = await discoverWakeForHost(values['host-provider'], {
+        repoRoot: values['repo-root'] ? resolveProject(values['repo-root']).root : undefined,
+        nonce: values['self-nonce'],
+        url: values.url,
+      }, env);
+      recordParentWake(created, discovered.record, env);
+      wake = discovered.summary;
+    }
     return {
       version: 1,
       ok: true,
@@ -517,6 +581,7 @@ async function main(argv, env = process.env) {
       hostProvider: created.parent.hostProvider,
       hostApp: created.parent.hostApp,
       displayName: created.parent.displayName,
+      wake,
     };
   }
   if (operation === 'schema') return describeSchema();
@@ -528,6 +593,8 @@ async function main(argv, env = process.env) {
       hostApp: context.parent.hostApp,
       displayName: context.parent.displayName,
       createdAt: context.parent.createdAt,
+      wake: context.parent.wake?.channel ?? 'none',
+      watcher: runningWatcher(context.parent.parentRef, env) ? 'running' : 'stopped',
       children: listDispatches(context, env).length,
       unacknowledgedEvents: countEvents(context, {}, env),
     }));
@@ -590,6 +657,8 @@ async function main(argv, env = process.env) {
       ok: true,
       operation: 'children',
       parentRef: parentContext.parent.parentRef,
+      wake: parentContext.parent.wake?.channel ?? 'none',
+      watcher: runningWatcher(parentContext.parent.parentRef, env) ? 'running' : 'stopped',
       children,
       unacknowledgedEvents,
     };
@@ -635,7 +704,18 @@ async function main(argv, env = process.env) {
   };
 
   if (operation === 'spawn') {
-    return providerForTarget(values.target).adapter.spawn(options, env);
+    const spawned = await providerForTarget(values.target).adapter.spawn(options, env);
+    // The watcher keeps observing this parent's children after spawn returns
+    // and wakes the parent through its recorded channel; a host that opted
+    // out, or an environment that disables it, falls back to wait.
+    const watcher = values['no-watch'] === true || env.TRANSMOGRIFY_WATCH === 'off'
+      ? { running: false, started: false }
+      : ensureWatcher(values['parent-context-file'], { repoRoot, url: values.url, claudeBin: values['claude-bin'] }, env);
+    const wakeChannel = parentContext.parent.wake?.channel ?? 'none';
+    const nextAction = wakeChannel === 'none'
+      ? `no wake channel is recorded for this parent: keep \`lane.js wait --parent-context-file "${values['parent-context-file']}" --until complete --timeout-ms 1800000\` running (in the background on a Claude Code host) and acknowledge each event`
+      : `the watcher will wake this session through its ${wakeChannel} when the child completes, needs attention, or ends; on each wake run \`lane.js wait --parent-context-file "${values['parent-context-file']}" --timeout-ms 0\` and acknowledge the event`;
+    return { ...spawned, watcher, nextAction };
   }
   if (operation === 'reconcile') {
     if (!TARGETS.includes(values.target)) usage('reconcile requires --target codex|claude');

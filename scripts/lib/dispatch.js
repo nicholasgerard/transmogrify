@@ -276,12 +276,35 @@ function assertSafeMetadataLabel(value, label) {
 // Shape and ownership gate for a parent context: this installation's id, slug
 // host provider and app, a safe display name, an optional bounded native task
 // reference, and its monotonic sequence counter.
+// The wake channel a parent recorded for itself: the address the watcher
+// writes to when a child needs the parent. The id is private and never
+// projected; only the channel name and the receipt's source are public.
+const WAKE_CHANNELS = new Set(['claude-bridge', 'codex-thread', 'none']);
+const WAKE_BRIDGE_PATTERN = /^(?:session_|cse_)(?:staging_)?[0-9A-Za-z]{1,64}$/;
+function validateWake(wake) {
+  if (wake === undefined || wake === null) return null;
+  if (!wake || typeof wake !== 'object' || Array.isArray(wake)) {
+    throw new DispatchError('INVALID_LOCAL_STATE', 'parent wake channel is invalid');
+  }
+  assertExactKeys(wake, ['channel', 'id', 'cwd', 'receipt'], [], 'parent wake channel');
+  if (!WAKE_CHANNELS.has(wake.channel) ||
+      (wake.channel === 'claude-bridge' && !WAKE_BRIDGE_PATTERN.test(wake.id || '')) ||
+      (wake.channel === 'codex-thread' && (typeof wake.id !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(wake.id) ||
+        (wake.cwd !== null && (typeof wake.cwd !== 'string' || !path.isAbsolute(wake.cwd))))) ||
+      (wake.channel === 'none' && wake.id !== null) ||
+      !wake.receipt || typeof wake.receipt !== 'object' || Array.isArray(wake.receipt)) {
+    throw new DispatchError('INVALID_LOCAL_STATE', 'parent wake channel is invalid');
+  }
+  return wake;
+}
+
 function validateParent(record, installation) {
   if (record && typeof record === 'object' && !Array.isArray(record)) {
     assertExactKeys(record, [
       'schemaVersion', 'parentRef', 'installationId', 'hostProvider', 'hostApp',
       'displayName', 'nativeTaskRef', 'nextSequence', 'createdAt',
-    ], [], 'parent context');
+    ], ['wake'], 'parent context');
+    validateWake(record.wake);
   }
   if (!record || typeof record !== 'object' || Array.isArray(record) ||
       record.schemaVersion !== VERSION || !UUID_PATTERN.test(record.parentRef || '') ||
@@ -296,6 +319,23 @@ function validateParent(record, installation) {
     assertSafeVisible(record.nativeTaskRef, 'native task reference', 512);
   }
   return record;
+}
+
+// Record the wake channel a parent discovered for its own session. The record
+// is rewritten under the installation lock so a concurrent event append cannot
+// lose the sequence counter. Passing null clears the channel.
+function recordParentWake(parentContext, wake, env = process.env) {
+  const validated = validateWake(wake === null ? null : wake);
+  return withInstallationLock(env, (paths) => {
+    const installation = installationRecord(paths);
+    const loaded = ownedParentContext(parentContext, env);
+    const file = path.join(paths.parents, `${loaded.parent.parentRef}.json`);
+    const stored = validateParent(readPrivateJson(file, 'parent context'), installation);
+    const { wake: _previous, ...rest } = stored;
+    const record = validated ? { ...rest, wake: validated } : rest;
+    atomicWriteJson(file, record);
+    return { parent: record, file };
+  });
 }
 
 // Register or re-adopt a parent context under the installation lock. A native
@@ -1154,6 +1194,8 @@ function acknowledgeEvent(parentContext, eventId, env = process.env) {
 }
 
 module.exports = {
+  WAKE_CHANNELS,
+  recordParentWake,
   EVENT_KINDS,
   WAIT_THRESHOLDS,
   decorateEvent,

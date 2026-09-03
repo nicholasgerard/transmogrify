@@ -90,7 +90,7 @@ const SCHEMAS = Object.freeze({
   spawn: laneShape({
     acknowledgedBy: true, inputReceiptSource: true, completedStatus: true, presentation: true,
     requestedModelSelector: true, bridgeIdSha256: true, executionProfile: true,
-  }),
+  }, { watcher: { running: true, started: true, pid: true }, nextAction: true }),
   status: laneShape({
     exactSession: true, executionEpoch: true, durableLifecycle: true, providerInspectionDeferred: true,
   }, { turn: { status: true }, rawState: { type: true, activeFlags: true }, waiting: true }),
@@ -126,16 +126,17 @@ const SCHEMAS = Object.freeze({
   'parent-init': {
     version: true, ok: true, operation: true, parentRef: true, contextFile: true,
     hostProvider: true, hostApp: true, displayName: true,
+    wake: { channel: true, source: true, reason: true },
   },
   'parent-list': {
     version: true, ok: true, operation: true,
     parents: {
       parentRef: true, contextFile: true, hostProvider: true, hostApp: true, displayName: true,
-      createdAt: true, children: true, unacknowledgedEvents: true,
+      createdAt: true, wake: true, watcher: true, children: true, unacknowledgedEvents: true,
     },
   },
   children: {
-    version: true, ok: true, operation: true, parentRef: true, unacknowledgedEvents: true,
+    version: true, ok: true, operation: true, parentRef: true, wake: true, watcher: true, unacknowledgedEvents: true,
     children: {
       dispatchId: true, laneId: true, target: true, displayName: true, state: true, phase: true,
       laneObservation: true, createdAt: true, unacknowledgedEvents: true, latestEventType: true,
@@ -155,6 +156,7 @@ const SCHEMAS = Object.freeze({
   },
   ack: { version: true, ok: true, operation: true, eventId: true, acknowledgedAt: true },
   schema: { version: true, ok: true, operation: true, operations: true, phases: true, providerPhases: true, schemas: true },
+  watch: { version: true, ok: true, operation: true, outcome: true, pid: true, rounds: true, wakes: true },
   // The bounded maintenance runner and its `--retention` mode share one
   // operation name; `providers`/`counts`/`setup` and `retention` never appear
   // together in one result, but both are declared here so either shape

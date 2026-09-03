@@ -56,9 +56,11 @@ Every lane-bound operation (`spawn`, `status`, `steer`, `interrupt`, `stop`,
 
 ### `spawn`
 
-Lane envelope. `receipt`: `acknowledgedBy`, `inputReceiptSource`,
-`completedStatus`, `presentation`, `requestedModelSelector`,
-`bridgeIdSha256`, `executionProfile`.
+Lane envelope plus `watcher` (`running`, `started`, `pid`) and `nextAction`,
+the sentence telling the parent how it will learn about this child.
+`receipt`: `acknowledgedBy`, `inputReceiptSource`, `completedStatus`,
+`presentation`, `requestedModelSelector`, `bridgeIdSha256`,
+`executionProfile`.
 
 ### `status`
 
@@ -113,16 +115,20 @@ Lane envelope. `receipt`: `archived`, `alreadyRetired`, `worktreeRemoved`,
 
 ### `parent-init`
 
-`parentRef`, `contextFile`, `hostProvider`, `hostApp`, `displayName`.
+`parentRef`, `contextFile`, `hostProvider`, `hostApp`, `displayName`,
+`wake` (`channel`: `claude-bridge`, `codex-thread`, or `none`; `source`, the
+verification receipt kind; `reason` when none). The channel id itself is
+never printed.
 
 ### `parent-list`
 
 `parents`: `parentRef`, `contextFile`, `hostProvider`, `hostApp`,
-`displayName`, `createdAt`, `children`, `unacknowledgedEvents`.
+`displayName`, `createdAt`, `wake`, `watcher` (`running` or `stopped`),
+`children`, `unacknowledgedEvents`.
 
 ### `children`
 
-`parentRef`, `unacknowledgedEvents`, `children`: `dispatchId`, `laneId`,
+`parentRef`, `wake`, `watcher`, `unacknowledgedEvents`, `children`: `dispatchId`, `laneId`,
 `target`, `displayName`, `state`, `phase` (with `--observe`),
 `laneObservation`, `createdAt`, `unacknowledgedEvents`, `latestEventType`,
 `latestEventKind`, `requestedProfile`, `resolvedProfile`, `observedProfile`.
@@ -144,6 +150,11 @@ Lane envelope. `receipt`: `archived`, `alreadyRetired`, `worktreeRemoved`,
 ### `schema`
 
 `operations`, `phases`, `providerPhases`, `schemas`: this contract as data.
+
+### `watch`
+
+`outcome` (`started`, `alreadyRunning`, `running`, `stopped`, `idleExit`,
+`parentContextGone`, `roundsExhausted`), `pid`, `rounds`, `wakes`.
 
 ### `maintain`
 

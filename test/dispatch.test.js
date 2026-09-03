@@ -504,3 +504,26 @@ test('parent contexts accept only the enumerated host applications', (t) => {
   assert.throws(() => createParentContext({ hostProvider: 'gemini', hostApp: 'gemini-cli', displayName: 'x' }, fixture.env),
     (error) => error.code === 'USAGE_ERROR' && /host provider must be one of/.test(error.message));
 });
+
+test('a parent context records one verified wake channel and refuses malformed ones', (t) => {
+  const fixture = createStateFixture(t);
+  const { createParentContext, loadParentContext, recordParentWake } = require('../scripts/lib/dispatch');
+  const created = createParentContext({ hostProvider: 'claude', hostApp: 'claude-code', displayName: 'Wake parent' }, fixture.env);
+  assert.equal(created.parent.wake, undefined);
+  const recorded = recordParentWake(created, {
+    channel: 'claude-bridge', id: 'session_testBridge01', cwd: null, receipt: { source: 'process-ancestry', depth: 1 },
+  }, fixture.env);
+  assert.equal(recorded.parent.wake.channel, 'claude-bridge');
+  assert.equal(loadParentContext(created.file, fixture.env).parent.wake.id, 'session_testBridge01');
+  assert.equal(recordParentWake(created, null, fixture.env).parent.wake, undefined);
+  for (const bad of [
+    { channel: 'claude-bridge', id: 'not-a-bridge', cwd: null, receipt: {} },
+    { channel: 'codex-thread', id: 'x', cwd: null, receipt: {} },
+    { channel: 'codex-thread', id: 'thread_abc12345', cwd: 'relative', receipt: {} },
+    { channel: 'none', id: 'something', cwd: null, receipt: {} },
+    { channel: 'pager', id: null, cwd: null, receipt: {} },
+    { channel: 'none', id: null, cwd: null },
+  ]) {
+    assert.throws(() => recordParentWake(created, bad, fixture.env), (error) => error.code === 'INVALID_LOCAL_STATE', JSON.stringify(bad));
+  }
+});

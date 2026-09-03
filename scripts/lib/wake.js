@@ -87,11 +87,25 @@ function discoverClaudeWake(options = {}, env = process.env) {
   return { channel: 'none', reason: 'no-claude-session-in-ancestry' };
 }
 
+// True when a thread's items include a command execution whose command line
+// carries every marker: the command the caller is running right now (by
+// default `parent-init`) and, when supplied, the caller's one-time nonce.
+async function threadCarriesCommand(client, threadId, markers) {
+  const items = await client.call('thread/items/list', { threadId, limit: 200 });
+  return (items?.data || []).some((entry) => {
+    const item = entry?.item || entry;
+    return item?.type === 'commandExecution' && typeof item.command === 'string' &&
+      markers.every((marker) => item.command.includes(marker));
+  });
+}
+
 // The Codex thread this process runs inside, identified on the shared runtime
-// by an exact receipt: an active thread whose cwd is the repository and whose
-// current items carry the caller's one-time nonce (the command line of the
-// running parent-init). Without the nonce, a single active thread with that
-// cwd is reported as a candidate only; the caller decides whether to trust it.
+// by an exact receipt. Codex exposes the thread id to the commands a turn runs
+// as CODEX_THREAD_ID (live-verified on the pinned line): with that hint the
+// thread must exist on the selected runtime and its items must show the
+// command line being run now. Without the hint, an active thread whose cwd is
+// the repository qualifies only with the caller's one-time nonce in its items;
+// a single active thread with that cwd is reported as an unverified candidate.
 async function discoverCodexWake(options, env = process.env) {
   const url = validateUrl(options.url || env.TRANSMOGRIFY_URL ||
     `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
@@ -106,6 +120,33 @@ async function discoverCodexWake(options, env = process.env) {
     if (!client.verifiedRuntime) {
       return { channel: 'none', reason: 'runtime-unverified', userAgent: initialized?.userAgent };
     }
+    const markers = [options.commandMarker ?? 'parent-init', ...(options.nonce ? [options.nonce] : [])];
+    if (options.threadIdHint) {
+      if (typeof options.threadIdHint !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(options.threadIdHint)) {
+        return { channel: 'none', reason: 'thread-id-hint-invalid' };
+      }
+      let thread;
+      try {
+        const read = await client.call('thread/read', { threadId: options.threadIdHint, includeTurns: false });
+        thread = read?.thread || read;
+      } catch (error) {
+        return { channel: 'none', reason: 'thread-id-hint-not-on-runtime', cause: error.code || 'RPC_ERROR' };
+      }
+      if (!thread || thread.id !== options.threadIdHint) return { channel: 'none', reason: 'thread-id-hint-not-on-runtime' };
+      if (options.repoRoot && thread.cwd !== options.repoRoot) {
+        return { channel: 'none', reason: 'thread-id-hint-cwd-mismatch' };
+      }
+      if (!(await threadCarriesCommand(client, thread.id, markers))) {
+        return { channel: 'none', reason: 'thread-id-hint-without-command-receipt' };
+      }
+      return {
+        channel: 'codex-thread',
+        threadId: thread.id,
+        cwd: typeof thread.cwd === 'string' ? thread.cwd : null,
+        receipt: { source: 'env-thread-id+command-item', observedAt: new Date().toISOString() },
+      };
+    }
+    if (!options.repoRoot) return { channel: 'none', reason: 'no-thread-id-hint-and-no-repository' };
     const candidates = [];
     let cursor = null;
     for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
@@ -123,13 +164,7 @@ async function discoverCodexWake(options, env = process.env) {
     if (candidates.length === 0) return { channel: 'none', reason: 'no-active-thread-with-repository-cwd' };
     if (options.nonce) {
       for (const row of candidates) {
-        const items = await client.call('thread/items/list', { threadId: row.id, limit: 200 });
-        const carriesNonce = (items?.data || []).some((entry) => {
-          const item = entry?.item || entry;
-          return item?.type === 'commandExecution' && typeof item.command === 'string' &&
-            item.command.includes(options.nonce);
-        });
-        if (carriesNonce) {
+        if (await threadCarriesCommand(client, row.id, markers)) {
           return {
             channel: 'codex-thread',
             threadId: row.id,

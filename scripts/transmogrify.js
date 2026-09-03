@@ -20,6 +20,7 @@ const COMMANDS = new Map([
   ['maintain', { file: 'maintain.js', summary: 'bounded maintenance: doctor plus exact-owned reconcile, or --retention cleanup' }],
   ['rpc', { file: 'rpc.js', summary: 'read-only Codex JSON-RPC diagnostics' }],
   ['listen', { file: 'lane-status-listen.js', summary: 'wait for a status transition on owned Codex lanes' }],
+  ['watch', { file: 'watch.js', summary: 'observe a parent\'s children continuously and wake the parent on completion' }],
 ]);
 
 const HELP = `usage: transmogrify.js <command> [options]

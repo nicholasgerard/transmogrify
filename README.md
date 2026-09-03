@@ -362,13 +362,14 @@ a complete packet, handback, digest, and retirement walkthrough in
 
 | Tool | Purpose |
 | --- | --- |
-| `scripts/transmogrify.js` | One entry point: `transmogrify.js <doctor|attach|runtime|probe|lane|rpc|listen|maintain>` forwards to the tool below and shares its exit status |
+| `scripts/transmogrify.js` | One entry point: `transmogrify.js <doctor|attach|runtime|probe|lane|rpc|listen|watch|maintain>` forwards to the tool below and shares its exit status |
 | `scripts/doctor.js` | Read-only startup discovery and aggregate ownership check |
 | `scripts/lane.js` | Provider-neutral spawn, steer, status, interrupt/stop, recover, retire, reconcile, and abandon |
 | `scripts/maintain.js` | Bounded maintenance: the read-only doctor plus each available provider's exact-owned reconcile; `--retention` moves aged, worktree-released operation journals and superseded install backups into recoverable trash |
 | `scripts/runtime-up.sh` | Reuse or explicitly launch a detached Codex app-server |
 | `scripts/desktop-attach.js` | Measure, launch, or (with owner authorization) relaunch Codex Desktop as a client of the shared runtime |
 | `scripts/lane-status-listen.js` | Listen for state transitions on exact owned Codex lanes |
+| `scripts/watch.js` | Per-parent watcher, started by `spawn`: observes every child continuously, records the durable events, and wakes the parent through its recorded channel ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)) |
 | `scripts/rpc.js` | Default-deny, read-only Codex diagnostics |
 
 Every command exits 0 for a confirmed result, 2 for a usage error or a safe

@@ -650,3 +650,24 @@ test('lane CLI abandon closes a stranded operation and refuses retirements', asy
   assert.equal(error.details.pendingType, 'retire');
   assert.equal(error.delivery, 'notAttempted');
 });
+
+test('parent-init reports the wake channel it could verify and never prints its id', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const env = { ...fixture.env, HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-home-')) };
+  t.after(() => fs.rmSync(env.HOME, { recursive: true, force: true }));
+  const created = await main([
+    'parent-init', '--host-provider', 'claude', '--host-app', 'claude-code', '--name', 'Wake test parent',
+  ], env);
+  assert.equal(created.wake.channel, 'none');
+  assert.equal(created.wake.reason, 'no-claude-session-in-ancestry');
+  const listed = await main(['parent-list'], env);
+  assert.equal(listed.parents.find((parent) => parent.parentRef === created.parentRef).wake, 'none');
+  const codex = await main([
+    'parent-init', '--host-provider', 'codex', '--host-app', 'codex-desktop', '--name', 'Codex parent', '--wake', 'none',
+  ], env);
+  assert.deepEqual(codex.wake, { channel: 'none', source: null, reason: 'not-requested' });
+  await assert.rejects(() => main([
+    'parent-init', '--host-provider', 'codex', '--host-app', 'codex-desktop', '--name', 'x', '--wake', 'loud',
+  ], env), /--wake must be auto or none/);
+  assert.equal(JSON.stringify(publicSuccess(created)).includes('session_'), false);
+});

@@ -16,14 +16,15 @@ from "still going".
    each one after handling it. Nothing below replaces this: a wake that is
    lost is recovered by the next `wait`.
 2. **The watcher** (`transmogrify.js watch`, one process per parent context).
-   Started by `spawn` when it is not already running, it observes every
-   outstanding child of that parent continuously and records events the
-   moment a child changes: Codex children through the app-server's own
-   notifications (`thread/status/changed`, `turn/completed`) on one
-   WebSocket, with the seat-verified `thread/read` poll as fallback; Claude
-   children through the `claude agents` census every two seconds and the
-   owned transcript. It exits when the parent has no outstanding children
-   and is restarted by the next `spawn` or `wait`.
+   Started detached by `spawn` when it is not already running, it observes
+   every outstanding child of that parent through the same seat-verified
+   provider reads `wait` uses (every two seconds while a child is working,
+   every five otherwise), records the same durable events, and exits after
+   six idle hours once every child is settled and acknowledged. A single
+   instance per parent is enforced by a pid-and-birth record; a stale
+   record is replaced. Subscribing to the app-server's own
+   `thread/status/changed` notifications instead of polling is a later
+   optimization, not a semantic change.
 3. **The wake** (per host). When the watcher records an event worth the
    parent's attention it delivers a short fixed message into the parent's
    own session, so the parent's model is re-invoked without polling:
@@ -39,11 +40,13 @@ from "still going".
      idle, or a `turn/steer` into its active turn, on the shared runtime
      the parent is attached to. Both calls are the mechanisms `recover
      --input` and `steer` already use on children. The parent thread is
-     identified at `parent-init` by an exact receipt: the thread on the
-     runtime whose cwd is the repository and whose newest turn carries the
-     `parent-init` command line, including a one-time nonce, in its items.
-     A Codex host whose thread is not on the shared runtime (Desktop
-     unattached) has no wake channel and falls back to layer 4.
+     identified at `parent-init` by an exact receipt: Codex hands the
+     thread id to the commands a turn runs as `CODEX_THREAD_ID`; the thread
+     must exist on the selected runtime, its cwd must be the repository when
+     `--repo-root` is given, and its items must show the `parent-init`
+     command line being run (plus `--self-nonce` when supplied). A Codex host
+     whose thread is not on the shared runtime (Desktop unattached) has no
+     wake channel and falls back to layer 4.
 4. **Foreground or background wait** (exists, improved). `wait` observes
    every child on every call, returns pending and new events together, and
    blocks up to thirty minutes. A Claude Code host runs it as a background
@@ -94,10 +97,9 @@ carries the lane id, the dispatch id, and the exact command to run next
 - `spawn` starts the watcher for the parent when it is not running, and
   prints `nextAction` naming the wait command for hosts without a wake
   channel.
-- `children`, `doctor`, and `maintain` report the watcher's liveness and
-  the count of unattended children: children whose latest `complete`,
-  `attention`, or `terminal` event is older than five minutes and still
-  unacknowledged.
+- `children` and `parent-list` report the wake channel and whether the
+  watcher is running; `maintain` counts unacknowledged events across every
+  parent as `unattendedChildren`.
 - The watcher writes only to the parent's own recorded session or thread,
   never to any other, and every message is the fixed template above.
 
@@ -112,11 +114,18 @@ Desktop renders (the `recover --input` path, live in every 0.3 smoke);
 pushes `thread/status/changed` and `turn/completed` to any connected
 client; raw `thread/list` rows carry `cwd` and `status`.
 
-Not yet verified live (the Codex model backend was unavailable during the
-experiment window): that a `parent-init` command line appears with its
-nonce in the parent thread's `thread/items/list` rows, and whether a shell
-command run by a Codex turn can see `CODEX_THREAD_ID` (the binary carries the
-name; the default `shell_environment_policy` excludes appear to strip it).
-Until the first is receipted, a Codex parent records `codex-thread` only
-when exactly one active thread on the runtime has the repository as cwd
-and the operator confirms, or when it passes `--native-task-ref` itself.
+Also verified live on 2026-09-03, on a disposable Codex probe on the shared
+runtime: a shell command's full command line appears in the thread's
+`commandExecution` items, so the `parent-init` invocation is an exact
+receipt for the thread running it; `CODEX_THREAD_ID` is visible to commands a
+turn runs (`env | grep -c CODEX_THREAD_ID` printed 1), so a Codex parent
+learns its own thread id without any listing heuristic; a `turn/steer` sent
+with a `clientUserMessageId` lands as a `userMessage` item carrying that id;
+and a wake follow-up sent to a Claude Code session's own bridge arrived in
+that session as a peer message, even though the sending command's own
+acknowledgement timed out (the watcher records such a wake as uncertain and
+never resends it; the durable event remains). The only unverified direction
+is a Codex host acting as the parent end to end, which needs a Codex-hosted
+session to run `parent-init` and `spawn`; its mechanisms (thread id, command
+receipt, `turn/start` and `turn/steer` into an owned thread) are each
+verified individually.
