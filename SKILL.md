@@ -556,13 +556,16 @@ The public and measured boundaries live in
 
 ## 11. Exit and reporting contract
 
-`lane.js` prints structured JSON. Exit 0 means the stated receipt was confirmed.
-Exit 2 means a safe refusal or precondition failure. Exit 3 means a provider,
-transport, protocol, or delivery-unknown failure. Never turn exit 3 into a
-success receipt and never retry it by intuition; reconcile first. The other
-tools document their own codes in `--help`; `doctor.js` exits 3 when a
-requested provider is not reusable and `desktop-attach.js check` exits 3 when
-Desktop is simply not attached, neither of which is a provider failure.
+Every tool prints structured JSON and shares one exit table. Exit 0 means the
+stated receipt was confirmed. Exit 2 means a usage error or a safe refusal;
+nothing was attempted. Exit 3 means a failure or an uncertain outcome after an
+attempt: a provider, transport, protocol, or delivery-unknown failure, a
+`doctor.js` result that is not ready, or a `desktop-attach.js check` that
+finds Desktop unattached. Exit 1 is an unexpected internal error. Never turn
+exit 3 into a success receipt and never retry it by intuition; reconcile
+first. Failures print one JSON envelope on stderr whose `code` and fixed
+`message` are the only public text; provider-touching lane operations accept
+`--timeout-ms` to bound each request.
 
 Every code named in this file has a symptom row and a repair in
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#symptom-index); read that

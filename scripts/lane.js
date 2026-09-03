@@ -26,6 +26,9 @@ const {
   recordObservation,
 } = require('./lib/dispatch');
 const {
+  SAFE_REFUSALS, exitCodeForError, failureBody, publicErrorMessage, safeDetails, safeString,
+} = require('./lib/public-error');
+const {
   ABANDONABLE_OPERATION_TYPES, abandonPendingLaneOperation,
   listOperations, pendingOperationForLane, requireOwnedLane, resolveProject,
   settleTerminalLaneOperationPointer, withLaneLease,
@@ -96,6 +99,13 @@ operations:
 provider options:
   --url <loopback-ws-url>       Codex only (or TRANSMOGRIFY_URL)
   --claude-bin <absolute-path>  Claude only (or CLAUDE_BIN)
+  --timeout-ms <100..600000>    bound each provider request of a lane operation
+
+exit codes (shared by every Transmogrify command):
+  0  confirmed result
+  2  usage error or safe refusal; nothing was attempted
+  3  failure or uncertain outcome after an attempt; observe before retrying
+  1  unexpected internal error
 
 --private-archive and --finish-retirements are Claude-only. Repository-bound
 operations accept --repo-root or REPO_ROOT; parent-init, parent-list,
@@ -128,17 +138,17 @@ const OPERATION_OPTIONS = {
   spawn: new Set([
     'repo-root', 'target', 'name', 'input', 'input-file', 'cwd', 'worktrees',
     'url', 'claude-bin', 'parent-context-file', 'intent', 'model', 'effort', 'speed',
-    'allow-protocol-only',
+    'allow-protocol-only', 'timeout-ms',
   ]),
   children: new Set(['repo-root', 'parent-context-file']),
   wait: new Set([
     'repo-root', 'parent-context-file', 'after', 'timeout-ms', 'url', 'claude-bin',
   ]),
   ack: new Set(['parent-context-file', 'event']),
-  steer: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin']),
-  status: new Set(['repo-root', 'lane', 'url', 'claude-bin']),
+  steer: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin', 'timeout-ms']),
+  status: new Set(['repo-root', 'lane', 'url', 'claude-bin', 'timeout-ms']),
   abandon: new Set(['repo-root', 'lane', 'reason']),
-  interrupt: new Set(['repo-root', 'lane', 'url']),
+  interrupt: new Set(['repo-root', 'lane', 'url', 'timeout-ms']),
   stop: new Set(['repo-root', 'lane', 'claude-bin']),
   recover: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin']),
   retire: new Set([
@@ -150,126 +160,6 @@ const OPERATION_OPTIONS = {
     'finish-retirements', 'no-cleanup-worktree',
   ]),
 };
-// The only error-detail keys that reach public output. Everything else is
-// dropped, so a provider handle cannot leak through a failure path.
-const SAFE_DETAIL_KEYS = new Set([
-  'alreadyStopped',
-  'pendingState',
-  'pendingType',
-  'attempted',
-  'archive',
-  'causeCode',
-  'causeMessage',
-  'cleanup',
-  'code',
-  'copiesStopped',
-  'correlatedCopies',
-  'delivery',
-  'exactSession',
-  'dispatchId',
-  'executionEpoch',
-  'failures',
-  'httpStatus',
-  'laneId',
-  'localRemoval',
-  'operationId',
-  'outcome',
-  'ownerAction',
-  'phase',
-  'presentation',
-  'providerMutation',
-  'providerRetired',
-  'queued',
-  'removed',
-  'state',
-  'stop',
-]);
-// Codes that prove no provider mutation was attempted. They exit 2; every other
-// code is projected as uncertain and exits 3.
-const SAFE_REFUSALS = new Set([
-  'ADAPTER_MISMATCH',
-  'CLEANUP_BLOCKED',
-  'CLEANUP_RETRYABLE',
-  'EXECUTION_EPOCH_UNBOUND',
-  'EXECUTION_PROFILE_UNSUPPORTED',
-  'HARVEST_MISMATCH',
-  'HARVEST_REQUIRED',
-  'INVALID_STATE',
-  'LANE_RETIRED',
-  'LOCAL_LOCK_TIMEOUT',
-  'NOT_DELIVERED',
-  'NO_ACTIVE_TURN',
-  'NO_EVENT',
-  'NO_PENDING_OPERATION',
-  'ABANDON_REFUSED',
-  'NOT_OWNED',
-  'LOCAL_STATE_LIMIT',
-  'NATIVE_VISIBILITY_REQUIRED',
-  'OPERATION_PENDING',
-  'OWNERSHIP_MISMATCH',
-  'PENDING_OPERATION',
-  'PRIVATE_API_DISABLED',
-  'PRIVATE_AUTH_REJECTED',
-  'PRIVATE_AUTH_UNAVAILABLE',
-  'PRIVATE_TRUST_REQUIRED',
-  'RUNTIME_MISMATCH',
-  'SEAT_MISMATCH',
-  'TARGET_ACTIVE',
-  'UNSUPPORTED_ENVIRONMENT',
-  'UNVERIFIED_PRIVATE_VERSION',
-  'UNVERIFIED_RUNTIME',
-  'USAGE_ERROR',
-]);
-// Fixed public text per code. Routine CLI output never echoes a provider or
-// local exception message.
-const PUBLIC_ERROR_MESSAGES = new Map([
-  ['ADAPTER_MISMATCH', 'lane backend does not support this operation'],
-  ['CLEANUP_BLOCKED', 'provider retirement is verified; local cleanup remains blocked'],
-  ['CLEANUP_RETRYABLE', 'provider retirement is verified; local cleanup failed safely and may be retried'],
-  ['COMPLETION_UNKNOWN', 'lane launch is verified; completion observation is unknown'],
-  ['DELIVERY_UNCERTAIN', 'provider delivery outcome is unknown'],
-  ['EXECUTION_EPOCH_UNBOUND', 'live provider execution no longer matches the owned receipt'],
-  ['EXECUTION_PROFILE_UNSUPPORTED', 'the requested model, effort, or speed is unsupported'],
-  ['FORKED_COPY', 'recovery forked into a separate provider session; the fork this recovery created was stopped and the lane remains stopped'],
-  ['HARVEST_MISMATCH', 'the supplied harvest receipt does not match the durable retirement receipt'],
-  ['HARVEST_REQUIRED', 'retirement requires a durable harvested-output receipt'],
-  ['HOST_CALLBACK_FAILED', 'lane launch is verified; the host launch callback failed'],
-  ['INVALID_STATE', 'the owned lane is not in a valid state for this operation'],
-  ['LANE_RETIRED', 'the owned lane is already retiring or retired'],
-  ['LOCAL_REMOVAL_UNCERTAIN', 'local provider removal outcome is unknown'],
-  ['NOT_DELIVERED', 'the provider mutation was not delivered'],
-  ['NOT_OWNED', 'the requested lane is not owned by this operator installation'],
-  ['NO_ACTIVE_TURN', 'the owned Codex lane has no active turn'],
-  ['NO_EVENT', 'no child event was observed before the bounded timeout'],
-  ['LOCAL_LOCK_TIMEOUT', 'the private operator state is locked by another live Transmogrify process; retry shortly'],
-  ['LOCAL_STATE_LIMIT', 'the private operator state exceeded a bounded record limit'],
-  ['NATIVE_VISIBILITY_REQUIRED', 'Codex spawn requires a native-visibility receipt (Codex Desktop attached to the selected runtime; see desktop-attach.js) or explicit protocol-only authorization'],
-  ['OBSERVATION_FAILED', 'one or more exact child lanes could not be observed safely'],
-  ['OWNERSHIP_MISMATCH', 'live provider identity does not match the owned receipt'],
-  ['PARENT_EVENT_UNRECORDED', 'lane launch is verified; the durable parent event could not be recorded'],
-  ['NO_PENDING_OPERATION', 'the owned lane has no pending operation to abandon'],
-  ['ABANDON_REFUSED', 'a retirement cannot be abandoned; settle it with reconcile'],
-  ['OPERATION_PENDING', 'the owned lane has an unresolved operation'],
-  ['PENDING_OPERATION', 'the owned lane has an unresolved operation'],
-  ['PRIVATE_API_DISABLED', 'Claude retirement requires explicit private archive authorization'],
-  ['PRIVATE_AUTH_REJECTED', 'Claude rejected the private archive credential'],
-  ['PRIVATE_AUTH_UNAVAILABLE', 'Claude private archive authentication is unavailable'],
-  ['PRIVATE_TRUST_REQUIRED', 'Claude private archival requires manual trusted-device enrollment'],
-  ['REMOTE_CONTROL_UNAVAILABLE', 'the Claude session did not register Remote Control; check claude auth status, then stop and remove that session and reconcile'],
-  ['PROTOCOL_ERROR', 'the provider returned an unverified protocol shape'],
-  ['RECOVERY_UNCERTAIN', 'provider recovery outcome is unknown'],
-  ['REMOTE_ARCHIVE_UNCERTAIN', 'remote provider archive outcome is unknown'],
-  ['RUNTIME_MISMATCH', 'the provider runtime no longer matches the owned receipt'],
-  ['SEAT_MISMATCH', 'the lane worktree no longer matches the owned receipt'],
-  ['SPAWN_UNCERTAIN', 'provider spawn outcome is unknown'],
-  ['STOP_UNCERTAIN', 'provider stop outcome is unknown'],
-  ['TARGET_ACTIVE', 'the provider lane is still active'],
-  ['TRANSPORT_UNKNOWN', 'provider transport outcome is unknown'],
-  ['UNSUPPORTED_ENVIRONMENT', 'the local provider environment is unsupported'],
-  ['UNVERIFIED_PRIVATE_VERSION', 'the installed Claude private surface is not pinned'],
-  ['USAGE_ERROR', 'invalid operator request'],
-]);
-
 function usage(message) {
   const error = new Error(message);
   error.code = 'USAGE_ERROR';
@@ -357,40 +247,6 @@ function adapterForLane(repoRoot, laneId, env) {
   const error = new Error(`unsupported lane backend ${lane.backend}`);
   error.code = 'ADAPTER_MISMATCH';
   throw error;
-}
-
-// Redact bearer tokens, provider session and bridge ids, and credential-shaped
-// query or key/value pairs from any string that reaches public output.
-function safeString(value) {
-  return value
-    .replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [redacted]')
-    .replace(/\b(?:session|cse)_[0-9A-Za-z_-]+\b/g, '[redacted-provider-id]')
-    .replace(/([?&](?:token|secret|authorization|cookie|credential|api[-_]?key|password)=)[^&\s]+/gi,
-      '$1[redacted]')
-    .replace(/\b(token|secret|authorization|cookie|credential|api[-_ ]?key|password)\s*[:=]\s*[^\s,;]+/gi,
-      '$1=[redacted]');
-}
-
-// The fixed message for a code, with a generic fallback so an unmapped code
-// still cannot print internal text.
-function publicErrorMessage(code) {
-  if (PUBLIC_ERROR_MESSAGES.has(code)) return PUBLIC_ERROR_MESSAGES.get(code);
-  if (typeof code === 'string' && code.startsWith('ERR_PARSE_ARGS_')) {
-    return 'invalid command-line arguments';
-  }
-  return 'operator operation failed';
-}
-
-// Project error details down to the allowlisted keys, redacting every surviving
-// string.
-function safeDetails(details) {
-  if (details === null || details === undefined) return undefined;
-  if (Array.isArray(details)) return details.map(safeDetails);
-  if (typeof details === 'string') return safeString(details);
-  if (typeof details !== 'object') return details;
-  return Object.fromEntries(Object.entries(details)
-    .filter(([key]) => SAFE_DETAIL_KEYS.has(key))
-    .map(([key, value]) => [key, safeDetails(value)]));
 }
 
 // Provider-advertised catalogs, selection guides, and immutable execution
@@ -933,11 +789,6 @@ function errorEffect(code, details = {}) {
   return { providerMutation: 'unknown' };
 }
 
-// Safe refusals and argument errors exit 2; everything else exits 3.
-function exitCodeForError(code) {
-  return SAFE_REFUSALS.has(code) || String(code || '').startsWith('ERR_PARSE_ARGS_') ? 2 : 3;
-}
-
 // Exit status for a fleet result carrying per-lane outcomes: 0 when all are
 // confirmed, 2 when the only incomplete entries are safe refusals or deferrals,
 // and 3 as soon as one entry is uncertain.
@@ -1115,8 +966,10 @@ async function main(argv, env = process.env) {
   const repoRoot = values['repo-root'] || env.REPO_ROOT;
   if (!repoRoot || !path.isAbsolute(repoRoot)) usage('--repo-root (or REPO_ROOT) must be absolute');
   const input = readInput(values);
+  const timeoutMs = boundedInteger(values['timeout-ms'], '--timeout-ms', 100, 600_000, undefined);
   const options = {
     repoRoot,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     laneId: values.lane,
     name: values.name,
     input,
@@ -1191,22 +1044,13 @@ if (require.main === module) {
   }).catch((error) => {
     const code = error.code || 'OPERATOR_ERROR';
     const effect = errorEffect(code, error.details);
-    const details = safeDetails(error.details);
-    const hasDetails = Array.isArray(details) ? details.length > 0 :
-      details && typeof details === 'object' ? Object.keys(details).length > 0 :
-        details !== undefined;
     const stageUnknown = Object.values(effect).includes('unknown');
-    const body = {
-      version: 1,
-      ok: false,
-      code,
-      message: publicErrorMessage(code),
+    const body = failureBody(error, {
       delivery: stageUnknown ? 'unknown' :
         effect.providerMutation === 'verified' ? 'confirmed' :
           code === 'NOT_DELIVERED' ? 'notDelivered' : 'notAttempted',
       effect,
-      ...(hasDetails ? { details } : {}),
-    };
+    });
     console.error(JSON.stringify(body, null, 2));
     process.exitCode = exitCodeForError(body.code);
   });

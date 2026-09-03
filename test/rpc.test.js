@@ -149,15 +149,15 @@ test('rpc census rejects malformed shapes and never emits opaque cursors', async
 
 test('rpc rejects invalid timeout and URL values as usage errors', async () => {
   const badTimeout = await runNodeScript('scripts/rpc.js', [
-    'thread/list', '--timeout', 'tomorrow',
+    'thread/list', '--timeout-ms', 'tomorrow',
   ]);
-  assert.equal(badTimeout.code, 3);
+  assert.equal(badTimeout.code, 2);
   assert.equal(JSON.parse(badTimeout.stderr).code, 'USAGE_ERROR');
 
   const badUrl = await runNodeScript('scripts/rpc.js', [
     'thread/list', '--url', 'http://127.0.0.1:8843',
   ]);
-  assert.equal(badUrl.code, 3);
+  assert.equal(badUrl.code, 2);
   assert.equal(JSON.parse(badUrl.stderr).code, 'USAGE_ERROR');
 });
 
@@ -177,7 +177,7 @@ test('rpc redacts provider errors to a stable public projection', async (t) => {
   t.after(() => server.close());
 
   const result = await runNodeScript('scripts/rpc.js', ['thread/list', '--url', server.url]);
-  assert.equal(result.code, 1);
+  assert.equal(result.code, 3);
   const error = JSON.parse(result.stderr);
   assert.deepEqual(error, {
     version: 1,
@@ -221,7 +221,7 @@ test('rpc bounds JSON parameters read from stdin before connecting', async () =>
     ['thread/list', '-', '--url', 'ws://127.0.0.1:1'],
     Buffer.alloc(64 * 1024 + 1, 'x'),
   );
-  assert.equal(result.code, 3);
+  assert.equal(result.code, 2);
   assert.equal(JSON.parse(result.stderr).code, 'USAGE_ERROR');
   assert.equal(result.stdout, '');
 });

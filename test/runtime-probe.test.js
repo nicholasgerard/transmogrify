@@ -47,7 +47,7 @@ test('runtime probe rejects a listener with a non-Codex handshake', async (t) =>
   const result = await runNodeScript('scripts/runtime-probe.js', [
     '--url', `ws://127.0.0.1:${port}`,
   ]);
-  assert.equal(result.code, 1, result.stderr);
+  assert.equal(result.code, 3, result.stderr);
   assert.match(result.stderr, /handshake or compatibility verification failed/i);
 });
 
@@ -58,7 +58,7 @@ test('runtime probe never echoes provider-supplied initialize errors', async (t)
   });
   t.after(() => server.close());
   const result = await runNodeScript('scripts/runtime-probe.js', ['--url', server.url]);
-  assert.equal(result.code, 1);
+  assert.equal(result.code, 3);
   assert.match(result.stderr, /handshake or compatibility verification failed/);
   assert.equal(result.stderr.includes(secret), false);
 });

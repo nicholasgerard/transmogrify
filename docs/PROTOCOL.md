@@ -265,7 +265,7 @@ hint. `v2/TurnInterruptParams.json` requires both `threadId` and `turnId`.
 **Live-verified.** A mid-turn steer was acknowledged on the same turn ID and
 rendered as a user message in the native Codex app. Steering a thread whose
 newest turn was not active returned the operation-specific JSON-RPC precondition
-error and `scripts/steer.js` exited 2.
+error, which `lane.js steer` reports as `NO_ACTIVE_TURN` with exit 2.
 
 `thread/read {includeTurns:true}` returned `list_turns is not supported yet`
 even though `includeTurns` appears in `v2/ThreadReadParams.json`. Use
@@ -410,13 +410,16 @@ non-delivery or pre-dispatch refusal may report `Not delivered` or
 example Claude stop verified with archive not attempted, without claiming the
 whole retirement succeeded.
 
-`lane.js` and `doctor.js` exit 0 for confirmed results, 2 for safe refusals and
-precondition failures, and 3 for transport/protocol/provider uncertainty; the
-compatibility tools `steer.js` and `rpc.js` document their own narrower exit
-codes in `--help`, and `desktop-attach.js` documents its own (0 attached or
-ensured, 1 ensure failed with a code, 2 usage, 3 check found no attachment). Server JSON-RPC errors preserve numeric `code` and string
-`message` internally as defined by `JSONRPCErrorError.json`; routine public CLI
-output uses fixed redacted messages.
+Every command shares one exit table: 0 for a confirmed result, 2 for a usage
+error or a safe refusal that attempted nothing, 3 for a failure or an
+uncertain outcome after an attempt, and 1 only for an unexpected internal
+error. A `doctor.js` result that is not ready and a `desktop-attach.js check`
+that finds no attachment are reported as results and exit 3 without any
+provider mutation. Failure envelopes use the fixed public text per code in
+`scripts/lib/public-error.js`; a test asserts that every code a command can
+throw has an entry. Server JSON-RPC errors preserve numeric `code` and string
+`message` internally as defined by `JSONRPCErrorError.json`; routine public
+CLI output never echoes them.
 
 Claude runtime and worker epochs are append-only identity receipts inside the
 current lane record. Reconciliation may add a verified CLI transition only when

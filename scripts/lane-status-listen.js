@@ -6,6 +6,8 @@
 // hosted by that runtime. A watched lane's provider cwd must equal its durable
 // seat before its status is accepted, and the listener exits on the first wake.
 // It only observes status: it never starts, steers, interrupts, or archives.
+// Exit codes follow the shared table: 0 woke or nothing to watch, 2 usage or an
+// ownership refusal before subscribing, 3 a failure after subscribing.
 
 const { AppServerClient, validateUrl } = require('./lib/app-server');
 const { activeLanes } = require('./lib/state');
@@ -107,7 +109,7 @@ if (!options.repoRoot) usage('--repo-root or REPO_ROOT is required for ownership
 let lanes;
 try { lanes = activeLanes(options.repoRoot, 'codex-app-server'); } catch (error) {
   console.error('OWNERSHIP ERROR registry verification failed');
-  process.exit(3);
+  process.exit(2);
 }
 // Every named watch must resolve to exactly one owned active lane on the
 // selected runtime. An ambiguous, foreign-runtime, or already watched selector
@@ -124,20 +126,20 @@ if (options.watchAll) {
     );
     if (matches.length === 0) {
       console.error(`OWNERSHIP ERROR watch ${name} did not match an owned active lane`);
-      process.exit(3);
+      process.exit(2);
     }
     if (matches.length > 1) {
       console.error(`OWNERSHIP ERROR watch ${name} is ambiguous across owned lanes`);
-      process.exit(3);
+      process.exit(2);
     }
     const lane = matches[0];
     if (!lane.providerId || lane.runtime?.endpoint !== options.url) {
       console.error(`OWNERSHIP ERROR watch ${name} belongs to a different runtime`);
-      process.exit(3);
+      process.exit(2);
     }
     if ([...watch.values()].some((entry) => entry.providerId === lane.providerId)) {
       console.error(`OWNERSHIP ERROR watch ${name} resolves to an already watched lane`);
-      process.exit(3);
+      process.exit(2);
     }
     watch.set(name, lane);
   }
@@ -150,7 +152,7 @@ try {
   for (const lane of watch.values()) verifyLaneSeat(options.repoRoot, lane.seat);
 } catch (error) {
   console.error('OWNERSHIP ERROR lane seat verification failed');
-  process.exit(3);
+  process.exit(2);
 }
 
 const state = new Map();

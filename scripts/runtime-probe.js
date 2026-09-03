@@ -3,20 +3,20 @@
 
 // Read-only identity and compatibility probe for a loopback Codex app-server.
 // It completes the initialize handshake, prints the returned user-agent, and
-// exits 1 when the handshake or the verified 0.151.x line check fails, 2 on a
-// usage error. It sends no other request and never mutates provider state.
+// exits 3 when the handshake or the verified 0.151.x line check fails, 2 on a
+// usage error, matching the exit table every Transmogrify command shares. It sends no other request and never mutates provider state.
 
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
 const { VERSION } = require('./lib/version');
 
 function usage(message) {
   if (message) console.error(`error: ${message}`);
-  console.error('usage: runtime-probe.js [--url ws://127.0.0.1:8843] [--timeout ms]');
+  console.error('usage: runtime-probe.js [--url ws://127.0.0.1:8843] [--timeout-ms ms]');
   process.exit(2);
 }
 
 function help() {
-  console.log('usage: runtime-probe.js [--url ws://127.0.0.1:8843] [--timeout ms]');
+  console.log('usage: runtime-probe.js [--url ws://127.0.0.1:8843] [--timeout-ms ms]');
   process.exit(0);
 }
 
@@ -30,7 +30,7 @@ for (let index = 0; index < args.length; index += 1) {
     if (args.length !== 1) usage(`${arg} cannot be combined with other options`);
     help();
   }
-  if (arg !== '--url' && arg !== '--timeout') usage(`unknown option ${arg}`);
+  if (arg !== '--url' && arg !== '--timeout-ms') usage(`unknown option ${arg}`);
   if (index + 1 >= args.length || args[index + 1].startsWith('--')) usage(`${arg} requires a value`);
   if (arg === '--url') rawUrl = args[index + 1];
   else timeoutRaw = args[index + 1];
@@ -39,7 +39,7 @@ for (let index = 0; index < args.length; index += 1) {
 let url;
 let timeoutMs;
 try {
-  if (!/^[1-9][0-9]*$/.test(timeoutRaw)) throw new Error('--timeout must be a canonical positive integer');
+  if (!/^[1-9][0-9]*$/.test(timeoutRaw)) throw new Error('--timeout-ms must be a canonical positive integer');
   timeoutMs = validateTimeout(Number(timeoutRaw));
   url = validateUrl(rawUrl);
 } catch (error) {
@@ -67,7 +67,7 @@ try {
     // listener cannot echo remote text into operator output.
     void error;
     console.error('runtime probe failed: app-server handshake or compatibility verification failed');
-    process.exitCode = 1;
+    process.exitCode = 3;
   } finally {
     client.close();
   }

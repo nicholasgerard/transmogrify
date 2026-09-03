@@ -83,7 +83,7 @@ test('doctor reuses only read-only provider surfaces and emits aggregate ownersh
     '--target', 'all',
     '--url', server.url,
     '--claude-bin', '/opt/homebrew/bin/claude',
-    '--timeout', '4321',
+    '--timeout-ms', '4321',
   ], { ...fixture.env, PATH: '/bin' }, {
     claudeSurface: fakeClaudeSurface(claudeCalls, [{
       sessionId: CLAUDE_SESSION,
@@ -420,7 +420,7 @@ test('doctor arguments honor the documented environment fallbacks and reject uns
     '--repo-root', '/tmp/repo', '--claude-bin', 'claude',
   ], {}), /must be an absolute path/);
   assert.throws(() => parseDoctorArgs([
-    '--repo-root', '/tmp/repo', '--timeout', '01',
+    '--repo-root', '/tmp/repo', '--timeout-ms', '01',
   ], {}), /canonical positive integer/);
   assert.throws(() => parseDoctorArgs([
     '--repo-root', '/tmp/repo', '--url', 'ws://example.com:8843',

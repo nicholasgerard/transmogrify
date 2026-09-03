@@ -1076,19 +1076,19 @@ function messageDigest(message) {
 }
 
 // A pending operation must be the same type and carry the same request details,
-// otherwise this request is OPERATION_PENDING. This is what makes a retry
+// otherwise this request is PENDING_OPERATION. This is what makes a retry
 // idempotent instead of a second provider effect.
 function assertPendingMutation(operation, type, lane, details = {}) {
   if (operation.type !== type) {
     throw new TransmogrifyError(
-      'OPERATION_PENDING',
+      'PENDING_OPERATION',
       `lane ${lane.laneId} already has pending ${operation.type} operation ${operation.operationId}`,
     );
   }
   for (const [key, value] of Object.entries(details)) {
     if (operation.details[key] !== value) {
       throw new TransmogrifyError(
-        'OPERATION_PENDING',
+        'PENDING_OPERATION',
         `pending ${type} operation ${operation.operationId} does not match this request`,
       );
     }
@@ -1647,7 +1647,7 @@ function prepareRetirementOperation(options, lane, env) {
   if (pending) {
     if (pending.type !== 'retire') {
       throw new TransmogrifyError(
-        'OPERATION_PENDING',
+        'PENDING_OPERATION',
         `lane ${lane.laneId} already has pending ${pending.type} operation ${pending.operationId}`,
       );
     }
@@ -1734,7 +1734,7 @@ async function settleUnresolvedSpawnForRetirement(options, lane, pending, env) {
       !UNRESOLVED_SPAWN_STATES.has(pending.state) ||
       !/^[0-9a-f]{64}$/.test(pending.details?.inputSha256 || '')) {
     throw new TransmogrifyError(
-      'OPERATION_PENDING',
+      'PENDING_OPERATION',
       `lane ${lane.laneId} already has pending spawn operation ${pending.operationId}`,
     );
   }

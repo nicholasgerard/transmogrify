@@ -69,7 +69,7 @@ test('named listener refuses an ambiguous thread-id prefix', async (t) => {
   const result = await runNodeScript('scripts/lane-status-listen.js', [
     '--url', server.url, 'lane=abc',
   ], { env: { REPO_ROOT: fixture.repoRoot, TRANSMOGRIFY_STATE_DIR: fixture.stateDir } });
-  assert.equal(result.code, 3, result.stderr);
+  assert.equal(result.code, 2, result.stderr);
   assert.match(result.stderr, /ambiguous/i);
 });
 
@@ -83,7 +83,7 @@ test('named listener refuses a missing thread-id prefix', async (t) => {
   const result = await runNodeScript('scripts/lane-status-listen.js', [
     '--url', server.url, 'lane=missing',
   ], { env: { REPO_ROOT: fixture.repoRoot, TRANSMOGRIFY_STATE_DIR: fixture.stateDir } });
-  assert.equal(result.code, 3, result.stderr);
+  assert.equal(result.code, 2, result.stderr);
   assert.match(result.stderr, /did not match/i);
 });
 

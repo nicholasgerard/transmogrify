@@ -1,10 +1,10 @@
 # Troubleshooting
 
 Transmogrify fails closed when provider identity, runtime identity, ownership,
-or a destructive cleanup precondition cannot be proved. For `lane.js` and
-`doctor.js`, exit code 2 means a safe refusal or incomplete exact-owned
-operation; exit code 3 means an uncertain or unexpected failure that requires
-observation before any retry.
+or a destructive cleanup precondition cannot be proved. Every command shares
+one exit table: 2 means a usage error or a safe refusal that attempted
+nothing; 3 means a failure or an uncertain outcome after an attempt, which
+requires observation before any retry; 1 is an unexpected internal error.
 
 Set the installed skill root before running lifecycle commands. Use the Claude
 path for a Claude-only installation.

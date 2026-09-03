@@ -14,6 +14,7 @@ const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const { processBirth } = require('./lib/state');
 const { validateUrl } = require('./lib/app-server');
+const { exitCodeForError } = require('./lib/public-error');
 
 // Launch polling bounds and the allowlisted environment a detached runtime
 // inherits. Nothing outside that set crosses into the child.
@@ -147,7 +148,7 @@ async function inspectListeners(port, dependencies = {}) {
 async function probeRuntime(probePath, clientUrl, dependencies = {}) {
   const run = dependencies.execFileResult || execFileResult;
   const result = await run(process.execPath, [
-    probePath, '--url', clientUrl, '--timeout', String(PROBE_TIMEOUT_MS),
+    probePath, '--url', clientUrl, '--timeout-ms', String(PROBE_TIMEOUT_MS),
   ], { timeoutMs: PROBE_TIMEOUT_MS + 1500, env: dependencies.env || process.env });
   return result.code === 0;
 }
@@ -438,7 +439,7 @@ async function main(argv = process.argv.slice(2)) {
 if (require.main === module) {
   main().catch((error) => {
     console.error(error.message);
-    process.exitCode = error.code === 'USAGE_ERROR' ? 2 : 1;
+    process.exitCode = exitCodeForError(error.code);
   });
 }
 

@@ -14,6 +14,7 @@ const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-ser
 const { requireOwnedProviderLane } = require('./lib/state');
 const { boundedCursor } = require('./lib/validation');
 const { VERSION } = require('./lib/version');
+const { EXIT, publicErrorMessage } = require('./lib/public-error');
 
 const MAX_PARAMS_BYTES = 64 * 1024;
 const THREAD_STATUS_TYPES = new Set(['active', 'idle', 'systemError', 'notLoaded']);
@@ -40,19 +41,19 @@ read-only methods:
 
 options:
   --url <loopback-ws-url>     app-server endpoint (or TRANSMOGRIFY_URL)
-  --timeout <milliseconds>    bounded request timeout
+  --timeout-ms <milliseconds> bounded request timeout (default 20000)
   --repo-root <absolute-path> required for content-bearing thread reads
 
 Use - to read at most ${MAX_PARAMS_BYTES} bytes of UTF-8 JSON parameters from stdin.
 
-exit codes:
+exit codes (shared by every Transmogrify command):
   0  the method returned a result
-  1  the runtime returned an RPC error for the method
-  2  policy refusal or ownership precondition
-  3  usage, transport, or protocol failure`;
+  2  usage error, policy refusal, or ownership precondition; nothing was sent
+  3  the runtime returned an RPC error, or the transport or protocol failed`;
 
-// Prints one redacted JSON failure envelope and exits: 2 for a policy refusal or
-// an ownership precondition, 3 for a usage, transport, or protocol failure.
+// Prints one redacted JSON failure envelope and exits with the shared code:
+// 2 for a usage error, policy refusal, or ownership precondition, 3 for a
+// transport or protocol failure.
 function fail(code, message, exitCode, details = {}) {
   console.error(JSON.stringify({ version: 1, ok: false, code, message, ...details }));
   process.exit(exitCode);
@@ -142,7 +143,7 @@ function take(name) {
   const index = args.indexOf(name);
   if (index === -1) return null;
   if (index + 1 >= args.length || args[index + 1].startsWith('--')) {
-    fail('USAGE_ERROR', `${name} requires a value`, 3);
+    fail('USAGE_ERROR', `${name} requires a value`, EXIT.refused);
   }
   const value = args[index + 1];
   args.splice(index, 2);
@@ -152,7 +153,7 @@ function take(name) {
 const rawUrl = take('--url') || process.env.TRANSMOGRIFY_URL ||
   `ws://127.0.0.1:${process.env.TRANSMOGRIFY_PORT || '8843'}`;
 const repoRoot = take('--repo-root') || process.env.REPO_ROOT;
-const timeoutRaw = take('--timeout') || '20000';
+const timeoutRaw = take('--timeout-ms') || '20000';
 let timeoutMs;
 let url;
 try {
@@ -160,15 +161,15 @@ try {
   timeoutMs = validateTimeout(Number(timeoutRaw));
   url = validateUrl(rawUrl);
 } catch (error) {
-  fail('USAGE_ERROR', 'invalid RPC URL or timeout', 3);
+  fail('USAGE_ERROR', 'invalid RPC URL or timeout', EXIT.refused);
 }
 
 const [method, paramsRaw] = args;
 if (!method || args.length > 2) {
-  fail('USAGE_ERROR', 'invalid RPC invocation; run rpc.js --help', 3);
+  fail('USAGE_ERROR', 'invalid RPC invocation; run rpc.js --help', EXIT.refused);
 }
 if (!READ_ONLY_METHODS.has(method)) {
-  fail('POLICY_REFUSAL', 'method refused by read-only policy', 2);
+  fail('POLICY_REFUSAL', publicErrorMessage('POLICY_REFUSAL'), EXIT.refused);
 }
 let paramsInput = paramsRaw;
 let params;
@@ -176,7 +177,7 @@ try {
   if (paramsRaw === '-') paramsInput = readBoundedStdin();
   params = paramsInput ? JSON.parse(paramsInput) : {};
 } catch {
-  fail('USAGE_ERROR', 'parameters must be bounded valid UTF-8 JSON', 3);
+  fail('USAGE_ERROR', 'parameters must be bounded valid UTF-8 JSON', EXIT.refused);
 }
 
 // A content-bearing read is gated before the connection opens: the requested
@@ -185,7 +186,7 @@ try {
 let ownedLane;
 if (OWNED_CONTENT_METHODS.has(method)) {
   if (!repoRoot) {
-    fail('USAGE_ERROR', '--repo-root or REPO_ROOT is required for thread content reads', 3);
+    fail('USAGE_ERROR', '--repo-root or REPO_ROOT is required for thread content reads', EXIT.refused);
   }
   try {
     ownedLane = requireOwnedProviderLane(repoRoot, 'codex-app-server', params?.threadId);
@@ -194,9 +195,7 @@ if (OWNED_CONTENT_METHODS.has(method)) {
     const code = /^NOT_OWNED:/.test(error.message) ? 'NOT_OWNED' :
       /^RUNTIME_MISMATCH:/.test(error.message) ? 'RUNTIME_MISMATCH' :
         'OWNERSHIP_CHECK_FAILED';
-    fail(code, code === 'NOT_OWNED'
-      ? 'thread is not owned by this operator installation'
-      : 'owned thread identity could not be verified', 2);
+    fail(code, publicErrorMessage(code), EXIT.refused);
   }
 }
 
@@ -235,10 +234,10 @@ if (OWNED_CONTENT_METHODS.has(method)) {
         version: 1,
         ok: false,
         code: 'RPC_ERROR',
-        message: 'app-server returned an RPC error',
+        message: publicErrorMessage('RPC_ERROR'),
         ...(rpcCode !== undefined ? { rpcCode } : {}),
       }));
-      process.exitCode = 1;
+      process.exitCode = EXIT.failed;
     } else {
       const allowed = new Set([
         'PROTOCOL_ERROR', 'RUNTIME_MISMATCH', 'TRANSPORT_ERROR',
@@ -249,11 +248,9 @@ if (OWNED_CONTENT_METHODS.has(method)) {
         version: 1,
         ok: false,
         code,
-        message: code === 'UNVERIFIED_RUNTIME'
-          ? 'app-server runtime is outside the verified version line; use doctor.js for discovery'
-          : 'read-only RPC request failed',
+        message: publicErrorMessage(code),
       }));
-      process.exitCode = 3;
+      process.exitCode = EXIT.failed;
     }
   } finally {
     client.close();

@@ -13,6 +13,21 @@
   spawn, steer, stop, recover, resume, or interrupt journal as failed with the
   owner's reason and `providerOutcome: unknown`. It never abandons a
   retirement (`ABANDON_REFUSED`) and never implies a provider outcome.
+- One command surface. `scripts/transmogrify.js <doctor|attach|runtime|probe|lane|rpc|listen>`
+  forwards to each tool and shares its exit status; every tool now uses the
+  same exit table (0 confirmed, 2 usage or safe refusal, 3 failure or
+  uncertain outcome, 1 internal) and the fixed public messages in
+  `scripts/lib/public-error.js`, with a test that every thrown code has one.
+  `rpc.js` usage errors exit 2 instead of 3 and RPC errors exit 3 instead of
+  1; `runtime-probe.js` and `runtime-launch.js` failures exit 3 instead of 1;
+  `desktop-attach.js ensure` exits 2 for a refusal before acting and 3 after;
+  `lane-status-listen.js` exits 2 for an ownership refusal before subscribing.
+- `--timeout-ms` is the one timeout flag: `doctor.js`, `rpc.js`, and
+  `runtime-probe.js` rename `--timeout`, and provider-touching `lane.js`
+  operations accept it to bound each request.
+- Remove `scripts/steer.js`; `lane.js steer|recover|interrupt` has covered
+  it since 0.1. `PENDING_OPERATION` replaces the duplicate `OPERATION_PENDING`
+  code.
 
 ## 0.2.6
 

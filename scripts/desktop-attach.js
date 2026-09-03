@@ -9,6 +9,7 @@
 // application quit after explicit or standing owner authorization.
 
 const { parseArgs } = require('node:util');
+const { exitCodeForError, isUsageCode } = require('./lib/public-error');
 const {
   DEFAULT_ATTACH_TIMEOUT_MS,
   DISABLE_ENV,
@@ -38,13 +39,12 @@ environment:
   ${DISABLE_ENV}=off   report the check as disabled without probing
   ${RELAUNCH_ENV}=auto standing owner authorization to relaunch
 
-exit codes:
+exit codes (shared by every Transmogrify command):
   0  attached (check) or attachment ensured (ensure)
-  1  ensure failed; the JSON result carries the code, for example
-     DESKTOP_RELAUNCH_REQUIRED, DESKTOP_HOST_SESSION, ATTACHED_ELSEWHERE,
-     RUNTIME_UNAVAILABLE, ATTACH_TIMEOUT, DESKTOP_QUIT_TIMEOUT
-  2  usage error
-  3  check found no attachment`;
+  2  usage error, or ensure refused before acting (DESKTOP_RELAUNCH_REQUIRED,
+     DESKTOP_HOST_SESSION, ATTACHED_ELSEWHERE, RUNTIME_UNAVAILABLE, ...)
+  3  check found no attachment, or ensure acted and did not finish
+     (ATTACH_TIMEOUT, DESKTOP_QUIT_TIMEOUT, DESKTOP_LAUNCH_FAILED, ...)`;
 
 function usage(message) {
   throw new DesktopAttachError(message, 'USAGE_ERROR');
@@ -100,7 +100,7 @@ async function main(argv = process.argv.slice(2), env = process.env, dependencie
 }
 
 // An unattached observation is a result, not an exception: it prints as JSON and
-// exits 3, while a usage error exits 2 and every other failure exits 1.
+// exits 3. A refusal before acting exits 2 and a failure after acting exits 3.
 if (require.main === module) {
   main().then((result) => {
     if (result?.help) {
@@ -110,16 +110,15 @@ if (require.main === module) {
     console.log(JSON.stringify(result, null, 2));
     if (!result.ok) process.exitCode = 3;
   }).catch((error) => {
-    const usageError = error?.code === 'USAGE_ERROR' ||
-      String(error?.code || '').startsWith('ERR_PARSE_ARGS_');
+    const code = isUsageCode(error?.code) ? 'USAGE_ERROR' : (error?.code || 'DESKTOP_ATTACH_FAILED');
     console.log(JSON.stringify({
       version: 1,
       ok: false,
-      code: usageError ? 'USAGE_ERROR' : (error?.code || 'DESKTOP_ATTACH_FAILED'),
+      code,
       message: error?.message || String(error),
       ...(error?.details ? { details: error.details } : {}),
     }, null, 2));
-    process.exitCode = usageError ? 2 : 1;
+    process.exitCode = exitCodeForError(code);
   });
 }
 

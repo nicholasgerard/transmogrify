@@ -362,13 +362,19 @@ a complete packet, handback, digest, and retirement walkthrough in
 
 | Tool | Purpose |
 | --- | --- |
+| `scripts/transmogrify.js` | One entry point: `transmogrify.js <doctor|attach|runtime|probe|lane|rpc|listen>` forwards to the tool below and shares its exit status |
 | `scripts/doctor.js` | Read-only startup discovery and aggregate ownership check |
 | `scripts/lane.js` | Provider-neutral spawn, steer, status, interrupt/stop, recover, retire, reconcile, and abandon |
 | `scripts/runtime-up.sh` | Reuse or explicitly launch a detached Codex app-server |
 | `scripts/desktop-attach.js` | Measure, launch, or (with owner authorization) relaunch Codex Desktop as a client of the shared runtime |
 | `scripts/lane-status-listen.js` | Listen for state transitions on exact owned Codex lanes |
-| `scripts/steer.js` | Compatibility CLI for exact owned Codex steering, resume, and interrupt |
 | `scripts/rpc.js` | Default-deny, read-only Codex diagnostics |
+
+Every command exits 0 for a confirmed result, 2 for a usage error or a safe
+refusal that attempted nothing, 3 for a failure or an uncertain outcome after
+an attempt, and 1 only for an unexpected internal error. Failures print one
+JSON envelope on stderr with a fixed message per code. Provider-touching lane
+operations accept `--timeout-ms` to bound each request.
 
 `lane.js` accepts these operations:
 

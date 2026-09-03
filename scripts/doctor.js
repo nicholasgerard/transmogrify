@@ -20,6 +20,7 @@ const {
 const { check: desktopAttachCheck } = require('./lib/desktop-attach');
 const { ensureRegistry, readRegistry } = require('./lib/state');
 const { VERSION } = require('./lib/version');
+const { EXIT, isUsageCode, publicErrorMessage } = require('./lib/public-error');
 
 const CODEX_BACKEND = 'codex-app-server';
 const CLAUDE_BACKEND = 'claude-code';
@@ -92,7 +93,7 @@ options:
   --target codex|claude|all   providers to inspect (default: all)
   --url <loopback-ws-url>     Codex app-server endpoint
   --claude-bin <absolute>     exact Claude CLI executable
-  --timeout <milliseconds>    bounded provider probe timeout`;
+  --timeout-ms <milliseconds> bounded provider probe timeout`;
 
 function usage(message) {
   const error = new Error(message);
@@ -116,7 +117,7 @@ function parseDoctorArgs(argv, env = process.env) {
       target: { type: 'string' },
       url: { type: 'string' },
       'claude-bin': { type: 'string' },
-      timeout: { type: 'string' },
+      'timeout-ms': { type: 'string' },
     },
   });
   const repoRoot = parsed.values['repo-root'] || env.REPO_ROOT;
@@ -133,9 +134,9 @@ function parseDoctorArgs(argv, env = process.env) {
   if (target === 'claude' && parsed.values.url !== undefined) {
     usage('--url is not valid with --target claude');
   }
-  const timeoutRaw = parsed.values.timeout || String(DEFAULT_TIMEOUT_MS);
+  const timeoutRaw = parsed.values['timeout-ms'] || String(DEFAULT_TIMEOUT_MS);
   if (!/^[1-9][0-9]*$/.test(timeoutRaw)) {
-    usage('--timeout must be a canonical positive integer');
+    usage('--timeout-ms must be a canonical positive integer');
   }
   let timeoutMs;
   try {
@@ -482,15 +483,16 @@ if (require.main === module) {
     console.log(JSON.stringify(result, null, 2));
     if (!result.ok) process.exitCode = 3;
   }).catch((error) => {
+    const code = publicFailureCode(error);
     console.log(JSON.stringify({
       version: 1,
       ok: false,
       mode: 'read-only-provider-probe',
       providerMutationsAttempted: false,
-      code: publicFailureCode(error),
+      code,
+      message: publicErrorMessage(code),
     }, null, 2));
-    process.exitCode = error?.code === 'USAGE_ERROR' ||
-      String(error?.code || '').startsWith('ERR_PARSE_ARGS_') ? 2 : 3;
+    process.exitCode = isUsageCode(error?.code) ? EXIT.refused : EXIT.failed;
   });
 }
 

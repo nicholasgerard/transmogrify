@@ -51,7 +51,7 @@ test('lane CLI rejects unknown operations, targets, and flags without provider m
   ], {}), /target codex\|claude/);
   const result = await runNodeScript('scripts/lane.js', ['status', '--unknown']);
   assert.equal(result.code, 2);
-  assert.equal(JSON.parse(result.stderr).code, 'ERR_PARSE_ARGS_UNKNOWN_OPTION');
+  assert.equal(JSON.parse(result.stderr).code, 'USAGE_ERROR');
   await assert.rejects(() => main([
     'status', '--repo-root', '/tmp', '--lane', 'x', '--input', 'must-not-be-read',
   ], {}), /not valid for status/);
