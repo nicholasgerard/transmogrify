@@ -48,6 +48,13 @@ them. The current contracts are in
 [Execution profiles](docs/EXECUTION-PROFILES.md) and
 [Dispatch and lineage](docs/DISPATCH.md).
 
+Since 0.3.0 every tool shares one entry point (`transmogrify.js`), one exit
+table, one failure envelope with fixed public text, and one output allowlist
+per operation ([Output contract](docs/OUTPUT.md)); operation journals hold
+only enumerated per-type states behind a schema version, an owner may
+`abandon` a stranded non-retirement journal, and both provider adapters sit
+behind one descriptor-driven seam with a contract test.
+
 ## Acceptance program: turnkey bidirectional operation
 
 Run the following suite on compatibility refreshes and before widening any
@@ -105,6 +112,19 @@ wording, fork containment on recovery, and the null-effort provenance refusal.
 Not available: in-place resume of a stopped Claude lane (a fork on this CLI,
 now contained). Not exercised live: mobile reattachment after a Desktop host
 restart, and seeded same-name foreign sessions (unit-tested only).
+
+2026-09-03, wave 0.3 checkpoints 0.2.7, 0.2.8, and 0.3.0, unattended
+maintainer run with disposable probes on the shared runtime. Exercised and
+green at each checkpoint: doctor with `setup.ready`; Codex lane attached to
+Desktop, boundary recover with input, mid-turn steer, interrupt, archive;
+Claude lane spawn, steer verified by reconcile, whole-session stop,
+private-archive retirement with seat and local record removal; parent event
+delivery and acknowledgement; a stalled `localRemovalUnknown` retirement
+from the previous day finished by observation. Found and fixed: lane
+operations that did not accept `--timeout-ms`, usage errors that hid their
+text. Observed twice: a Claude steer reported `DELIVERY_UNCERTAIN` inside
+its verification window and settled as `steerDeliveredObserved` on the next
+reconcile.
 
 ## Priority 1: compatibility and acceptance hardening
 
@@ -172,9 +192,31 @@ restart, and seeded same-name foreign sessions (unit-tested only).
   events, and superseded installer backups, with dry-run output and
   recoverable deletion. Parent event stores are bounded today; a long-lived
   parent that reaches the bound must start a new context.
-- Add an explicit owner-authorized abandon operation for a lane whose
-  `thread/start` outcome was lost before its thread ID became durable, so the
-  reserved seat and journal can close without inferring provider state.
+- Widen or decouple the Claude steer verification window: the transcript
+  marker regularly lands after the public command returns, so `steer`
+  reports `DELIVERY_UNCERTAIN` and only the next reconcile observes
+  delivery. Verify asynchronously, or wait for the transcript up to the
+  command deadline before reporting.
+- Give Codex a spawn-absence settlement like Claude's `spawnJobAbsent`: a
+  Codex spawn whose input receipt never appears stays pending forever and
+  only raises repeated attention events.
+- Make a Codex steer reconcilable. Codex has no steer receipt to observe, so a
+  crashed steer journal can only be abandoned; record the `turn/steer`
+  response or the resulting turn item so recovery can settle it.
+- Unify the reconcile result shape: Codex reports `delivery` and
+  `repaired[]`, Claude reports `outcome`, and `ok` is computed on different
+  keys; `forkedCopyStopped` keeps `ok:true` although it came from a thrown
+  `FORKED_COPY`.
+- Treat a Codex runtime endpoint change like Claude's identity-matching
+  runtime transition instead of refusing or skipping the lane.
+- Inject the clock into the Claude command deadline as well as the dispatch
+  windows, so the reconcile test that needs a 3 s real deadline on loaded
+  runners becomes deterministic.
+- Retire the test-only state primitives (`reserveLane`,
+  `bindClaudeProviderIdentity`, `bindLaneProviderBridge`) by seeding the
+  remaining state tests through the atomic spawn observation, then split the
+  400-line adapter spawn and retire functions along the phases the journal
+  already names.
 
 ## Priority 3: reduce private and version-specific surface
 
