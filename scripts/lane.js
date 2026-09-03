@@ -149,15 +149,17 @@ const OPERATION_OPTIONS = {
   status: new Set(['repo-root', 'lane', 'url', 'claude-bin', 'timeout-ms']),
   abandon: new Set(['repo-root', 'lane', 'reason']),
   interrupt: new Set(['repo-root', 'lane', 'url', 'timeout-ms']),
-  stop: new Set(['repo-root', 'lane', 'claude-bin']),
-  recover: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin']),
+  stop: new Set(['repo-root', 'lane', 'claude-bin', 'timeout-ms',
+  ]),
+  recover: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin', 'timeout-ms',
+  ]),
   retire: new Set([
     'repo-root', 'lane', 'url', 'claude-bin', 'private-archive',
-    'no-cleanup-worktree', 'accept-manual-seat-removal', 'harvested-output-sha256',
+    'no-cleanup-worktree', 'accept-manual-seat-removal', 'harvested-output-sha256', 'timeout-ms',
   ]),
   reconcile: new Set([
     'repo-root', 'target', 'lane', 'url', 'claude-bin', 'private-archive',
-    'finish-retirements', 'no-cleanup-worktree',
+    'finish-retirements', 'no-cleanup-worktree', 'timeout-ms',
   ]),
 };
 function usage(message) {

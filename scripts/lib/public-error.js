@@ -194,6 +194,14 @@ function publicErrorMessage(code) {
   return PUBLIC_ERROR_MESSAGES.get(publicCode(code)) || PUBLIC_ERROR_MESSAGES.get('OPERATOR_ERROR');
 }
 
+// A usage error's text is written by Transmogrify itself (or by Node's
+// argument parser) and never carries provider output, so the envelope keeps
+// it: an operator must learn which flag was wrong.
+function usageMessage(error) {
+  const text = typeof error?.message === 'string' ? error.message.trim() : '';
+  return text ? safeString(text) : publicErrorMessage('USAGE_ERROR');
+}
+
 // Safe refusals and argument errors exit 2; everything else exits 3.
 function exitCodeForError(code) {
   return SAFE_REFUSALS.has(code) || isUsageCode(code) ? EXIT.refused : EXIT.failed;
@@ -248,7 +256,7 @@ function failureBody(error, extra = {}) {
     version: 1,
     ok: false,
     code,
-    message: publicErrorMessage(code),
+    message: code === 'USAGE_ERROR' ? usageMessage(error) : publicErrorMessage(code),
     ...extra,
     ...(hasDetails ? { details } : {}),
   };

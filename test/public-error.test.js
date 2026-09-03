@@ -79,6 +79,12 @@ test('failure envelopes carry fixed text and allowlisted, redacted details only'
   const parse = new Error('bad flag');
   parse.code = 'ERR_PARSE_ARGS_UNKNOWN_OPTION';
   assert.equal(failureBody(parse).code, 'USAGE_ERROR');
-  assert.equal(failureBody(parse).message, publicErrorMessage('USAGE_ERROR'));
+  assert.equal(failureBody(parse).message, 'bad flag');
+  const usage = new Error('--timeout-ms must be between 100 and 600000');
+  usage.code = 'USAGE_ERROR';
+  assert.equal(failureBody(usage).message, '--timeout-ms must be between 100 and 600000');
+  const blank = new Error('');
+  blank.code = 'USAGE_ERROR';
+  assert.equal(failureBody(blank).message, publicErrorMessage('USAGE_ERROR'));
   assert.equal(safeDetails(null), undefined);
 });
