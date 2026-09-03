@@ -364,259 +364,203 @@ async function reconcileBoundLane(options, env, surface, runtime, initial, deadl
   };
 }
 
-// The one reconcile ok rule shared with codex-adapter.reconcile (ROADMAP.md
-// priority 2): an entry counts against ok when its journal is still open
-// (delivery unknown), when it was skipped rather than observed
-// (differentRuntime), when its own error could not be classified further
-// (uncertain), or when it carries a surfaced provider or local code at all --
-// including forkedCopyStopped, which is a settlement of a thrown FORKED_COPY
-// and so must not read as ok despite the lane itself being left in a known,
-// stopped state.
 // Fleet reconciliation for one lane or every Claude lane. It settles pending
 // journals by observation, records verified runtime transitions, and reports
-// each lane's outcome without replaying any provider mutation.
+// each lane's outcome without replaying any provider mutation. The runtime is
+// measured once, lazily, for the first lane that needs it.
 async function reconcile(options, env = process.env) {
   if (!options.repoRoot || !path.isAbsolute(options.repoRoot)) {
     throw new ClaudeTransmogrifyError('USAGE_ERROR', 'reconcile requires absolute repoRoot');
   }
-  let lanes;
-  if (options.laneId) {
-    let exact;
-    try {
-      exact = requireOwnedLane(options.repoRoot, options.laneId, env);
-    } catch (error) {
-      if (/^NOT_OWNED:/.test(error.message)) {
-        throw new ClaudeTransmogrifyError('NOT_OWNED', `lane ${options.laneId} is not owned`);
-      }
-      throw error;
-    }
-    if (exact.backend !== BACKEND) {
-      throw new ClaudeTransmogrifyError('ADAPTER_MISMATCH', `lane ${exact.laneId} uses ${exact.backend}`);
-    }
-    lanes = [exact];
-  } else {
-    lanes = listLanes(options.repoRoot, env).filter((lane) => lane.backend === BACKEND);
-  }
+  const lanes = selectReconcileLanes(options, env);
   if (lanes.length === 0) {
     return {
       version: 1, ok: true, operation: 'reconcile', adapter: BACKEND, results: [],
       receipt: { providerConnection: 'notRequired' },
     };
   }
-  const deadline = commandDeadline(options);
-  const surface = surfaceFor(options);
-  const operations = new Map(listOperations(options.repoRoot, env)
-    .map((operation) => [operation.operationId, operation]));
-  let runtime = null;
+  const ctx = {
+    options, env, surface: surfaceFor(options), deadline: commandDeadline(options), runtime: null,
+    operations: new Map(listOperations(options.repoRoot, env).map((operation) => [operation.operationId, operation])),
+  };
   const results = [];
   for (const initial of lanes) {
     try {
-      const terminalRepair = await withLaneLease(options.repoRoot, initial.laneId, async () => {
-        const repair = repairUnstartedSpawn(
-          options.repoRoot, initial.laneId, operations.get(initial.operationId), env,
-        );
-        if (!repair) return null;
-        return {
-          laneId: repair.lane.laneId,
-          providerId: repair.lane.providerId || null,
-          state: repair.lane.state,
-          outcome: repair.unstartedSpawn ? 'spawnNotDelivered' : 'terminalOperationPointerCleared',
-          delivery: repair.delivery,
-          repaired: repair.repaired,
-          pendingOperation: null,
-        };
-      }, env);
-      if (terminalRepair) {
-        results.push(terminalRepair);
-        continue;
-      }
-      const outerPending = pendingOperationForLane(options.repoRoot, initial.laneId, env);
-      const cleanupOnlyRetirement = outerPending?.type === 'retire' &&
-        RETIRED_STATES.has(initial.state);
-      if (cleanupOnlyRetirement) {
-        if (options.finishRetirements !== true) {
-          results.push({
-            laneId: initial.laneId, providerId: initial.providerId,
-            state: initial.state, outcome: 'retirementPending',
-            delivery: 'unknown', repaired: [], pendingOperation: 'retire',
-          });
-        } else {
-          const retired = await retire({ ...options, laneId: initial.laneId }, env);
-          results.push({
-            laneId: retired.laneId, providerId: retired.providerId,
-            state: retired.state, outcome: 'retirementFinished',
-            delivery: 'confirmed', repaired: [], pendingOperation: null,
-          });
-        }
-        continue;
-      }
-      // A retired lane with nothing pending needs no runtime at all; report it
-      // as already retired instead of comparing runtimes it no longer uses.
-      if (RETIRED_STATES.has(initial.state) && !outerPending) {
-        results.push({
-          laneId: initial.laneId, providerId: initial.providerId,
-          state: initial.state, outcome: 'alreadyRetired',
-          delivery: 'confirmed', repaired: [], pendingOperation: null,
-        });
-        continue;
-      }
-      if (!runtime) {
-        runtime = preflight({
-          ...options,
-          ...(deadline === null ? {} : {
-            commandTimeoutMs: remainingCommandMs(deadline, 100),
-          }),
-        }, env, surface);
-      }
-      const expectedRuntime = effectiveRuntime(initial);
-      const needsRuntimeTransition = !sameRuntime(expectedRuntime, runtime);
-      if (needsRuntimeTransition && !sameRuntimeIdentity(expectedRuntime, publicRuntime(runtime))) {
-        results.push({
-          laneId: initial.laneId, state: initial.state, outcome: 'differentRuntime',
-          delivery: 'unknown', repaired: [], pendingOperation: outerPending?.type ?? null,
-        });
-        continue;
-      }
-      if (outerPending?.type === 'retire') {
-        if (options.finishRetirements !== true) {
-          results.push({
-            laneId: initial.laneId, providerId: initial.providerId,
-            state: initial.state, outcome: 'retirementPending',
-            delivery: 'unknown', repaired: [], pendingOperation: 'retire',
-          });
-        } else {
-          const retired = await retire({ ...options, laneId: initial.laneId }, env);
-          results.push({
-            laneId: retired.laneId, providerId: retired.providerId,
-            state: retired.state, outcome: 'retirementFinished',
-            delivery: 'confirmed', repaired: [], pendingOperation: null,
-          });
-        }
-        continue;
-      }
-      let runtimeRebound = false;
-      const result = await withLaneLease(options.repoRoot, initial.laneId, async () => {
-        let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
-        if (!sameRuntime(effectiveRuntime(lane), runtime)) {
-          lane = await bindRuntimeTransition(options, env, surface, runtime, lane, deadline);
-          runtimeRebound = true;
-        }
-        const operation = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-        if (operation?.type === 'spawn') {
-          const repaired = await reconcilePendingSpawn(
-            options, env, surface, runtime, lane, operation, deadline,
-          );
-          return {
-            laneId: repaired.lane.laneId, providerId: repaired.lane.providerId,
-            state: repaired.lane.state, outcome: repaired.outcome,
-            delivery: SPAWN_OUTCOME_DELIVERY.get(repaired.outcome),
-            repaired: [],
-            pendingOperation: repaired.outcome === 'spawnUnknown' ? 'spawn' : null,
-            ...(repaired.presentation ? { presentation: repaired.presentation } : {}),
-          };
-        }
-        if (operation?.type === 'steer') {
-          const observed = await reconcileSteer(
-            options, env, surface, runtime, lane, operation, deadline,
-          );
-          return {
-            laneId: lane.laneId, providerId: lane.providerId,
-            state: observed.lane.state,
-            outcome: observed.complete ? 'steerDeliveredObserved' : 'steerUnknown',
-            delivery: observed.complete ? 'confirmed' : 'unknown',
-            repaired: [],
-            pendingOperation: observed.complete ? null : 'steer',
-          };
-        }
-        if (operation?.type === 'stop') {
-          const stopped = await reconcilePendingStop(
-            options, env, surface, runtime, lane, operation, deadline,
-          );
-          return {
-            laneId: stopped.lane.laneId, providerId: stopped.lane.providerId,
-            state: stopped.lane.state, outcome: stopped.outcome,
-            delivery: stopped.outcome === 'stoppedObserved' ? 'confirmed' : 'unknown',
-            repaired: [],
-            pendingOperation: stopped.outcome === 'stopPending' ? 'stop' : null,
-          };
-        }
-        if (operation?.type === 'recover') {
-          const recovered = await observeRecovery(
-            options, env, surface, runtime, lane, operation, deadline,
-          );
-          const outcome = recovered ? (recovered.settled || 'recoveryVerified') : 'recoveryUnknown';
-          return {
-            laneId: lane.laneId, providerId: lane.providerId,
-            state: recovered ? recovered.lane.state : lane.state,
-            outcome,
-            delivery: outcome === 'recoveryVerified' ? 'confirmed'
-              : outcome === 'recoveryNotAchieved' ? 'notDelivered' : 'unknown',
-            repaired: [],
-            pendingOperation: outcome === 'recoveryUnknown' ? 'recover' : null,
-          };
-        }
-        if (operation) {
-          throw new ClaudeTransmogrifyError('RECONCILIATION_UNCERTAIN', `unsupported pending operation ${operation.type}`);
-        }
-        if (RETIRED_STATES.has(lane.state)) {
-          return {
-            laneId: lane.laneId, providerId: lane.providerId,
-            state: lane.state, outcome: 'alreadyRetired',
-            delivery: 'confirmed', repaired: [], pendingOperation: null,
-          };
-        }
-        return reconcileBoundLane(options, env, surface, runtime, lane, deadline);
-      }, env);
-      results.push(runtimeRebound ? {
-        ...result,
-        outcome: result.outcome === 'verified' ? 'runtimeRebound' : result.outcome,
-        runtimeTransition: 'verified',
-      } : result);
+      results.push(await reconcileLane(ctx, initial));
     } catch (error) {
-      if (error.code === 'CLEANUP_RETRYABLE') {
-        results.push({
-          laneId: initial.laneId,
-          state: initial.state,
-          outcome: 'cleanupRetryable',
-          code: error.code,
-          providerRetired: true,
-          cleanup: 'retryable',
-          delivery: 'unknown',
-          repaired: [],
-          pendingOperation: 'retire',
-        });
-        continue;
-      }
-      if (error.code === 'FORKED_COPY' && error.details?.copiesStopped !== undefined) {
-        // Settling as forkedCopyStopped closed the recovery journal, but the
-        // mutation this call was asked to perform -- resuming the owned
-        // session -- did not happen: a fork was created and stopped instead.
-        // The lane stays stopped, and the surfaced FORKED_COPY code alone is
-        // enough to keep this entry out of ok under the shared rule below.
-        results.push({
-          laneId: initial.laneId, providerId: initial.providerId, state: 'stopped',
-          outcome: 'forkedCopyStopped', code: error.code,
-          copiesStopped: error.details.copiesStopped, ownerAction: error.details.ownerAction,
-          delivery: 'notDelivered', repaired: [], pendingOperation: null,
-        });
-        continue;
-      }
-      const causeCode = error.details?.causeCode;
-      results.push({
-        laneId: initial.laneId, providerId: initial.providerId, state: initial.state,
-        outcome: 'uncertain', code: error.code || 'RECONCILIATION_UNCERTAIN', error: error.message,
-        delivery: 'unknown', repaired: [], pendingOperation: null,
-        ...(causeCode ? { causeCode } : {}),
-        ...((error.details?.ownerAction || ownerActionFor(causeCode))
-          ? { ownerAction: error.details?.ownerAction || ownerActionFor(causeCode) } : {}),
-      });
+      results.push(reconcileFailureEntry(initial, error));
     }
   }
   return {
     version: 1,
     ok: reconcileOk(results),
     operation: 'reconcile', adapter: BACKEND, results,
-    receipt: { providerConnection: runtime ? 'verified' : 'notRequired' },
+    receipt: { providerConnection: ctx.runtime ? 'verified' : 'notRequired' },
+  };
+}
+
+function selectReconcileLanes(options, env) {
+  if (!options.laneId) return listLanes(options.repoRoot, env).filter((lane) => lane.backend === BACKEND);
+  let exact;
+  try {
+    exact = requireOwnedLane(options.repoRoot, options.laneId, env);
+  } catch (error) {
+    if (/^NOT_OWNED:/.test(error.message)) {
+      throw new ClaudeTransmogrifyError('NOT_OWNED', `lane ${options.laneId} is not owned`);
+    }
+    throw error;
+  }
+  if (exact.backend !== BACKEND) {
+    throw new ClaudeTransmogrifyError('ADAPTER_MISMATCH', `lane ${exact.laneId} uses ${exact.backend}`);
+  }
+  return [exact];
+}
+
+function reconcileEntry(lane, fields) {
+  return { laneId: lane.laneId, providerId: lane.providerId ?? null, state: lane.state, ...fields };
+}
+
+// One lane, in the order local evidence allows: a crash-left journal is
+// repaired without the provider; a pending retirement is finished only on
+// request; a retired lane with nothing pending needs no runtime; then the
+// runtime is compared and the lane observed under its lease.
+async function reconcileLane(ctx, initial) {
+  const { options, env } = ctx;
+  const terminalRepair = await withLaneLease(options.repoRoot, initial.laneId, async () => {
+    const repair = repairUnstartedSpawn(options.repoRoot, initial.laneId, ctx.operations.get(initial.operationId), env);
+    if (!repair) return null;
+    return reconcileEntry(repair.lane, {
+      outcome: repair.unstartedSpawn ? 'spawnNotDelivered' : 'terminalOperationPointerCleared',
+      delivery: repair.delivery, repaired: repair.repaired, pendingOperation: null,
+    });
+  }, env);
+  if (terminalRepair) return terminalRepair;
+  const outerPending = pendingOperationForLane(options.repoRoot, initial.laneId, env);
+  if (outerPending?.type === 'retire' && RETIRED_STATES.has(initial.state)) {
+    return settlePendingRetirement(ctx, initial);
+  }
+  // A retired lane with nothing pending needs no runtime at all; report it
+  // as already retired instead of comparing runtimes it no longer uses.
+  if (RETIRED_STATES.has(initial.state) && !outerPending) {
+    return reconcileEntry(initial, { outcome: 'alreadyRetired', delivery: 'confirmed', repaired: [], pendingOperation: null });
+  }
+  if (!ctx.runtime) {
+    ctx.runtime = preflight({
+      ...options,
+      ...(ctx.deadline === null ? {} : { commandTimeoutMs: remainingCommandMs(ctx.deadline, 100) }),
+    }, env, ctx.surface);
+  }
+  const expectedRuntime = effectiveRuntime(initial);
+  if (!sameRuntime(expectedRuntime, ctx.runtime) && !sameRuntimeIdentity(expectedRuntime, publicRuntime(ctx.runtime))) {
+    return {
+      laneId: initial.laneId, state: initial.state, outcome: 'differentRuntime',
+      delivery: 'unknown', repaired: [], pendingOperation: outerPending?.type ?? null,
+    };
+  }
+  if (outerPending?.type === 'retire') return settlePendingRetirement(ctx, initial);
+  let runtimeRebound = false;
+  const result = await withLaneLease(options.repoRoot, initial.laneId, async () => {
+    let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
+    if (!sameRuntime(effectiveRuntime(lane), ctx.runtime)) {
+      lane = await bindRuntimeTransition(options, env, ctx.surface, ctx.runtime, lane, ctx.deadline);
+      runtimeRebound = true;
+    }
+    return observeLaneUnderLease(ctx, lane);
+  }, env);
+  return runtimeRebound
+    ? { ...result, outcome: result.outcome === 'verified' ? 'runtimeRebound' : result.outcome, runtimeTransition: 'verified' }
+    : result;
+}
+
+// A pending retirement is reported pending, or finished through the exact
+// retire path when the caller asked for it.
+async function settlePendingRetirement(ctx, initial) {
+  if (ctx.options.finishRetirements !== true) {
+    return reconcileEntry(initial, { outcome: 'retirementPending', delivery: 'unknown', repaired: [], pendingOperation: 'retire' });
+  }
+  const retired = await retire({ ...ctx.options, laneId: initial.laneId }, ctx.env);
+  return reconcileEntry(retired, { outcome: 'retirementFinished', delivery: 'confirmed', repaired: [], pendingOperation: null });
+}
+
+// Settle the lane's pending journal from observation, by type, or observe
+// the bound lane when nothing is pending.
+async function observeLaneUnderLease(ctx, lane) {
+  const { options, env, surface, runtime, deadline } = ctx;
+  const operation = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+  if (operation?.type === 'spawn') {
+    const repaired = await reconcilePendingSpawn(options, env, surface, runtime, lane, operation, deadline);
+    return reconcileEntry(repaired.lane, {
+      outcome: repaired.outcome,
+      delivery: SPAWN_OUTCOME_DELIVERY.get(repaired.outcome),
+      repaired: [],
+      pendingOperation: repaired.outcome === 'spawnUnknown' ? 'spawn' : null,
+      ...(repaired.presentation ? { presentation: repaired.presentation } : {}),
+    });
+  }
+  if (operation?.type === 'steer') {
+    const observed = await reconcileSteer(options, env, surface, runtime, lane, operation, deadline);
+    return reconcileEntry({ ...lane, state: observed.lane.state }, {
+      outcome: observed.complete ? 'steerDeliveredObserved' : 'steerUnknown',
+      delivery: observed.complete ? 'confirmed' : 'unknown',
+      repaired: [],
+      pendingOperation: observed.complete ? null : 'steer',
+    });
+  }
+  if (operation?.type === 'stop') {
+    const stopped = await reconcilePendingStop(options, env, surface, runtime, lane, operation, deadline);
+    return reconcileEntry(stopped.lane, {
+      outcome: stopped.outcome,
+      delivery: stopped.outcome === 'stoppedObserved' ? 'confirmed' : 'unknown',
+      repaired: [],
+      pendingOperation: stopped.outcome === 'stopPending' ? 'stop' : null,
+    });
+  }
+  if (operation?.type === 'recover') {
+    const recovered = await observeRecovery(options, env, surface, runtime, lane, operation, deadline);
+    const outcome = recovered ? (recovered.settled || 'recoveryVerified') : 'recoveryUnknown';
+    return reconcileEntry({ ...lane, state: recovered ? recovered.lane.state : lane.state }, {
+      outcome,
+      delivery: outcome === 'recoveryVerified' ? 'confirmed' : outcome === 'recoveryNotAchieved' ? 'notDelivered' : 'unknown',
+      repaired: [],
+      pendingOperation: outcome === 'recoveryUnknown' ? 'recover' : null,
+    });
+  }
+  if (operation) {
+    throw new ClaudeTransmogrifyError('RECONCILIATION_UNCERTAIN', `unsupported pending operation ${operation.type}`);
+  }
+  if (RETIRED_STATES.has(lane.state)) {
+    return reconcileEntry(lane, { outcome: 'alreadyRetired', delivery: 'confirmed', repaired: [], pendingOperation: null });
+  }
+  return reconcileBoundLane(options, env, surface, runtime, lane, deadline);
+}
+
+// The entry for a lane whose reconciliation threw: a retryable cleanup keeps
+// its retirement pending, a contained fork is reported as such (the resume
+// this call was asked to perform did not happen), and anything else is
+// uncertain with its code and owner action.
+function reconcileFailureEntry(initial, error) {
+  if (error.code === 'CLEANUP_RETRYABLE') {
+    return {
+      laneId: initial.laneId, state: initial.state, outcome: 'cleanupRetryable', code: error.code,
+      providerRetired: true, cleanup: 'retryable', delivery: 'unknown', repaired: [], pendingOperation: 'retire',
+    };
+  }
+  if (error.code === 'FORKED_COPY' && error.details?.copiesStopped !== undefined) {
+    return {
+      laneId: initial.laneId, providerId: initial.providerId, state: 'stopped',
+      outcome: 'forkedCopyStopped', code: error.code,
+      copiesStopped: error.details.copiesStopped, ownerAction: error.details.ownerAction,
+      delivery: 'notDelivered', repaired: [], pendingOperation: null,
+    };
+  }
+  const causeCode = error.details?.causeCode;
+  const ownerAction = error.details?.ownerAction || ownerActionFor(causeCode);
+  return {
+    laneId: initial.laneId, providerId: initial.providerId, state: initial.state,
+    outcome: 'uncertain', code: error.code || 'RECONCILIATION_UNCERTAIN', error: error.message,
+    delivery: 'unknown', repaired: [], pendingOperation: null,
+    ...(causeCode ? { causeCode } : {}),
+    ...(ownerAction ? { ownerAction } : {}),
   };
 }
 
