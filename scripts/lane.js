@@ -16,6 +16,7 @@ const {
 } = require('./lib/providers');
 const { observeParentChildren, resolveDispatchLane } = require('./lib/observe');
 const { createObserverCache } = require('./lib/observer-cache');
+const { boundedInteger: sharedBoundedInteger } = require('./lib/validation');
 const { discoverClaudeWake, discoverCodexWake } = require('./lib/wake');
 const { ensureWatcher, runningWatcher, nudgeWatcher } = require('./watch');
 const { sleep } = require('./lib/async');
@@ -249,13 +250,7 @@ function providerForLane(repoRoot, laneId, env) {
 // Parse an integer option inside explicit bounds. Anything else is a usage error
 // rather than a clamped value.
 function boundedInteger(value, label, minimum, maximum, fallback) {
-  if (value === undefined) return fallback;
-  if (!/^\d+$/.test(value)) usage(`${label} must be an integer`);
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
-    usage(`${label} must be between ${minimum} and ${maximum}`);
-  }
-  return parsed;
+  return sharedBoundedInteger(value, label, minimum, maximum, fallback, usage);
 }
 
 // The public view of one dispatch, carrying its lane state or, when the lane

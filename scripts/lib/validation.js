@@ -84,7 +84,20 @@ function normalizeThreadStatus(status) {
   return { type: 'active', activeFlags: [...status.activeFlags] };
 }
 
+// A bounded non-negative integer CLI value with a fallback for an absent
+// one; `invalid` receives the usage message and must throw.
+function boundedInteger(value, label, minimum, maximum, fallback, invalid) {
+  if (value === undefined) return fallback;
+  if (!/^\d+$/.test(value)) invalid(`${label} must be an integer`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    invalid(`${label} must be between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
 module.exports = {
+  boundedInteger,
   MAX_CURSOR_BYTES,
   THREAD_ACTIVE_FLAGS,
   THREAD_STATUS_TYPES,

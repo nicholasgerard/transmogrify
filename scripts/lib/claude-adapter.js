@@ -81,7 +81,7 @@ function failReservedDispatch(dispatchEnvelope, env) {
   try { failDispatch(dispatchEnvelope.dispatch.dispatchId, 'spawn-not-registered', env); } catch { /* reported by the next observation */ }
 }
 const {
-  AdapterError, deadlineFor, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot,
+  AdapterError, deadlineFor, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot, reconcileOk,
 } = require('./adapter-kit');
 const { phaseFields } = require('./output-schema');
 const { sleep } = require('./async');
@@ -2437,13 +2437,6 @@ const SPAWN_OUTCOME_DELIVERY = new Map([
 // including forkedCopyStopped, which is a settlement of a thrown FORKED_COPY
 // and so must not read as ok despite the lane itself being left in a known,
 // stopped state.
-function reconcileOk(entries) {
-  return entries.every((entry) =>
-    entry.delivery !== 'unknown' && entry.outcome !== 'differentRuntime' &&
-    entry.outcome !== 'uncertain' && entry.code === undefined
-  );
-}
-
 // Fleet reconciliation for one lane or every Claude lane. It settles pending
 // journals by observation, records verified runtime transitions, and reports
 // each lane's outcome without replaying any provider mutation.

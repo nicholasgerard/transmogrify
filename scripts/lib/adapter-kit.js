@@ -95,7 +95,21 @@ function laneResult(operation, lane, extra = {}) {
   };
 }
 
+// One reconcile entry is settled when its delivery is known, it was
+// observed rather than skipped, and it carries no error code. A reconcile
+// result is ok when every entry is.
+function reconcileEntryOk(entry) {
+  return entry.delivery !== 'unknown' && entry.outcome !== 'differentRuntime' &&
+    entry.outcome !== 'uncertain' && entry.code === undefined && !entry.error;
+}
+
+function reconcileOk(entries) {
+  return entries.every(reconcileEntryOk);
+}
+
 module.exports = {
+  reconcileEntryOk,
+  reconcileOk,
   AdapterError,
   deadlineFor,
   executionRequest,

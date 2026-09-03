@@ -181,7 +181,11 @@ listener keeps its own configuration.
 Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 `PATH`, `TRANSMOGRIFY_URL` or `TRANSMOGRIFY_PORT` for the loopback endpoint, and
 `TRANSMOGRIFY_LOG` for an absolute owned-runtime log path. A command-line
-`--url` takes precedence over the URL environment variables.
+`--url` takes precedence over the URL environment variables. Two switches
+turn off turnkey notification mechanisms for a run: `TRANSMOGRIFY_WATCH=off`
+makes `spawn` skip starting the parent's watcher, and
+`TRANSMOGRIFY_CHILD_HOOKS=off` launches Claude children without the session
+hooks that nudge it ([docs/NOTIFICATIONS.md](NOTIFICATIONS.md)).
 
 The detached child receives a bounded allowlist containing ordinary process,
 locale, home, temp, and certificate-path settings. Ambient API keys, access

@@ -32,7 +32,7 @@ const {
 } = require('./state');
 const { AppServerClient, validateUrl } = require('./app-server');
 const {
-  AdapterError, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot,
+  AdapterError, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot, reconcileOk,
 } = require('./adapter-kit');
 const { phaseFields } = require('./output-schema');
 const { sleep } = require('./async');
@@ -2092,13 +2092,6 @@ function remainingRecoveryMs(deadline) {
 // when it was skipped rather than observed (differentRuntime), when its own
 // error could not be classified further (uncertain), or when it carries a
 // surfaced provider or local code at all -- a settled receipt never does.
-function reconcileOk(entries) {
-  return entries.every((entry) =>
-    entry.delivery !== 'unknown' && entry.outcome !== 'differentRuntime' &&
-    entry.outcome !== 'uncertain' && entry.code === undefined
-  );
-}
-
 // Reconcile one lane or the whole Codex fleet against the runtime. It repairs
 // what local state alone proves, then observes the provider for the rest,
 // never replaying an unknown mutation and never inferring creation from a title.

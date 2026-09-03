@@ -16,6 +16,8 @@
 const path = require('node:path');
 const { parseArgs } = require('node:util');
 const { validateUrl } = require('./lib/app-server');
+const { boundedInteger: sharedBoundedInteger } = require('./lib/validation');
+const { reconcileEntryOk } = require('./lib/adapter-kit');
 const { doctor } = require('./doctor');
 const codexAdapter = require('./lib/codex-adapter');
 const claudeAdapter = require('./lib/claude-adapter');
@@ -66,16 +68,8 @@ function usage(message) {
   throw error;
 }
 
-// Same small bounded-integer parser lane.js uses for its own CLI options,
-// duplicated here because lane.js does not export it.
 function boundedInteger(value, label, minimum, maximum, fallback) {
-  if (value === undefined) return fallback;
-  if (!/^\d+$/.test(value)) usage(`${label} must be an integer`);
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
-    usage(`${label} must be between ${minimum} and ${maximum}`);
-  }
-  return parsed;
+  return sharedBoundedInteger(value, label, minimum, maximum, fallback, usage);
 }
 
 function parseMaintainArgs(argv, env = process.env) {
@@ -153,15 +147,6 @@ function parseMaintainArgs(argv, env = process.env) {
   };
 }
 
-// An entry counts against a provider's `notOk` under the same rule both
-// adapters' own reconcile uses for their aggregate `ok`: a hard error or
-// other surfaced code, a still-open journal (`delivery: 'unknown'`), a lane
-// skipped rather than observed (`differentRuntime`), or an outcome that could
-// not be classified further (`uncertain`).
-function isNotOk(entry) {
-  return Boolean(entry?.error) || Boolean(entry?.code) || entry?.delivery === 'unknown' ||
-    entry?.outcome === 'differentRuntime' || entry?.outcome === 'uncertain';
-}
 
 // Run one provider's exact-owned reconcile, or explain why it did not run.
 // Never throws: a reconcile failure is folded into the returned summary so
@@ -189,13 +174,12 @@ async function reconcileProvider(target, doctorEntry, options, env, dependencies
   };
   try {
     const result = await reconcile(reconcileOptions, env);
-    const entries = Array.isArray(result?.results) ? result.results
-      : Array.isArray(result?.recovered) ? result.recovered : [];
+    const entries = Array.isArray(result?.results) ? result.results : [];
     return {
       available: true,
       reconciled: result?.ok === true,
       results: entries.length,
-      notOk: entries.filter(isNotOk).length,
+      notOk: entries.filter((entry) => !reconcileEntryOk(entry)).length,
       skipped: null,
     };
   } catch (error) {

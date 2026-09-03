@@ -12,22 +12,13 @@
 //   (b) acknowledged parent events older than the keep-days window;
 //   (c) installer backups beyond the newest keep-backups per backup root.
 //
-// (b) is deliberately not implemented. dispatch.js derives an event's id from
-// a digest of its full content, including its own per-parent sequence
-// number, and `recordEventLocked` re-scans every event file physically
-// present under a parent (acknowledged or not) to find a semantic duplicate
-// -- the same dispatch, type, observation fingerprint, and data -- before it
-// mints a new one. That is how a crash-and-retry avoids notifying a parent
-// twice. Reaping an acknowledged event file makes that match
-// retention-timing-dependent: the exact same fingerprint recurring after its
-// evidence was reaped would silently mint a new event and a new sequence
-// number instead of resolving to the historical one, purely because
-// retention happened to run in between. dispatch.js exports no per-parent
-// pruning primitive that already accounts for this, and dispatch.js is
-// outside this change's edit scope, so this pass reports `events` as an
-// honest `{ candidates: 0, moved: 0 }` rather than reimplement dispatch.js's
-// private directory layout, validation, and locking from the outside.
-// See the accompanying report for the full analysis.
+// (b) is reported but never moved. An event's id is the digest of its
+// content including its per-parent sequence, and recording re-scans every
+// event file under a parent (acknowledged or not) to find a semantic
+// duplicate before minting a new one; that is what keeps a crash-and-retry
+// from notifying a parent twice. Reaping acknowledged events would make that
+// match depend on retention timing, so `events` stays `{ candidates: 0,
+// moved: 0 }` until dispatch.js offers a pruning primitive of its own.
 
 const fs = require('node:fs');
 const os = require('node:os');
