@@ -425,6 +425,10 @@ local record removal then continues.
   execution-setting, recommendation, receipt, and recovery contract.
 - [Dispatch and parent notification](docs/DISPATCH.md): lineage, visible
   provenance, durable child events, waiting, acknowledgement, and restart.
+- [Child notifications](docs/NOTIFICATIONS.md): the watcher, wake channels,
+  event kinds, and the cost model.
+- [Onboarding brief](docs/ONBOARDING.md): the specification and implementation
+  plan for setup that works wherever the start prompt lands (queued).
 - [Troubleshooting](docs/TROUBLESHOOTING.md): setup failures, runtime safety,
   upgrade/rollback, and cleanup recovery.
 - [Roadmap](ROADMAP.md): launch gate and forward priorities.
