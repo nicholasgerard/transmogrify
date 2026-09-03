@@ -8,41 +8,41 @@
     "maxStyleRawBytes": 65536
   },
   "deploy": {
-    "rawBytes": 228290
+    "rawBytes": 237919
   },
   "routes": {
     "/404": {
-      "rawBytes": 31299,
-      "gzipBytes": 8095,
-      "brotliBytes": 6858,
-      "jsBrotliBytes": 758,
+      "rawBytes": 33732,
+      "gzipBytes": 9122,
+      "brotliBytes": 7727,
+      "jsBrotliBytes": 1359,
       "cssBrotliBytes": 3640,
       "mediaRawBytes": 0,
       "requests": 4
     },
     "/": {
-      "rawBytes": 73349,
-      "gzipBytes": 15795,
-      "brotliBytes": 13497,
-      "jsBrotliBytes": 758,
+      "rawBytes": 75782,
+      "gzipBytes": 16785,
+      "brotliBytes": 14366,
+      "jsBrotliBytes": 1359,
       "cssBrotliBytes": 6163,
       "mediaRawBytes": 0,
       "requests": 4
     },
     "/privacy": {
-      "rawBytes": 41672,
-      "gzipBytes": 12198,
-      "brotliBytes": 10163,
-      "jsBrotliBytes": 758,
+      "rawBytes": 44105,
+      "gzipBytes": 13152,
+      "brotliBytes": 11012,
+      "jsBrotliBytes": 1359,
       "cssBrotliBytes": 3844,
       "mediaRawBytes": 0,
       "requests": 4
     },
     "/terms": {
-      "rawBytes": 39202,
-      "gzipBytes": 11183,
-      "brotliBytes": 9310,
-      "jsBrotliBytes": 758,
+      "rawBytes": 41635,
+      "gzipBytes": 12180,
+      "brotliBytes": 10172,
+      "jsBrotliBytes": 1359,
       "cssBrotliBytes": 3844,
       "mediaRawBytes": 0,
       "requests": 4
