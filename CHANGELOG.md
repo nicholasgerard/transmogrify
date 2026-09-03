@@ -15,6 +15,11 @@
   children are skipped; the watcher exits fifteen minutes after the last
   child settled. A Codex wake now reads the newest turn (the oldest was
   being consulted) before choosing between steer and start.
+- Cheaper reads: a long-running observer (the watcher, one `wait`) measures
+  the Claude runtime once per CLI file and reads the census once per round
+  (`lib/observer-cache.js`), shares one loopback connection per round for
+  Codex reads, and subscribes to the app-server's notifications so an
+  outstanding Codex child is read the moment the runtime reports a change.
 
 ## 0.3.1
 

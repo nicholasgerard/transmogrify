@@ -152,11 +152,16 @@ under 0.1 s; one registry or journal read about 20 ms. The levers, all in
 place: one wake per round instead of one per event; the parent's own
 completed commands acknowledged at observation; polling only while a child
 is working, with idle children read on the parent's nudge; settled children
-skipped; a short idle exit. Still open, in order of payoff: reuse the
-runtime measurement and census across a round instead of per child;
-subscribe to the app-server's own notifications for Codex children instead
-of polling; let a Claude child signal its turn end through a session hook
-(`--settings` on spawn) so the watcher reads it only then.
+skipped; a short idle exit; one runtime measurement and one census per
+round instead of per child (`lib/observer-cache.js`, the memo follows the
+CLI file and ages out after ten minutes), and one shared loopback
+connection per round for Codex reads; a subscription to the app-server's
+own notifications (`thread/status/changed`, `turn/started`,
+`turn/completed`, `item/completed`, `thread/archived`) that makes the
+watcher read an outstanding Codex child the moment the runtime reports a
+change, while polling stays as the safety net. Still open: let a Claude
+child signal its turn end through a session hook (`--settings` on spawn)
+so the watcher reads it only then; to be verified live before it ships.
 
 ## Receipts and open experiments
 

@@ -49,7 +49,7 @@ test('ensureWatcher starts one detached watcher per parent and reuses a live one
   const { fixture, context } = parentWithChild(t);
   const launches = [];
   const alive = new Set([4242]);
-  const deps = { ...processTable(alive), spawnDetached: (executable, args) => { launches.push({ executable, args }); return 4242; } };
+  const deps = { subscription: null, ...processTable(alive), spawnDetached: (executable, args) => { launches.push({ executable, args }); return 4242; } };
   const first = ensureWatcher(context.file, { repoRoot: fixture.repoRoot }, fixture.env, deps);
   assert.deepEqual(first, { running: true, started: true, pid: 4242 });
   assert.equal(launches.length, 1);
@@ -144,7 +144,7 @@ test('outstanding children are those with pending events or lanes still running'
 test('runWatcher records itself, runs bounded rounds, and reports through --status', async (t) => {
   const { fixture, context, dispatch } = parentWithChild(t);
   const observe = async () => ({ dispatches: [dispatch], errors: [], observed: [{ dispatchId: dispatch.dispatchId, phase: 'working' }] });
-  const deps = { observe, deliver: async () => ({ delivered: true }), processBirth: () => 'birth', sleep: async () => {}, maxRounds: 2 };
+  const deps = { subscription: null, observe, deliver: async () => ({ delivered: true }), processBirth: () => 'birth', sleep: async () => {}, maxRounds: 2 };
   const result = await runWatcher({ parentContextFile: context.file, idleExitMs: 1 }, fixture.env, deps);
   assert.equal(result.operation, 'watch');
   assert.equal(result.outcome, 'roundsExhausted');
@@ -161,7 +161,7 @@ test('--stop signals only a watcher whose recorded birth still matches and clear
   require('node:fs').writeFileSync(paths.record, JSON.stringify({ pid: 4343, processBirth: 'birth', parentRef: context.parent.parentRef }));
   const signals = [];
   const alive = new Set([4343]);
-  const deps = {
+  const deps = { subscription: null,
     kill: (pid, signal) => {
       if (!alive.has(pid)) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
       if (signal === 'SIGTERM') { signals.push(pid); alive.delete(pid); }
@@ -233,4 +233,45 @@ test('a refused wake is retried on later rounds a bounded number of times; an un
   const first = await watchOnce(uncertainChild.context, {}, uncertainChild.fixture.env, otherState, { observe: observeOther, deliver: uncertain });
   assert.deepEqual(first.wakes.map((wake) => wake.code), ['WAKE_UNCERTAIN']);
   assert.equal(otherState.wakedEventIds.length, 1, 'a wake that may have landed is never resent');
+});
+
+test('a Codex notification for an outstanding child triggers an early read; foreign threads and other methods do not', async () => {
+  const { EventEmitter } = require('node:events');
+  const clients = [];
+  const subscriptionClient = (config) => {
+    const client = new EventEmitter();
+    client.config = config;
+    client.verifiedRuntime = true;
+    client.connect = async () => ({ userAgent: 'codex_cli_rs/0.151.0' });
+    client.close = () => client.emit('connection/closed');
+    clients.push(client);
+    return client;
+  };
+  const { createCodexSubscription } = require('../scripts/watch');
+  const subscription = createCodexSubscription('ws://127.0.0.1:1/', { subscriptionClient, reconnectMs: 10 });
+  await subscription.start();
+  assert.equal(subscription.connected(), true);
+  assert.equal(clients[0].config.clientInfo.name, 'transmogrify-watch');
+  subscription.watch(['thread-mine']);
+  clients[0].emit('notification', { method: 'turn/completed', params: { threadId: 'thread-foreign', turn: { id: 't' } } });
+  assert.equal(subscription.pending(), false, 'a foreign thread never triggers');
+  clients[0].emit('notification', { method: 'item/started', params: { threadId: 'thread-mine' } });
+  assert.equal(subscription.pending(), false, 'an item start is not a trigger');
+  clients[0].emit('notification', { method: 'turn/completed', params: { threadId: 'thread-mine', turn: { id: 't' } } });
+  assert.equal(subscription.pending(), true);
+  assert.equal(subscription.consume(), true);
+  assert.equal(subscription.pending(), false);
+  clients[0].emit('notification', { method: 'thread/status/changed', params: { thread: { id: 'thread-mine' }, status: { type: 'idle' } } });
+  assert.equal(subscription.pending(), true);
+
+  // A dropped connection reconnects on its timer; stop ends it.
+  clients[0].close();
+  assert.equal(subscription.connected(), false);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(clients.length, 2, 'reconnected once');
+  assert.equal(subscription.connected(), true);
+  subscription.stop();
+  assert.equal(subscription.connected(), false);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(clients.length, 2, 'no reconnect after stop');
 });

@@ -15,7 +15,10 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { parseArgs } = require('node:util');
 const { countEvents, listEvents, loadParentContext, pathsFor } = require('./lib/dispatch');
-const { observeParentChildren, outstandingDispatches } = require('./lib/observe');
+const { observeParentChildren, outstandingDispatches, resolveDispatchLane } = require('./lib/observe');
+const { createObserverCache } = require('./lib/observer-cache');
+const { AppServerClient, validateUrl } = require('./lib/app-server');
+const { VERSION } = require('./lib/version');
 const { processBirth, processMatches } = require('./lib/state');
 const { deliverWake, wakeMessage } = require('./lib/wake');
 const { sleep } = require('./lib/async');
@@ -38,6 +41,13 @@ const WAKE_KINDS = new Set(['complete', 'attention', 'terminal']);
 // rounds this many times; a wake that may have landed is never resent.
 const MAX_WAKE_ATTEMPTS = 3;
 const MAX_LOG_BYTES = 1024 * 1024;
+// The app-server pushes these to every connected client; any of them naming
+// an outstanding Codex child makes the watcher read that child at once
+// instead of at its next poll.
+const CODEX_TRIGGER_NOTIFICATIONS = new Set([
+  'thread/status/changed', 'turn/started', 'turn/completed', 'item/completed', 'thread/archived',
+]);
+const SUBSCRIPTION_RECONNECT_MS = 30_000;
 
 const HELP = `usage: watch.js --parent-context-file <absolute> [options]
 
@@ -90,16 +100,93 @@ function nudgeStamp(paths) {
   try { return fs.statSync(paths.nudge).mtimeMs; } catch { return null; }
 }
 
-// Sleep for the poll interval, returning early when the nudge file changes.
-async function sleepUntilNudged(ms, paths, dependencies) {
-  const wait = dependencies.sleep || sleep;
+// Sleep for the poll interval, returning early when the nudge file changes
+// or an in-process trigger (a provider notification) fires.
+async function sleepUntilNudged(ms, paths, dependencies, triggers = null) {
+  if (triggers && triggers.pending()) return true;
+  if (dependencies.sleep) {
+    // An injected sleep stands for the whole interval (tests skip time).
+    await dependencies.sleep(ms);
+    return nudgeStamp(paths) !== null || Boolean(triggers && triggers.pending());
+  }
   const before = nudgeStamp(paths);
   const end = Date.now() + ms;
   while (Date.now() < end) {
-    await wait(Math.min(NUDGE_CHECK_MS, Math.max(0, end - Date.now())));
+    await sleep(Math.min(NUDGE_CHECK_MS, Math.max(0, end - Date.now())));
     if (nudgeStamp(paths) !== before) return true;
+    if (triggers && triggers.pending()) return true;
   }
   return false;
+}
+
+// A subscription to the app-server's notifications for one endpoint. It
+// only marks a trigger when a notification names a thread the watcher
+// currently owns as an outstanding child; the verified read still happens
+// through the normal observation path. A dropped connection is retried on a
+// timer and never fails the watcher: polling continues meanwhile.
+function createCodexSubscription(url, dependencies = {}) {
+  const createClient = dependencies.subscriptionClient || ((config) => new AppServerClient(config));
+  const state = { client: null, threadIds: new Set(), triggered: false, connectedAt: null, failures: 0, timer: null, stopped: false };
+  const threadIdOf = (params) => params?.threadId || params?.thread?.id || params?.turn?.threadId || null;
+  async function connect() {
+    if (state.stopped || state.client) return;
+    const client = createClient({
+      url, timeoutMs: 20000, clientInfo: { name: 'transmogrify-watch', title: 'transmogrify watch', version: VERSION },
+    });
+    try {
+      await client.connect();
+      if (!client.verifiedRuntime) { client.close(); throw Object.assign(new Error('unverified runtime'), { code: 'UNVERIFIED_RUNTIME' }); }
+    } catch {
+      state.failures += 1;
+      schedule();
+      return;
+    }
+    state.client = client;
+    state.connectedAt = Date.now();
+    client.on('notification', ({ method, params }) => {
+      if (!CODEX_TRIGGER_NOTIFICATIONS.has(method)) return;
+      const threadId = threadIdOf(params);
+      if (threadId && state.threadIds.has(threadId)) state.triggered = true;
+    });
+    client.once('connection/closed', () => {
+      state.client = null;
+      schedule();
+    });
+  }
+  function schedule() {
+    if (state.stopped || state.timer) return;
+    state.timer = setTimeout(() => { state.timer = null; connect(); }, dependencies.reconnectMs ?? SUBSCRIPTION_RECONNECT_MS);
+    state.timer.unref?.();
+  }
+  return {
+    url,
+    start: connect,
+    watch(threadIds) { state.threadIds = new Set(threadIds); },
+    pending() { return state.triggered; },
+    consume() { const was = state.triggered; state.triggered = false; return was; },
+    connected() { return Boolean(state.client); },
+    stop() {
+      state.stopped = true;
+      if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+      const client = state.client;
+      state.client = null;
+      if (client) { try { client.close(); } catch { /* already closed */ } }
+    },
+  };
+}
+
+// Provider ids of the outstanding Codex children on one endpoint, for the
+// subscription's allow-list.
+function codexThreadIds(outstanding, env) {
+  const ids = [];
+  for (const dispatch of outstanding) {
+    if (dispatch.child.targetProvider !== 'codex') continue;
+    try {
+      const lane = resolveDispatchLane(dispatch, env).lane;
+      if (lane?.providerId) ids.push(lane.providerId);
+    } catch { /* not an owned lane right now */ }
+  }
+  return ids;
 }
 
 function readRecord(file) {
@@ -192,6 +279,10 @@ async function watchOnce(context, values, env, state, dependencies = {}) {
   state.wakeAttempts = state.wakeAttempts || {};
   const outstanding = outstandingDispatches(context, env)
     .filter((dispatch) => !values['repo-root'] || dispatch.child.repoRoot === values['repo-root']);
+  if (dependencies.subscription) {
+    dependencies.subscription.watch(codexThreadIds(outstanding, env));
+    dependencies.subscription.consume();
+  }
   const round = await observe(context, { ...values, dispatches: outstanding }, env, Date.now() + OBSERVATION_ROUND_MS);
   const events = listEvents(context, {}, env);
   const fresh = events.filter((event) => WAKE_KINDS.has(event.kind) && !state.wakedEventIds.includes(event.eventId));
@@ -238,6 +329,7 @@ async function watchOnce(context, values, env, state, dependencies = {}) {
   return {
     observed: round.observed.length, errors: round.errors, wakes: results, working,
     outstanding: outstanding.length, acknowledged,
+    codexOutstanding: outstanding.filter((dispatch) => dispatch.child.targetProvider === 'codex').length,
   };
 }
 
@@ -261,7 +353,15 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
   };
   writeRecord(paths, state);
   appendLog(paths, `start pid=${process.pid} wake=${context.parent.wake?.channel ?? 'none'}`);
-  const values = { url: options.url, 'claude-bin': options.claudeBin, 'repo-root': options.repoRoot };
+  const cache = dependencies.cache || createObserverCache({ createClient: dependencies.createClient, claudeSurface: dependencies.claudeSurface });
+  const values = {
+    url: options.url, 'claude-bin': options.claudeBin, 'repo-root': options.repoRoot,
+    surface: cache.surface, clientFactory: cache.clientFactory,
+  };
+  const subscriptionUrl = validateUrl(options.url || env.TRANSMOGRIFY_URL || `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
+  const subscription = dependencies.subscription === null ? null
+    : dependencies.subscription || createCodexSubscription(subscriptionUrl, dependencies);
+  const roundDependencies = { ...dependencies, subscription };
   const idleExitMs = options.idleExitMs ?? DEFAULT_IDLE_EXIT_MS;
   const maxRounds = dependencies.maxRounds ?? Infinity;
   let idleSince = null;
@@ -281,11 +381,12 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
       break;
     }
     let pass;
+    cache.beginRound();
     try {
-      pass = await watchOnce(context, values, env, state, dependencies);
+      pass = await watchOnce(context, values, env, state, roundDependencies);
     } catch (error) {
       appendLog(paths, `observation failed ${error.code || error.message}`);
-      pass = { observed: 0, errors: [{ code: error.code || 'OBSERVATION_FAILED' }], wakes: [], working: false, outstanding: 1, acknowledged: 0 };
+      pass = { observed: 0, errors: [{ code: error.code || 'OBSERVATION_FAILED' }], wakes: [], working: false, outstanding: 1, acknowledged: 0, codexOutstanding: 0 };
     }
     state.rounds += 1;
     state.wakes += pass.wakes.filter((wake) => wake.delivered).length;
@@ -295,15 +396,19 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
     if (pass.acknowledged) appendLog(paths, `acknowledged ${pass.acknowledged} own-command event(s)`);
     for (const failure of pass.errors) appendLog(paths, `observer error ${failure.code} dispatch=${failure.dispatchId || '-'}`);
     writeRecord(paths, { ...state, lastRoundAt: new Date().toISOString(), unacknowledged: countEvents(context, {}, env) });
+    cache.endRound();
     if (pass.outstanding === 0) {
       idleSince = idleSince ?? Date.now();
       if (Date.now() - idleSince >= idleExitMs) break;
     } else {
       idleSince = null;
+      if (subscription && !subscription.connected() && pass.codexOutstanding > 0) subscription.start();
     }
     const interval = pass.working ? ACTIVE_POLL_MS : pass.outstanding > 0 ? QUIET_POLL_MS : SETTLED_POLL_MS;
-    await sleepUntilNudged(interval, paths, dependencies);
+    await sleepUntilNudged(interval, paths, dependencies, subscription);
   }
+  if (subscription) subscription.stop();
+  cache.forget();
   if (stopping) outcome = 'signalled';
   else if (state.rounds >= maxRounds) outcome = 'roundsExhausted';
   if (!dependencies.noSignals) {
@@ -391,7 +496,9 @@ if (require.main === module) {
 
 module.exports = {
   ACTIVE_POLL_MS,
+  CODEX_TRIGGER_NOTIFICATIONS,
   HELP,
+  createCodexSubscription,
   QUIET_POLL_MS,
   SETTLED_POLL_MS,
   ensureWatcher,

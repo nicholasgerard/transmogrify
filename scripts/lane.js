@@ -15,6 +15,7 @@ const {
   PROVIDER_FLAGS, PROVIDERS, TARGETS, providerForBackend, providerForTarget, targetsAccepting,
 } = require('./lib/providers');
 const { observeParentChildren, resolveDispatchLane } = require('./lib/observe');
+const { createObserverCache } = require('./lib/observer-cache');
 const { discoverClaudeWake, discoverCodexWake } = require('./lib/wake');
 const { ensureWatcher, runningWatcher, nudgeWatcher } = require('./watch');
 const { sleep } = require('./lib/async');
@@ -291,7 +292,12 @@ async function waitForParentEvent(context, values, env) {
   if (!WAIT_THRESHOLDS.includes(until)) usage(`--until must be one of: ${WAIT_THRESHOLDS.join(', ')}`);
   const deadline = Date.now() + timeoutMs;
   const project = values['repo-root'] ? resolveProject(values['repo-root']) : null;
-  const observationValues = project ? { ...values, 'repo-root': project.root } : values;
+  // One runtime measurement and one census per round for the whole wait.
+  const cache = createObserverCache();
+  const observationValues = {
+    ...(project ? { ...values, 'repo-root': project.root } : values),
+    surface: cache.surface, clientFactory: cache.clientFactory,
+  };
   const projectKey = project ? digest(project.commonDir) : undefined;
   const eventOptions = { after, projectKey };
   const result = (events, observed) => ({
@@ -316,9 +322,12 @@ async function waitForParentEvent(context, values, env) {
     }
     throw expired(0, events.length);
   }
+  try {
   for (;;) {
     const roundDeadline = Math.max(Date.now() + 100, Math.min(deadline, Date.now() + OBSERVATION_ROUND_MS));
+    cache.beginRound();
     const observed = await observeParentChildren(context, observationValues, env, roundDeadline);
+    cache.endRound();
     const events = listEvents(context, eventOptions, env);
     if (events.some((event) => kindSatisfies(event.kind, until))) return result(events, observed);
     if (observed.errors.length > 0) {
@@ -332,6 +341,9 @@ async function waitForParentEvent(context, values, env) {
     }
     if (Date.now() >= deadline) throw expired(observed.dispatches.length, events.length);
     await sleep(Math.min(1000, deadline - Date.now()));
+  }
+  } finally {
+    cache.forget();
   }
 }
 
