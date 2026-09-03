@@ -25,9 +25,8 @@ const rendered = await Promise.all(
       <p class="eyebrow">For Claude and ChatGPT</p>
       <h1 id="hero-title">Your coding agents, working as a team.</h1>
       <p class="lede hero-lede">
-        One skill for Claude Code and Codex. Install it and either app can put
-        the other to work — each job in <em>its own worktree</em>, visible in the
-        desktop and mobile apps you already have open.
+        Open-source agent orchestration built directly into the
+        <em>ChatGPT and Claude apps</em>.
       </p>
 
       <StartPrompt />
@@ -144,7 +143,10 @@ const rendered = await Promise.all(
 
   .hero-lede {
     text-align: center;
-    max-inline-size: 58ch;
+    /* Wide enough to hold the one-sentence lede on a single line at desktop
+       widths; it wraps normally once the viewport is narrower than it. */
+    max-inline-size: 70ch;
+    text-wrap: pretty;
     margin-block-end: var(--s-2);
   }
 

@@ -72,7 +72,7 @@ function ogHtml(pins) {
   .mark { font-size: 30px; font-weight: 600; letter-spacing: -.03em; }
   h1 {
     position: relative; font-size: 66px; line-height: 1.1; font-weight: 600;
-    letter-spacing: -.045em; max-width: 17ch;
+    letter-spacing: -.045em; max-width: 19ch;
   }
   h1 em { font-style: normal; color: ${ACCENT}; }
   .sub { position: relative; color: ${MUTED}; font-size: 24px; line-height: 1.5; max-width: 44ch; margin-top: 22px; }
@@ -86,8 +86,8 @@ function ogHtml(pins) {
 </style>
 <div class="row">${glyph(34)}<span class="mark">transmogrify</span></div>
 <div>
-  <h1>One lifecycle for <em>exact-owned</em> agent lanes.</h1>
-  <p class="sub">Codex and Claude Code lanes, seated in their own worktrees, visible in the native apps where receipted, never adopted by name.</p>
+  <h1>Your coding agents, working as a <em>team</em>.</h1>
+  <p class="sub">Open-source agent orchestration built directly into the ChatGPT and Claude apps.</p>
 </div>
 <div class="row" style="justify-content:space-between;align-items:flex-end">
   <div class="pins">${pins.map((p) => `<span class="pin">${p[0]} <b>${p[1]}</b></span>`).join('')}</div>
@@ -139,9 +139,9 @@ async function main() {
   }
 
   const pins = [
-    ['providers', 'codex + claude code'],
-    ['lifecycle', '8 exact-owned verbs'],
-    ['runtime deps', '1'],
+    ['hosts', 'claude code + codex'],
+    ['seats', 'a worktree per job'],
+    ['deps', '1'],
   ];
 
   await mkdir(publicDir, { recursive: true });
