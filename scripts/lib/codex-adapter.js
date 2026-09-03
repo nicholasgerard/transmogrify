@@ -20,6 +20,7 @@ const {
   listOperations,
   pendingOperationForLane,
   repairUnstartedSpawn,
+  rebindCodexRuntimeEndpoint,
   requireOwnedLane,
   requireOwnedProviderLane,
   settleTerminalLaneOperationPointer,
@@ -1061,6 +1062,51 @@ async function inspectThread(client, lane) {
   return { thread, turn, phase: phaseFor(thread, turn) };
 }
 
+// A lane bound on another endpoint is moved to the connected one only when
+// the runtime identifies itself as the same Codex home on the same platform
+// and the lane's thread is readable there at the reserved seat; the registry
+// then records the new endpoint (state.js rebindCodexRuntimeEndpoint). Any
+// other runtime, or an unreadable thread, is reported as a different runtime
+// and nothing is written.
+async function rebindEndpointMove(options, initial, client, env) {
+  const lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
+  const entry = {
+    laneId: lane.laneId,
+    providerId: lane.providerId,
+    state: lane.state,
+    outcome: 'differentRuntime',
+    delivery: 'unknown',
+    repaired: [],
+    pendingOperation: pendingOperationForLane(options.repoRoot, lane.laneId, env)?.type ?? null,
+  };
+  const identity = client.runtimeIdentity;
+  const sameIdentity = ['codexHome', 'platformFamily', 'platformOs'].every((key) =>
+    lane.runtime?.[key] !== undefined && lane.runtime[key] === identity?.[key]
+  );
+  if (!sameIdentity || !lane.providerId || lane.state === 'worktreeRemoved') return entry;
+  let inspected;
+  try {
+    inspected = await inspectThread(client, lane);
+  } catch (error) {
+    // The runtime answered but does not hold this thread at the reserved
+    // seat: not a move. Transport failures propagate as they do elsewhere.
+    if (['RPC_ERROR', 'PROTOCOL_ERROR', 'OWNERSHIP_MISMATCH'].includes(error?.code)) {
+      return { ...entry, causeCode: error.code };
+    }
+    throw error;
+  }
+  const rebound = rebindCodexRuntimeEndpoint(options.repoRoot, lane.laneId, identity, env);
+  return {
+    ...entry,
+    state: rebound.state,
+    phase: inspected.phase,
+    providerPhase: inspected.thread.status?.type ?? null,
+    outcome: 'runtimeRebound',
+    delivery: 'confirmed',
+    repaired: ['runtimeEndpoint'],
+  };
+}
+
 // Map an observed phase onto a lane state. Retirement states are sticky: an
 // observation never walks a lane back out of retirement.
 function observedLaneState(lane, phase) {
@@ -2072,10 +2118,10 @@ async function recover(options, env = process.env) {
       throw new TransmogrifyError('ADAPTER_MISMATCH', `lane ${exact.laneId} uses ${exact.backend}`);
     }
     // A reservation that never bound a runtime has no endpoint to compare; its
-    // local crash repair below needs no provider at all.
-    if (exact.runtime?.endpoint && exact.runtime.endpoint !== endpoint) {
-      throw new TransmogrifyError('RUNTIME_MISMATCH', `lane ${exact.laneId} is owned on another runtime endpoint`);
-    }
+    // local crash repair below needs no provider at all. A lane bound on
+    // another endpoint is checked against the connected runtime's identity
+    // below: the same Codex home and platform is a repairable endpoint move,
+    // anything else stays RUNTIME_MISMATCH.
     lanes = [exact];
   } else {
     lanes = listLanes(options.repoRoot, env).filter((lane) =>
@@ -2085,31 +2131,18 @@ async function recover(options, env = process.env) {
   const operations = new Map(listOperations(options.repoRoot, env).map((entry) => [entry.operationId, entry]));
   const localResults = [];
   const providerLanes = [];
+  const endpointMoves = [];
   for (const initial of lanes) {
     if (initial.runtime?.endpoint && initial.runtime.endpoint !== endpoint) {
-      // Claude repairs an identity-matching runtime transition here instead of
-      // skipping (rebindClaudeRuntime in state.js). Lane.runtime is an
-      // immutable field for every backend once bound (state.js updateLane and
-      // bindLaneProvider both refuse a runtime patch that differs from the
-      // recorded one), and there is no Codex-side primitive analogous to
-      // rebindClaudeRuntime to permit an endpoint-only change, so this stays a
-      // skip pending that state.js addition (ROADMAP.md priority 2).
-      localResults.push({
-        laneId: initial.laneId,
-        providerId: initial.providerId,
-        state: initial.state,
-        outcome: 'differentRuntime',
-        delivery: 'unknown',
-        repaired: [],
-        pendingOperation: pendingOperationForLane(options.repoRoot, initial.laneId, env)?.type ?? null,
-      });
+      // Decided once the client is connected, from the runtime's own identity.
+      endpointMoves.push(initial);
       continue;
     }
     const repaired = await repairLocalRecoveryState(options, initial, operations, env);
     if (repaired) localResults.push(repaired);
     else providerLanes.push(initial);
   }
-  if (providerLanes.length === 0) {
+  if (providerLanes.length === 0 && endpointMoves.length === 0) {
     return {
       version: 1,
       ok: reconcileOk(localResults),
@@ -2132,6 +2165,15 @@ async function recover(options, env = process.env) {
       );
     }
     const recovered = [...localResults];
+    for (const initial of endpointMoves) {
+      const moved = await withLaneLease(options.repoRoot, initial.laneId, () =>
+        rebindEndpointMove(options, initial, client, env)
+      );
+      if (moved.outcome === 'differentRuntime' && options.laneId) {
+        throw new TransmogrifyError('RUNTIME_MISMATCH', `lane ${initial.laneId} is owned on another runtime endpoint`);
+      }
+      recovered.push(moved);
+    }
     for (const initial of providerLanes) {
       try {
         const result = await withLaneLease(options.repoRoot, initial.laneId, async () => {

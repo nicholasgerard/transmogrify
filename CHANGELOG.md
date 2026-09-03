@@ -24,6 +24,19 @@
   (`spawnInputAbsent`) after a bounded grace period and settles a steer
   left unknown from its `clientUserMessageId` receipt (`steerInputReceipt`,
   `steerInputAbsent`); steers now carry that id.
+- One reconcile result shape for both adapters: `results[]` entries carry
+  `state`, `phase`, `providerPhase`, `outcome`, `delivery`, `repaired`,
+  and `pendingOperation`, `receipt.providerConnection` says whether the
+  provider was consulted, and `ok` is computed from the same keys on both
+  sides; a forked Claude copy that had to be stopped is no longer reported
+  as ok. Exit code 2 is reserved for safe deferrals (cleanup retryable,
+  retirement pending, different runtime), 3 for everything else.
+- A Codex runtime endpoint change is a repairable transition: `recover`
+  moves a lane bound on another endpoint to the connected one when the
+  runtime identifies itself as the same Codex home on the same platform and
+  the lane's thread is readable at its reserved seat (`runtimeRebound`,
+  `repaired: ['runtimeEndpoint']`); any other runtime, or an unreadable
+  thread, is still reported as `differentRuntime` and nothing is written.
 - Every Claude adapter deadline reads the injected clock; the timing tests
   advance a fake clock instead of waiting.
 - `scripts/maintain.js`: a bounded maintenance runner (doctor plus each

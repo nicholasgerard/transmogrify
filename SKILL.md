@@ -324,6 +324,11 @@ was explicitly authorized for this run.
   be `idle`). Claude `recover` runs `--resume` on the exact session; when the
   pinned CLI forks instead, the adapter stops that copy and the lane stays
   stopped (`forkedCopyStopped`).
+- A Codex lane bound on another runtime endpoint is moved to the selected
+  one by `recover` when that runtime serves the same Codex home on the same
+  platform and the thread is readable at the reserved seat
+  (`runtimeRebound`); otherwise it is reported `differentRuntime` and
+  nothing is written.
 - A Codex thread whose first turn has no receipt keeps its spawn journal
   open and the parent receives `child.needs-attention` until the input has
   been absent for the grace period (60 s by default); reconciliation then

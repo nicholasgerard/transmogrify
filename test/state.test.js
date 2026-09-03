@@ -33,6 +33,7 @@ const {
   resolveProject,
   rebindClaudeRuntime,
   registerLane,
+  rebindCodexRuntimeEndpoint,
   releaseLock,
   reserveSpawn,
   requireOwnedLane,
@@ -1321,4 +1322,61 @@ test('a spawn reservation records its launcher and the crash repair spares a liv
     lane: { laneId: explicitLane, backend: 'codex-app-server', displayName: '[test] explicit launcher', operationId: explicitOp, seatIntent: { ...seatIntent, laneId: explicitLane, path: '/tmp/transmogrify-worktrees/explicit', branchRef: 'refs/heads/transmogrify/explicit' } },
   }, fixture.env);
   assert.deepEqual(explicit.operation.details.spawner, { pid: 4242, processBirth: 'x' });
+});
+
+test('a bound Codex lane rebinds only its runtime endpoint, never its identity', (t) => {
+  const fixture = createStateFixture(t);
+  const runtime = {
+    endpoint: 'ws://127.0.0.1:8843/',
+    codexHome: '/tmp/codex-home',
+    platformFamily: 'unix',
+    platformOs: 'test',
+  };
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'thread-moved',
+    displayName: '[test] moved runtime',
+    state: 'idle',
+    runtime,
+  }, fixture.env);
+
+  const rebound = rebindCodexRuntimeEndpoint(
+    fixture.repoRoot, lane.laneId, { ...runtime, endpoint: 'ws://127.0.0.1:8844/' }, fixture.env,
+  );
+  assert.deepEqual(rebound.runtime, { ...runtime, endpoint: 'ws://127.0.0.1:8844/' });
+  assert.equal(rebound.providerId, 'thread-moved');
+  assert.equal(rebound.state, 'idle');
+  assert.equal(
+    requireOwnedLane(fixture.repoRoot, lane.laneId, fixture.env).runtime.endpoint,
+    'ws://127.0.0.1:8844/',
+  );
+  // Rebinding to the recorded endpoint is a no-op.
+  assert.equal(rebindCodexRuntimeEndpoint(
+    fixture.repoRoot, lane.laneId, { ...runtime, endpoint: 'ws://127.0.0.1:8844/' }, fixture.env,
+  ).updatedAt, rebound.updatedAt);
+
+  for (const key of ['codexHome', 'platformFamily', 'platformOs']) {
+    assert.throws(() => rebindCodexRuntimeEndpoint(
+      fixture.repoRoot, lane.laneId, { ...runtime, endpoint: 'ws://127.0.0.1:8845/', [key]: 'other' }, fixture.env,
+    ), new RegExp(`identity changed \\(${key}\\)`));
+  }
+  assert.throws(() => rebindCodexRuntimeEndpoint(
+    fixture.repoRoot, lane.laneId, { endpoint: 'ws://127.0.0.1:8845/' }, fixture.env,
+  ), /Codex runtime identity/);
+  assert.throws(() => rebindCodexRuntimeEndpoint(
+    fixture.repoRoot, lane.laneId, { ...runtime, endpoint: '' }, fixture.env,
+  ), /non-empty string/);
+
+  const unbound = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'thread-unbound-runtime',
+    displayName: '[test] no runtime',
+    state: 'idle',
+  }, fixture.env);
+  assert.throws(() => rebindCodexRuntimeEndpoint(
+    fixture.repoRoot, unbound.laneId, { ...runtime, endpoint: 'ws://127.0.0.1:8845/' }, fixture.env,
+  ), /no bound Codex runtime/);
+  assert.throws(() => rebindCodexRuntimeEndpoint(
+    fixture.repoRoot, 'lane-missing', runtime, fixture.env,
+  ), /not owned/);
 });

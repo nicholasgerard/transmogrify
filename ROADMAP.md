@@ -231,15 +231,6 @@ reconcile.
 - Make a Codex steer reconcilable. Codex has no steer receipt to observe, so a
   crashed steer journal can only be abandoned; record the `turn/steer`
   response or the resulting turn item so recovery can settle it.
-- Unify the reconcile result shape: Codex reports `delivery` and
-  `repaired[]`, Claude reports `outcome`, and `ok` is computed on different
-  keys; `forkedCopyStopped` keeps `ok:true` although it came from a thrown
-  `FORKED_COPY`.
-- Treat a Codex runtime endpoint change like Claude's identity-matching
-  runtime transition instead of refusing or skipping the lane.
-- Inject the clock into the Claude command deadline as well as the dispatch
-  windows, so the reconcile test that needs a 3 s real deadline on loaded
-  runners becomes deterministic.
 - Retire the test-only state primitives (`reserveLane`,
   `bindClaudeProviderIdentity`, `bindLaneProviderBridge`) by seeding the
   remaining state tests through the atomic spawn observation, then split the

@@ -23,6 +23,7 @@ const {
   listOperations,
   pendingOperationForLane,
   registerLane,
+  requireOwnedLane,
   reserveSpawn,
   updateLane,
   updatePendingLaneOperation,
@@ -2476,20 +2477,145 @@ test('Codex control mutations refuse a provider cwd mismatch before dispatch', a
   }
 });
 
-test('Codex aggregate recovery reports failure when an owned lane belongs to another runtime', async (t) => {
-  const fixture = createRepoWithSeat(t);
-  const server = await startMockAppServer((request) => {
+function registerOwnedElsewhere(fixture, state, identity = {}) {
+  return registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'thread-owned',
+    displayName: '[test] owned elsewhere',
+    state,
+    runtime: {
+      endpoint: 'ws://127.0.0.1:65534/',
+      codexHome: '/tmp/codex-home',
+      platformFamily: 'unix',
+      platformOs: 'test',
+      ...identity,
+    },
+    seat: verifySeat(fixture.repoRoot, fixture.seat, fixture.worktreesRoot),
+    capabilities: {
+      midTurnSteer: true,
+      interrupt: true,
+      retirement: 'archive',
+      recovery: 'crossRoot',
+    },
+  }, fixture.env);
+}
+
+function movedRuntimeServer(t, fixture) {
+  return startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, {
+        id: 'thread-owned',
+        name: '::: lane: moved',
+        status: { type: 'idle' },
+      });
+    }
+    if (request.method === 'thread/turns/list') return { result: { data: [] } };
     throw new Error(`unexpected ${request.method}`);
   });
+}
+
+test('Codex recovery moves an owned lane to the connected endpoint when the runtime identity matches', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await movedRuntimeServer(t, fixture);
   t.after(() => server.close());
-  registerOwned(fixture, 'ws://127.0.0.1:65534', 'idle');
+  const lane = registerOwnedElsewhere(fixture, 'idle');
+
+  const result = await recover({ repoRoot: fixture.repoRoot, url: server.url }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(result.receipt.providerConnection, 'verified');
+  assert.equal(result.results.length, 1);
+  assert.deepEqual(result.results[0], {
+    laneId: lane.laneId,
+    providerId: 'thread-owned',
+    state: 'idle',
+    phase: 'idle',
+    providerPhase: 'idle',
+    outcome: 'runtimeRebound',
+    delivery: 'confirmed',
+    repaired: ['runtimeEndpoint'],
+    pendingOperation: null,
+  });
+  const rebound = requireOwnedLane(fixture.repoRoot, lane.laneId, fixture.env);
+  assert.equal(rebound.runtime.endpoint, new URL(server.url).toString());
+  assert.equal(rebound.runtime.codexHome, '/tmp/codex-home');
+  assert.deepEqual(
+    server.requests.filter((request) => request.id !== undefined).map((request) => request.method),
+    ['initialize', 'thread/read', 'thread/turns/list'],
+  );
+
+  // The lane now answers ordinary commands on the new endpoint.
+  const observed = await status({ repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url }, fixture.env);
+  assert.equal(observed.phase, 'idle');
+});
+
+test('Codex single-lane recovery rebinds an endpoint move and refuses a different runtime', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await movedRuntimeServer(t, fixture);
+  t.after(() => server.close());
+  const lane = registerOwnedElsewhere(fixture, 'idle');
+
+  const result = await recover({ repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(result.results[0].outcome, 'runtimeRebound');
+  assert.equal(requireOwnedLane(fixture.repoRoot, lane.laneId, fixture.env).runtime.endpoint, new URL(server.url).toString());
+
+  const foreign = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server',
+    providerId: 'thread-foreign-home',
+    displayName: '[test] other home',
+    state: 'idle',
+    runtime: {
+      endpoint: 'ws://127.0.0.1:65534/',
+      codexHome: '/tmp/other-home',
+      platformFamily: 'unix',
+      platformOs: 'test',
+    },
+  }, fixture.env);
+  const before = server.requests.length;
+  await assert.rejects(
+    () => recover({ repoRoot: fixture.repoRoot, laneId: foreign.laneId, url: server.url }, fixture.env),
+    (error) => error.code === 'RUNTIME_MISMATCH',
+  );
+  assert.deepEqual(
+    server.requests.slice(before).filter((request) => request.id !== undefined).map((request) => request.method),
+    ['initialize'],
+  );
+  assert.equal(requireOwnedLane(fixture.repoRoot, foreign.laneId, fixture.env).runtime.endpoint, 'ws://127.0.0.1:65534/');
+});
+
+test('Codex aggregate recovery reports a lane on a different runtime without writing', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await movedRuntimeServer(t, fixture);
+  t.after(() => server.close());
+  const lane = registerOwnedElsewhere(fixture, 'idle', { codexHome: '/tmp/other-home' });
 
   const result = await recover({ repoRoot: fixture.repoRoot, url: server.url }, fixture.env);
   assert.equal(result.ok, false);
   assert.equal(result.results.length, 1);
   assert.equal(result.results[0].outcome, 'differentRuntime');
   assert.equal(result.results[0].delivery, 'unknown');
-  assert.equal(server.requests.length, 0);
+  assert.deepEqual(result.results[0].repaired, []);
+  assert.deepEqual(
+    server.requests.filter((request) => request.id !== undefined).map((request) => request.method),
+    ['initialize'],
+  );
+  assert.equal(requireOwnedLane(fixture.repoRoot, lane.laneId, fixture.env).runtime.endpoint, 'ws://127.0.0.1:65534/');
+});
+
+test('Codex recovery keeps a moved lane on its old endpoint when its thread is not readable there', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') return { error: { code: -32602, message: 'thread not found' } };
+    throw new Error(`unexpected ${request.method}`);
+  });
+  t.after(() => server.close());
+  const lane = registerOwnedElsewhere(fixture, 'idle');
+
+  const result = await recover({ repoRoot: fixture.repoRoot, url: server.url }, fixture.env);
+  assert.equal(result.ok, false);
+  assert.equal(result.results[0].outcome, 'differentRuntime');
+  assert.equal(typeof result.results[0].causeCode, 'string');
+  assert.equal(requireOwnedLane(fixture.repoRoot, lane.laneId, fixture.env).runtime.endpoint, 'ws://127.0.0.1:65534/');
 });
 
 test('Codex recovery does not complete or dispatch an unstarted pending retirement', async (t) => {

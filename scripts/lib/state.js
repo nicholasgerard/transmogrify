@@ -1992,6 +1992,47 @@ function activeLanes(repoRoot, backend, env = process.env) {
   );
 }
 
+// Move a bound Codex lane to a new runtime endpoint that serves the same Codex
+// home on the same platform (an app-server restarted on another port, or the
+// same daemon reached over another URL). Only runtime.endpoint changes; the
+// identity keys must already match the recorded ones, and the caller must have
+// read the lane's thread on the new endpoint first (codex-adapter recover).
+function rebindCodexRuntimeEndpoint(repoRoot, laneId, runtime, env = process.env) {
+  const paths = projectPaths(repoRoot, env);
+  return withProjectLock(paths, () => {
+    const registry = validateRegistry(readJson(paths.registry), paths.project);
+    const current = registry.lanes[laneId];
+    if (!current) throw new Error(`lane is not owned: ${laneId}`);
+    if (current.backend !== 'codex-app-server' || !current.providerId || !current.runtime?.endpoint) {
+      throw new Error(`lane ${laneId} has no bound Codex runtime to rebind`);
+    }
+    if (current.state === 'worktreeRemoved') {
+      throw new Error(`lane ${laneId} cannot rebind a Codex runtime from state ${current.state}`);
+    }
+    if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) {
+      throw new Error('Codex runtime identity must be an object');
+    }
+    assertExactKeys(runtime, new Set(['endpoint', 'codexHome', 'platformFamily', 'platformOs']), 'Codex runtime identity');
+    for (const key of ['codexHome', 'platformFamily', 'platformOs']) {
+      if (runtime[key] !== current.runtime[key]) {
+        throw new Error(`Codex runtime identity changed (${key}); only the endpoint may be rebound`);
+      }
+    }
+    if (typeof runtime.endpoint !== 'string' || !runtime.endpoint) {
+      throw new Error('Codex runtime endpoint must be a non-empty string');
+    }
+    if (runtime.endpoint === current.runtime.endpoint) return current;
+    const updated = {
+      ...current,
+      runtime: { ...current.runtime, endpoint: runtime.endpoint },
+      updatedAt: new Date().toISOString(),
+    };
+    registry.lanes[laneId] = updated;
+    writeRegistry(paths, registry);
+    return updated;
+  });
+}
+
 module.exports = {
   ABANDONABLE_OPERATION_TYPES,
   OPERATION_SCHEMA_VERSION,
@@ -2008,6 +2049,7 @@ module.exports = {
   activeLanes,
   appendLaneExecutionEpoch,
   rebindClaudeRuntime,
+  rebindCodexRuntimeEndpoint,
   atomicWriteJson,
   beginLaneOperation,
   beginOperation,

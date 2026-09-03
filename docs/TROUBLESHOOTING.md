@@ -324,7 +324,7 @@ nothing:
 | --- | --- | --- |
 | `NOT_OWNED` | the id is not a complete lane id this installation owns; a prefix, a name, or a provider id is discovery evidence, never ownership | pass the full `laneId` from `children` or `parent-list`; never adopt by name |
 | `ADAPTER_MISMATCH` | the lane belongs to the other provider, or the flag is provider-specific | use the operation and flags the lane's provider accepts |
-| `RUNTIME_MISMATCH` | the Codex runtime endpoint, Codex home, or platform, or the Claude CLI, account, or config identity, differs from the lane's receipt | rerun the doctor; point `TRANSMOGRIFY_URL` or `CLAUDE_BIN` at the recorded runtime; reconcile, never mutate across runtimes |
+| `RUNTIME_MISMATCH` | the Codex runtime endpoint, Codex home, or platform, or the Claude CLI, account, or config identity, differs from the lane's receipt | rerun the doctor; point `TRANSMOGRIFY_URL` or `CLAUDE_BIN` at the recorded runtime, or run `recover` against the new endpoint: when it serves the same Codex home on the same platform and the thread is readable there, the lane is moved to it (`runtimeRebound`); never mutate across runtimes |
 | `OWNERSHIP_MISMATCH` | the provider reports a different cwd, session, or selector than the receipt | stop and report; the row is not this lane |
 | `SEAT_MISMATCH`, `EXECUTION_EPOCH_UNBOUND` | the worktree or the live worker no longer matches the recorded identity | inspect the seat or session by hand; reconcile; retire if the lane is gone |
 
