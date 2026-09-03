@@ -168,11 +168,15 @@ test('deliverWake sends a Claude follow-up to the recorded bridge and steers or 
   };
   const claude = await deliverWake({ channel: 'claude-bridge', bridgeId: BRIDGE }, 'wake text', { surface });
   assert.equal(claude.delivered, true);
-  assert.deepEqual(sent, [{ bridgeId: BRIDGE, content: 'wake text', timeoutMs: 30000 }]);
+  assert.deepEqual(sent, [{ bridgeId: BRIDGE, content: 'wake text', timeoutMs: 10000 }]);
+  assert.equal(claude.certainty, 'acknowledged');
 
   const uncertain = { ...surface, async sendRemoteFollowup() { throw Object.assign(new Error('x'), { code: 'DELIVERY_UNCERTAIN' }); } };
-  await assert.rejects(() => deliverWake({ channel: 'claude-bridge', bridgeId: BRIDGE }, 'wake', { surface: uncertain }),
-    (error) => error instanceof WakeError && error.code === 'WAKE_UNCERTAIN');
+  const unacknowledged = await deliverWake({ channel: 'claude-bridge', bridgeId: BRIDGE }, 'wake', { surface: uncertain });
+  assert.deepEqual([unacknowledged.delivered, unacknowledged.certainty], [true, 'unacknowledged']);
+  const broken = { ...surface, async sendRemoteFollowup() { throw Object.assign(new Error('x'), { code: 'USAGE_ERROR' }); } };
+  await assert.rejects(() => deliverWake({ channel: 'claude-bridge', bridgeId: BRIDGE }, 'wake', { surface: broken }),
+    (error) => error instanceof WakeError && error.code === 'WAKE_UNDELIVERED');
 
   const calls = [];
   const idle = fakeClient({

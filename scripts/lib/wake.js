@@ -217,13 +217,18 @@ async function deliverWake(wake, text, options = {}, env = process.env) {
     const surface = options.surface || createClaudeSurface();
     const runtime = surface.preflight({ claudeBin: options.claudeBin }, env);
     try {
+      // The public follow-up to an interactive session often outlives its own
+      // acknowledgement (the message lands, the ack does not), so the wait is
+      // short and an uncertain ack is reported as sent, never retried.
       const result = await surface.sendRemoteFollowup(runtime, wake.bridgeId, text, {
-        timeoutMs: options.timeoutMs ?? 30000,
+        timeoutMs: options.timeoutMs ?? 10000,
       });
-      return { channel: 'claude-bridge', delivered: true, sessionUrlOk: Boolean(result?.url), observedAt: new Date().toISOString() };
+      return { channel: 'claude-bridge', delivered: true, certainty: 'acknowledged', sessionUrlOk: Boolean(result?.url), observedAt: new Date().toISOString() };
     } catch (error) {
-      throw new WakeError(error.code === 'DELIVERY_UNCERTAIN' ? 'WAKE_UNCERTAIN' : 'WAKE_UNDELIVERED',
-        `Claude wake follow-up failed: ${error.code || error.message}`, { cause: error.code });
+      if (error.code === 'DELIVERY_UNCERTAIN') {
+        return { channel: 'claude-bridge', delivered: true, certainty: 'unacknowledged', observedAt: new Date().toISOString() };
+      }
+      throw new WakeError('WAKE_UNDELIVERED', `Claude wake follow-up failed: ${error.code || error.message}`, { cause: error.code });
     }
   }
   if (wake?.channel === 'codex-thread') {

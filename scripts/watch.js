@@ -147,7 +147,10 @@ async function watchOnce(context, values, env, state, dependencies = {}) {
         }, wakeMessage(event, { parentContextFile: context.file }), {
           claudeBin: values['claude-bin'], url: values.url, clientUserMessageId: event.eventId,
         }, env);
-        results.push({ eventId: event.eventId, kind: event.kind, delivered: true, method: receipt.method || receipt.channel });
+        results.push({
+          eventId: event.eventId, kind: event.kind, delivered: true,
+          method: receipt.method || receipt.channel, certainty: receipt.certainty || 'acknowledged',
+        });
       } catch (error) {
         results.push({ eventId: event.eventId, kind: event.kind, delivered: false, code: error.code || 'WAKE_UNDELIVERED' });
       }
@@ -201,7 +204,7 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
     state.rounds += 1;
     state.wakes += pass.wakes.filter((wake) => wake.delivered).length;
     for (const wake of pass.wakes) {
-      appendLog(paths, `wake ${wake.kind} event=${wake.eventId} ${wake.delivered ? `delivered via ${wake.method}` : wake.code}`);
+      appendLog(paths, `wake ${wake.kind} event=${wake.eventId} ${wake.delivered ? `sent via ${wake.method} (${wake.certainty})` : wake.code}`);
     }
     for (const failure of pass.errors) appendLog(paths, `observer error ${failure.code} dispatch=${failure.dispatchId || '-'}`);
     writeRecord(paths, { ...state, lastRoundAt: new Date().toISOString(), unacknowledged: countEvents(context, {}, env) });
