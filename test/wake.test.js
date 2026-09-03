@@ -222,3 +222,15 @@ test('deliverWake sends a Claude follow-up to the recorded bridge and steers or 
 
   await assert.rejects(() => deliverWake({ channel: 'none' }, 'wake'), (error) => error.code === 'WAKE_UNAVAILABLE');
 });
+
+test('discoverClaudeWake reads session records under CLAUDE_CONFIG_DIR when it is set', (t) => {
+  const configDir = sessionsFixture(t, {
+    500: { pid: 500, sessionId: SESSION, bridgeSessionId: BRIDGE, messagingSocketPath: '/tmp/cc-socks/500.sock' },
+  });
+  const run = processTable({ 700: 600, 600: 500, 500: 1 });
+  const wake = discoverClaudeWake({ run, startPid: 700 }, { CLAUDE_CONFIG_DIR: configDir, HOME: '/nonexistent-home' });
+  assert.equal(wake.channel, 'claude-bridge');
+  assert.equal(wake.bridgeId, BRIDGE);
+  const fallback = discoverClaudeWake({ run, startPid: 700 }, { HOME: '/nonexistent-home' });
+  assert.equal(fallback.channel, 'none');
+});
