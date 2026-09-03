@@ -376,27 +376,75 @@ async function retireUnboundLane(options, env, initial) {
   }, env);
 }
 
+// Retire a Claude lane in the journaled order harvest, stop, remote archive,
+// worktree removal, local record removal. Each phase below reads and writes
+// the shared context (the lane, its retirement journal, the runtime), and
+// every provider mutation is journaled before dispatch so a crash at any
+// point resumes from the journal instead of replaying.
 async function retire(options, env = process.env) {
   const unbound = unboundFailedLane(options, env);
   if (unbound) return retireUnboundLane(options, env, unbound);
-  let lane = ownedLane(options, env, false);
-  const existingRetirement = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-  if (lane.state === 'worktreeRemoved' && !existingRetirement) {
-    return laneResult('retire', lane, { receipt: { retired: true, alreadyRetired: true } });
+  const admitted = admitRetirement(options, env);
+  if (admitted.alreadyRetired) {
+    return laneResult('retire', admitted.lane, { receipt: { retired: true, alreadyRetired: true } });
   }
-  if (options.acceptManualSeatRemoval === true &&
-      existingRetirement?.details?.cleanupBlocked !== true) {
+  const surface = surfaceFor(options);
+  return withLaneLease(options.repoRoot, admitted.lane.laneId, async () => {
+    const ctx = {
+      options, env, surface, runtime: null,
+      lane: ownedLane({ ...options, laneId: admitted.lane.laneId }, env, false),
+      pending: null, harvestReceipt: null,
+    };
+    ensureRetirementJournal(ctx);
+    await archiveRemotely(ctx);
+    if (ctx.lane.state !== 'archivedVerified' && ctx.lane.state !== 'worktreeRemoved') {
+      ctx.lane = updateLane(options.repoRoot, ctx.lane.laneId, {
+        state: 'archivedVerified', lastVerifiedAt: new Date().toISOString(),
+      }, env);
+      removeChildHooksSettings(ctx.lane.laneId, env);
+    }
+    const deferred = deferredRetirement(ctx);
+    if (deferred) return deferred;
+    const cleanup = removeRetiredSeat(ctx);
+    if (pathEntryExists(ctx.lane.seat.path)) {
+      throw new ClaudeTransmogrifyError(
+        'CLEANUP_BLOCKED', 'Claude local record removal requires the managed worktree to be absent',
+        { providerRetired: true, laneId: ctx.lane.laneId },
+      );
+    }
+    await removeLocalRecord(ctx);
+    completePending(options.repoRoot, ctx.lane.laneId, ctx.pending, {
+      state: 'complete',
+      details: { ...ctx.pending.details, remoteArchived: true, localRemoved: true, cleanup },
+    }, env);
+    return laneResult('retire', ctx.lane, {
+      operationId: ctx.pending.operationId,
+      receipt: {
+        remoteArchived: true, localJobRemoved: true, localRemovalDeferred: false,
+        harvestedOutputSha256: ctx.harvestReceipt.outputSha256, worktree: cleanup,
+      },
+    });
+  }, env);
+}
+
+// Admission before the lease: an already-retired lane, the manual seat
+// removal acknowledgement, a permanently blocked cleanup, and whether the
+// seat must still be verified (a managed seat already gone from disk after
+// the provider retired is recovered rather than refused).
+function admitRetirement(options, env) {
+  const lane = ownedLane(options, env, false);
+  const existingRetirement = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+  if (lane.state === 'worktreeRemoved' && !existingRetirement) return { lane, alreadyRetired: true };
+  if (options.acceptManualSeatRemoval === true && existingRetirement?.details?.cleanupBlocked !== true) {
     throw new ClaudeTransmogrifyError(
       'USAGE_ERROR',
       '--accept-manual-seat-removal requires an exact pending CLEANUP_BLOCKED retirement',
     );
   }
-  const initialSeatEntryPresent = lane.seat?.managed === true &&
-    pathEntryExists(lane.seat.path);
-  const initialManualRemovalAcknowledged = options.acceptManualSeatRemoval === true ||
+  const seatEntryPresent = lane.seat?.managed === true && pathEntryExists(lane.seat.path);
+  const manualRemovalAcknowledged = options.acceptManualSeatRemoval === true ||
     existingRetirement?.details?.manualSeatRemoval?.acknowledged === true;
-  if (existingRetirement?.details?.cleanupBlocked === true &&
-      (initialSeatEntryPresent || !initialManualRemovalAcknowledged)) {
+  if (existingRetirement?.details?.cleanupBlocked === true && (seatEntryPresent || !manualRemovalAcknowledged)) {
     throw new ClaudeTransmogrifyError(
       'CLEANUP_BLOCKED',
       'Claude managed worktree has a permanent cleanup block and requires exact manual-removal acknowledgement',
@@ -405,341 +453,301 @@ async function retire(options, env = process.env) {
   }
   const recoveringAbsentManagedSeat = lane.seat?.managed === true &&
     existingRetirement?.type === 'retire' && RETIRED_STATES.has(lane.state) &&
-    !initialSeatEntryPresent &&
-    (existingRetirement.details.cleanupBlocked !== true ||
-      options.acceptManualSeatRemoval === true ||
-      existingRetirement.details.manualSeatRemoval?.acknowledged === true);
+    !seatEntryPresent &&
+    (existingRetirement.details.cleanupBlocked !== true || manualRemovalAcknowledged);
   if (!recoveringAbsentManagedSeat) assertSeat(options, lane);
-  const surface = surfaceFor(options);
-  return withLaneLease(options.repoRoot, lane.laneId, async () => {
-    lane = ownedLane({ ...options, laneId: lane.laneId }, env, false);
-    let pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-    if (pending && pending.type !== 'retire') {
-      throw new ClaudeTransmogrifyError('PENDING_OPERATION', `lane ${lane.laneId} has unresolved ${pending.type} operation`);
-    }
-    if (!pending) {
-      if (!SHA256_PATTERN.test(options.harvestedOutputSha256 || '')) {
-        throw new ClaudeTransmogrifyError(
-          'HARVEST_REQUIRED', 'Claude retirement requires a durable lowercase harvestedOutputSha256',
-        );
-      }
-      const harvestReceipt = captureHarvestReceipt(
-        options.repoRoot, lane.seat, options.harvestedOutputSha256,
-      );
-      pending = beginLaneOperation(options.repoRoot, lane.laneId, {
-        type: 'retire', providerId: lane.providerId,
-        details: {
-          target: 'claude', ordering: 'harvest-stop-remoteArchive-worktree-localRemove',
-          harvestReceipt,
-          ...(RETIRED_STATES.has(lane.state) ? { remoteArchived: true } : {}),
-        },
-      }, env);
-    } else if (options.harvestedOutputSha256 !== undefined &&
-        pending.details.harvestReceipt?.outputSha256 !== options.harvestedOutputSha256) {
-      throw new ClaudeTransmogrifyError('HARVEST_MISMATCH', 'retirement harvest digest does not match its durable receipt');
-    }
-    const harvestReceipt = pending.details.harvestReceipt;
-    if (!harvestReceipt || !SHA256_PATTERN.test(harvestReceipt.outputSha256 || '')) {
-      throw new ClaudeTransmogrifyError('HARVEST_REQUIRED', 'pending Claude retirement has no valid harvest receipt');
-    }
-    const blockedSeatAbsent = pending.details.cleanupBlocked === true &&
-      lane.seat?.managed === true && !pathEntryExists(lane.seat.path);
-    const manuallyRemovedBlockedSeat = blockedSeatAbsent &&
-      (options.acceptManualSeatRemoval === true ||
-        pending.details.manualSeatRemoval?.acknowledged === true);
-    if (pending.details.cleanupBlocked === true && !manuallyRemovedBlockedSeat) {
-      throw new ClaudeTransmogrifyError(
-        'CLEANUP_BLOCKED',
-        'Claude managed worktree has a permanent cleanup block and requires manual review',
-        { providerRetired: true, laneId: lane.laneId },
-      );
-    }
-    if (blockedSeatAbsent && pending.details.manualSeatRemoval?.acknowledged !== true) {
-      pending = updatePending(options.repoRoot, lane.laneId, pending, {
-        state: pending.state,
-        details: {
-          ...pending.details,
-          manualSeatRemoval: {
-            acknowledged: true,
-            observedAbsentAt: new Date().toISOString(),
-          },
-        },
-      }, env);
-    }
-    let runtime = null;
-    let privateApi = null;
-    if (pending.details.remoteArchived !== true) {
-      runtime = runtimeForLane(options, lane, env, surface);
-      if (lane.state !== 'localRemovalPending') {
-        if (options.privateArchive !== true) {
-          throw new ClaudeTransmogrifyError(
-            'PRIVATE_API_DISABLED', 'Claude retirement requires explicit private archive authorization',
-          );
-        }
-        privateApi = options.privateApi || require('./claude-private-api').createClaudePrivateApi();
-        privateApi.preflight(runtime);
-      }
-      if (!RETIRING_STATES.has(lane.state)) {
-        const stopped = await stopOwnedLane(options, env, surface, runtime, lane, pending, true);
-        lane = stopped.lane;
-        pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-        lane = updateLane(options.repoRoot, lane.laneId, { state: 'retireRequested' }, env);
-      }
-      if (lane.state !== 'localRemovalPending') {
-        try {
-          pending = await verifyRetirementStopped(
-            options, env, surface, runtime, lane, pending,
-          );
-          const priorArchiveDispatchUnknown = lane.state === 'archiveUnknown' ||
-            pending.state === 'unknown';
-          const archiveMethod = priorArchiveDispatchUnknown ? 'verifyArchived' : 'ensureArchived';
-          if (typeof privateApi[archiveMethod] !== 'function') {
-            throw new ClaudeTransmogrifyError(
-              'REMOTE_ARCHIVE_UNCERTAIN',
-              'prior Claude archive dispatch requires read-only verification',
-              { archiveDispatched: priorArchiveDispatchUnknown },
-            );
-          }
-          const archive = await privateApi[archiveMethod]({
-            bridgeId: lane.providerIdentity.bridgeId, runtime,
-            attempts: options.archiveVerifyAttempts, delayMs: options.archiveVerifyDelayMs,
-            timeoutMs: options.archiveTimeoutMs,
-          });
-          pending = updatePending(options.repoRoot, lane.laneId, pending, {
-            state: 'remoteArchived',
-            details: {
-              ...pending.details, remoteArchived: true,
-              remoteArchiveAlreadySet: archive.alreadyArchived,
-            },
-          }, env);
-        } catch (error) {
-          const archiveDispatched = lane.state === 'archiveUnknown' ||
-            pending.state === 'unknown' || error.details?.archiveDispatched === true;
-          const current = requireOwnedLane(options.repoRoot, lane.laneId, env);
-          const latestPending = pendingOperationForLane(options.repoRoot, lane.laneId, env) || pending;
-          const stopVerified = latestPending.details.stopVerified === true;
-          if (archiveDispatched && current.state === 'retireRequested') {
-            lane = updateLane(options.repoRoot, lane.laneId, { state: 'archiveUnknown' }, env);
-          }
-          pending = updatePending(options.repoRoot, lane.laneId, latestPending, {
-            state: archiveDispatched ? 'unknown' : 'archiveNotDispatched',
-            details: {
-              ...latestPending.details,
-              ...(archiveDispatched ? {} : { archiveNotDispatched: true }),
-            },
-          }, env);
-          throw new ClaudeTransmogrifyError(
-            error.code || 'REMOTE_ARCHIVE_UNCERTAIN',
-            error.message,
-            {
-              ...(error.details || {}),
-              ...(typeof error.code === 'string' ? { causeCode: error.code } : {}),
-              ...(stopVerified ? {
-                providerMutation: archiveDispatched ? 'unknown' : 'verified',
-                stop: 'verified',
-                archive: archiveDispatched ? 'unknown' : 'notAttempted',
-              } : {}),
-            },
-          );
-        }
-      } else {
-        pending = updatePending(options.repoRoot, lane.laneId, pending, {
-          state: 'remoteArchived', details: { ...pending.details, remoteArchived: true },
-        }, env);
-      }
-    }
-    if (lane.state !== 'archivedVerified' && lane.state !== 'worktreeRemoved') {
-      lane = updateLane(options.repoRoot, lane.laneId, {
-        state: 'archivedVerified', lastVerifiedAt: new Date().toISOString(),
-      }, env);
-      removeChildHooksSettings(lane.laneId, env);
-    }
+  return { lane, alreadyRetired: false };
+}
 
-    if (lane.seat.managed !== true) {
-      const cleanup = { attempted: false, removed: false, external: true };
-      completePending(options.repoRoot, lane.laneId, pending, {
-        state: 'complete',
-        details: {
-          ...pending.details, remoteArchived: true, localRemovalDeferred: true, cleanup,
-        },
-      }, env);
-      return laneResult('retire', lane, {
-        operationId: pending.operationId,
-        receipt: {
-          remoteArchived: true, localJobRemoved: false, localRemovalDeferred: true,
-          harvestedOutputSha256: harvestReceipt.outputSha256, worktree: cleanup,
-        },
-      });
+// Open the retirement journal with its harvest receipt, or resume the exact
+// pending one; a blocked seat that the owner removed by hand is acknowledged
+// in the journal before cleanup proceeds.
+function ensureRetirementJournal(ctx) {
+  const { options, env, lane } = ctx;
+  let pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
+  if (pending && pending.type !== 'retire') {
+    throw new ClaudeTransmogrifyError('PENDING_OPERATION', `lane ${lane.laneId} has unresolved ${pending.type} operation`);
+  }
+  if (!pending) {
+    if (!SHA256_PATTERN.test(options.harvestedOutputSha256 || '')) {
+      throw new ClaudeTransmogrifyError('HARVEST_REQUIRED', 'Claude retirement requires a durable lowercase harvestedOutputSha256');
     }
-    if (options.cleanupWorktree === false && lane.state !== 'worktreeRemoved') {
-      pending = updatePending(options.repoRoot, lane.laneId, pending, {
-        state: 'cleanupDeferred',
-        details: {
-          ...pending.details, cleanupDeferred: true, localRemovalDeferred: true,
-          remoteArchived: true,
-        },
-      }, env);
-      return laneResult('retire', lane, {
-        operationId: pending.operationId,
-        receipt: {
-          remoteArchived: true, localJobRemoved: false, localRemovalDeferred: true,
-          harvestedOutputSha256: harvestReceipt.outputSha256,
-          worktree: { attempted: false, removed: false, deferred: true },
-        },
-      });
-    }
-
-    let cleanup;
-    if (lane.state === 'worktreeRemoved') {
-      cleanup = pending.details.cleanup ||
-        { attempted: true, removed: true, recoveredAfterRemoval: true };
-    } else {
-      cleanup = { attempted: true, removed: false };
-      try {
-        const result = removeManagedSeat(options.repoRoot, lane.laneId, harvestReceipt, env);
-        lane = result.lane;
-        cleanup.removed = true;
-      } catch (error) {
-        if (!isPermanentCleanupError(error)) {
-          updatePending(options.repoRoot, lane.laneId, pending, {
-            state: 'providerRetiredCleanupDeferred',
-            details: { ...pending.details, cleanupRetryable: true },
-          }, env);
-          throw new ClaudeTransmogrifyError(
-            'CLEANUP_RETRYABLE',
-            'Claude provider is retired; managed worktree cleanup failed locally and is safe to retry',
-            { providerRetired: true, laneId: lane.laneId },
-          );
-        }
-        updatePending(options.repoRoot, lane.laneId, pending, {
-          state: 'providerRetiredCleanupBlocked',
-          details: { ...pending.details, cleanupBlocked: true },
-        }, env);
-        throw new ClaudeTransmogrifyError('CLEANUP_BLOCKED', error.message, {
-          providerRetired: true, laneId: lane.laneId,
-        });
-      }
-      pending = updatePending(options.repoRoot, lane.laneId, pending, {
-        state: 'worktreeRemoved', details: { ...pending.details, cleanup },
-      }, env);
-    }
-    if (pathEntryExists(lane.seat.path)) {
-      throw new ClaudeTransmogrifyError(
-        'CLEANUP_BLOCKED', 'Claude local record removal requires the managed worktree to be absent',
-        { providerRetired: true, laneId: lane.laneId },
-      );
-    }
-
-    if (pending.details.localRemoved !== true) {
-      let agents;
-      try {
-        runtime ||= runtimeForLane(options, lane, env, surface);
-        agents = await surface.agents(runtime);
-      } catch (error) {
-        throw localRemovalStageFailure(error, lane, 'notAttempted');
-      }
-      let local;
-      try {
-        local = exactLocalRecordAfterSeatRemoval(
-          agents, lane, pending.details.localRemovalTarget || null,
-        );
-      } catch (error) {
-        throw localRemovalIdentityFailure(error, lane);
-      }
-      if (!local) {
-        pending = updatePending(options.repoRoot, lane.laneId, pending, {
-          state: 'localRemoved',
-          details: { ...pending.details, localRemoved: true, localRemovalObservedAbsent: true },
-        }, env);
-      } else {
-        if (['localRemovalDispatching', 'localRemovalDispatched', 'localRemovalUnknown']
-          .includes(pending.state)) {
-          throw localRemovalStageFailure(new ClaudeTransmogrifyError(
-            'LOCAL_REMOVAL_UNCERTAIN',
-            'prior Claude local removal remains unresolved; refusing to replay it',
-          ), lane, 'unknown');
-        }
-        const target = pending.details.localRemovalTarget || localRemovalTarget(lane, local);
-        let dispatchAgents;
-        try {
-          dispatchAgents = await surface.agents(runtime);
-        } catch (error) {
-          throw localRemovalStageFailure(error, lane, 'notAttempted');
-        }
-        let dispatchLocal;
-        try {
-          dispatchLocal = exactLocalRecordAfterSeatRemoval(dispatchAgents, lane, target);
-        } catch (error) {
-          throw localRemovalIdentityFailure(error, lane);
-        }
-        if (!dispatchLocal) {
-          pending = updatePending(options.repoRoot, lane.laneId, pending, {
-            state: 'localRemoved',
-            details: { ...pending.details, localRemoved: true, localRemovalObservedAbsent: true },
-          }, env);
-        } else {
-          pending = updatePending(options.repoRoot, lane.laneId, pending, {
-            state: 'localRemovalDispatching',
-            details: {
-              ...pending.details, localRemovalTarget: target,
-              localRemovalDispatchStartedAt: nowMs(options),
-            },
-          }, env);
-          try {
-            await surface.run(runtime, ['rm', lane.providerIdentity.jobId], {
-              cwd: options.repoRoot, timeoutMs: options.commandTimeoutMs,
-            });
-            pending = updatePending(options.repoRoot, lane.laneId, pending, {
-              state: 'localRemovalDispatched',
-              details: { ...pending.details, localRemovalDispatchFinishedAt: nowMs(options) },
-            }, env);
-          } catch (error) {
-            try {
-              updatePending(options.repoRoot, lane.laneId, pending, { state: 'localRemovalUnknown' }, env);
-            } catch {}
-            throw localRemovalStageFailure(new ClaudeTransmogrifyError(
-              'LOCAL_REMOVAL_UNCERTAIN',
-              'Claude local job removal outcome is unknown',
-              { ...(typeof error?.code === 'string' ? { causeCode: error.code } : {}) },
-            ), lane, 'unknown');
-          }
-          let removed;
-          try {
-            removed = await pollAgents(surface, runtime, (listed) =>
-              listed.some((agent) => agent?.sessionId === lane.providerId) ? null : true,
-            { attempts: options.removeVerifyAttempts, delayMs: options.removeVerifyDelayMs });
-          } catch (error) {
-            try {
-              updatePending(options.repoRoot, lane.laneId, pending, { state: 'localRemovalUnknown' }, env);
-            } catch {}
-            throw localRemovalStageFailure(error, lane, 'unknown');
-          }
-          if (!removed) {
-            updatePending(options.repoRoot, lane.laneId, pending, { state: 'localRemovalUnknown' }, env);
-            throw localRemovalStageFailure(new ClaudeTransmogrifyError(
-              'LOCAL_REMOVAL_UNCERTAIN', 'Claude local job removal was not verified',
-            ), lane, 'unknown');
-          }
-          pending = updatePending(options.repoRoot, lane.laneId, pending, {
-            state: 'localRemoved', details: { ...pending.details, localRemoved: true },
-          }, env);
-        }
-      }
-    }
-    completePending(options.repoRoot, lane.laneId, pending, {
-      state: 'complete',
+    const harvestReceipt = captureHarvestReceipt(options.repoRoot, lane.seat, options.harvestedOutputSha256);
+    pending = beginLaneOperation(options.repoRoot, lane.laneId, {
+      type: 'retire', providerId: lane.providerId,
       details: {
-        ...pending.details, remoteArchived: true, localRemoved: true, cleanup,
+        target: 'claude', ordering: 'harvest-stop-remoteArchive-worktree-localRemove',
+        harvestReceipt,
+        ...(RETIRED_STATES.has(lane.state) ? { remoteArchived: true } : {}),
       },
     }, env);
+  } else if (options.harvestedOutputSha256 !== undefined &&
+      pending.details.harvestReceipt?.outputSha256 !== options.harvestedOutputSha256) {
+    throw new ClaudeTransmogrifyError('HARVEST_MISMATCH', 'retirement harvest digest does not match its durable receipt');
+  }
+  const harvestReceipt = pending.details.harvestReceipt;
+  if (!harvestReceipt || !SHA256_PATTERN.test(harvestReceipt.outputSha256 || '')) {
+    throw new ClaudeTransmogrifyError('HARVEST_REQUIRED', 'pending Claude retirement has no valid harvest receipt');
+  }
+  const blockedSeatAbsent = pending.details.cleanupBlocked === true &&
+    lane.seat?.managed === true && !pathEntryExists(lane.seat.path);
+  const manuallyRemovedBlockedSeat = blockedSeatAbsent &&
+    (options.acceptManualSeatRemoval === true || pending.details.manualSeatRemoval?.acknowledged === true);
+  if (pending.details.cleanupBlocked === true && !manuallyRemovedBlockedSeat) {
+    throw new ClaudeTransmogrifyError(
+      'CLEANUP_BLOCKED',
+      'Claude managed worktree has a permanent cleanup block and requires manual review',
+      { providerRetired: true, laneId: lane.laneId },
+    );
+  }
+  if (blockedSeatAbsent && pending.details.manualSeatRemoval?.acknowledged !== true) {
+    pending = updatePending(options.repoRoot, lane.laneId, pending, {
+      state: pending.state,
+      details: {
+        ...pending.details,
+        manualSeatRemoval: { acknowledged: true, observedAbsentAt: new Date().toISOString() },
+      },
+    }, env);
+  }
+  ctx.pending = pending;
+  ctx.harvestReceipt = harvestReceipt;
+}
+
+// Stop the exact session and archive it through the pinned private call,
+// once. A prior archive whose outcome is unknown is only verified, never
+// re-dispatched; a failure records exactly what was dispatched.
+async function archiveRemotely(ctx) {
+  const { options, env, surface } = ctx;
+  if (ctx.pending.details.remoteArchived === true) return;
+  ctx.runtime = runtimeForLane(options, ctx.lane, env, surface);
+  let privateApi = null;
+  if (ctx.lane.state !== 'localRemovalPending') {
+    if (options.privateArchive !== true) {
+      throw new ClaudeTransmogrifyError('PRIVATE_API_DISABLED', 'Claude retirement requires explicit private archive authorization');
+    }
+    privateApi = options.privateApi || require('./claude-private-api').createClaudePrivateApi();
+    privateApi.preflight(ctx.runtime);
+  }
+  if (!RETIRING_STATES.has(ctx.lane.state)) {
+    const stopped = await stopOwnedLane(options, env, surface, ctx.runtime, ctx.lane, ctx.pending, true);
+    ctx.lane = stopped.lane;
+    ctx.pending = pendingOperationForLane(options.repoRoot, ctx.lane.laneId, env);
+    ctx.lane = updateLane(options.repoRoot, ctx.lane.laneId, { state: 'retireRequested' }, env);
+  }
+  if (ctx.lane.state === 'localRemovalPending') {
+    ctx.pending = updatePending(options.repoRoot, ctx.lane.laneId, ctx.pending, {
+      state: 'remoteArchived', details: { ...ctx.pending.details, remoteArchived: true },
+    }, env);
+    return;
+  }
+  try {
+    ctx.pending = await verifyRetirementStopped(options, env, surface, ctx.runtime, ctx.lane, ctx.pending);
+    const priorArchiveDispatchUnknown = ctx.lane.state === 'archiveUnknown' || ctx.pending.state === 'unknown';
+    const archiveMethod = priorArchiveDispatchUnknown ? 'verifyArchived' : 'ensureArchived';
+    if (typeof privateApi[archiveMethod] !== 'function') {
+      throw new ClaudeTransmogrifyError(
+        'REMOTE_ARCHIVE_UNCERTAIN',
+        'prior Claude archive dispatch requires read-only verification',
+        { archiveDispatched: priorArchiveDispatchUnknown },
+      );
+    }
+    const archive = await privateApi[archiveMethod]({
+      bridgeId: ctx.lane.providerIdentity.bridgeId, runtime: ctx.runtime,
+      attempts: options.archiveVerifyAttempts, delayMs: options.archiveVerifyDelayMs,
+      timeoutMs: options.archiveTimeoutMs,
+    });
+    ctx.pending = updatePending(options.repoRoot, ctx.lane.laneId, ctx.pending, {
+      state: 'remoteArchived',
+      details: { ...ctx.pending.details, remoteArchived: true, remoteArchiveAlreadySet: archive.alreadyArchived },
+    }, env);
+  } catch (error) {
+    const archiveDispatched = ctx.lane.state === 'archiveUnknown' ||
+      ctx.pending.state === 'unknown' || error.details?.archiveDispatched === true;
+    const current = requireOwnedLane(options.repoRoot, ctx.lane.laneId, env);
+    const latestPending = pendingOperationForLane(options.repoRoot, ctx.lane.laneId, env) || ctx.pending;
+    const stopVerified = latestPending.details.stopVerified === true;
+    if (archiveDispatched && current.state === 'retireRequested') {
+      ctx.lane = updateLane(options.repoRoot, ctx.lane.laneId, { state: 'archiveUnknown' }, env);
+    }
+    ctx.pending = updatePending(options.repoRoot, ctx.lane.laneId, latestPending, {
+      state: archiveDispatched ? 'unknown' : 'archiveNotDispatched',
+      details: { ...latestPending.details, ...(archiveDispatched ? {} : { archiveNotDispatched: true }) },
+    }, env);
+    throw new ClaudeTransmogrifyError(error.code || 'REMOTE_ARCHIVE_UNCERTAIN', error.message, {
+      ...(error.details || {}),
+      ...(typeof error.code === 'string' ? { causeCode: error.code } : {}),
+      ...(stopVerified ? {
+        providerMutation: archiveDispatched ? 'unknown' : 'verified',
+        stop: 'verified',
+        archive: archiveDispatched ? 'unknown' : 'notAttempted',
+      } : {}),
+    });
+  }
+}
+
+// An external seat is never removed, and a caller may defer managed cleanup:
+// both close or park the journal and return the retirement receipt.
+function deferredRetirement(ctx) {
+  const { options, env, lane, harvestReceipt } = ctx;
+  if (lane.seat.managed !== true) {
+    const cleanup = { attempted: false, removed: false, external: true };
+    completePending(options.repoRoot, lane.laneId, ctx.pending, {
+      state: 'complete',
+      details: { ...ctx.pending.details, remoteArchived: true, localRemovalDeferred: true, cleanup },
+    }, env);
     return laneResult('retire', lane, {
-      operationId: pending.operationId,
+      operationId: ctx.pending.operationId,
       receipt: {
-        remoteArchived: true, localJobRemoved: true, localRemovalDeferred: false,
+        remoteArchived: true, localJobRemoved: false, localRemovalDeferred: true,
         harvestedOutputSha256: harvestReceipt.outputSha256, worktree: cleanup,
       },
     });
+  }
+  if (options.cleanupWorktree === false && lane.state !== 'worktreeRemoved') {
+    ctx.pending = updatePending(options.repoRoot, lane.laneId, ctx.pending, {
+      state: 'cleanupDeferred',
+      details: { ...ctx.pending.details, cleanupDeferred: true, localRemovalDeferred: true, remoteArchived: true },
+    }, env);
+    return laneResult('retire', lane, {
+      operationId: ctx.pending.operationId,
+      receipt: {
+        remoteArchived: true, localJobRemoved: false, localRemovalDeferred: true,
+        harvestedOutputSha256: harvestReceipt.outputSha256,
+        worktree: { attempted: false, removed: false, deferred: true },
+      },
+    });
+  }
+  return null;
+}
+
+// Remove the managed seat guarded by the harvest receipt. A retryable local
+// failure parks the journal as deferred; a permanent one blocks it.
+function removeRetiredSeat(ctx) {
+  const { options, env } = ctx;
+  if (ctx.lane.state === 'worktreeRemoved') {
+    return ctx.pending.details.cleanup || { attempted: true, removed: true, recoveredAfterRemoval: true };
+  }
+  const cleanup = { attempted: true, removed: false };
+  try {
+    const result = removeManagedSeat(options.repoRoot, ctx.lane.laneId, ctx.harvestReceipt, env);
+    ctx.lane = result.lane;
+    cleanup.removed = true;
+  } catch (error) {
+    if (!isPermanentCleanupError(error)) {
+      updatePending(options.repoRoot, ctx.lane.laneId, ctx.pending, {
+        state: 'providerRetiredCleanupDeferred',
+        details: { ...ctx.pending.details, cleanupRetryable: true },
+      }, env);
+      throw new ClaudeTransmogrifyError(
+        'CLEANUP_RETRYABLE',
+        'Claude provider is retired; managed worktree cleanup failed locally and is safe to retry',
+        { providerRetired: true, laneId: ctx.lane.laneId },
+      );
+    }
+    updatePending(options.repoRoot, ctx.lane.laneId, ctx.pending, {
+      state: 'providerRetiredCleanupBlocked',
+      details: { ...ctx.pending.details, cleanupBlocked: true },
+    }, env);
+    throw new ClaudeTransmogrifyError('CLEANUP_BLOCKED', error.message, { providerRetired: true, laneId: ctx.lane.laneId });
+  }
+  ctx.pending = updatePending(options.repoRoot, ctx.lane.laneId, ctx.pending, {
+    state: 'worktreeRemoved', details: { ...ctx.pending.details, cleanup },
   }, env);
+  return cleanup;
+}
+
+function journalLocalRemoved(ctx, details) {
+  ctx.pending = updatePending(ctx.options.repoRoot, ctx.lane.laneId, ctx.pending, {
+    state: 'localRemoved', details: { ...ctx.pending.details, localRemoved: true, ...details },
+  }, ctx.env);
+}
+
+// Remove the exact local job record once the seat is gone. The record is
+// located twice (before the journal names the target and again right before
+// the dispatch), an unresolved prior removal is never replayed, and the
+// removal is verified against the census before the journal closes.
+async function removeLocalRecord(ctx) {
+  const { options, env, surface, lane } = ctx;
+  if (ctx.pending.details.localRemoved === true) return;
+  let agents;
+  try {
+    ctx.runtime ||= runtimeForLane(options, lane, env, surface);
+    agents = await surface.agents(ctx.runtime);
+  } catch (error) {
+    throw localRemovalStageFailure(error, lane, 'notAttempted');
+  }
+  let local;
+  try {
+    local = exactLocalRecordAfterSeatRemoval(agents, lane, ctx.pending.details.localRemovalTarget || null);
+  } catch (error) {
+    throw localRemovalIdentityFailure(error, lane);
+  }
+  if (!local) {
+    journalLocalRemoved(ctx, { localRemovalObservedAbsent: true });
+    return;
+  }
+  if (['localRemovalDispatching', 'localRemovalDispatched', 'localRemovalUnknown'].includes(ctx.pending.state)) {
+    throw localRemovalStageFailure(new ClaudeTransmogrifyError(
+      'LOCAL_REMOVAL_UNCERTAIN',
+      'prior Claude local removal remains unresolved; refusing to replay it',
+    ), lane, 'unknown');
+  }
+  const target = ctx.pending.details.localRemovalTarget || localRemovalTarget(lane, local);
+  let dispatchAgents;
+  try {
+    dispatchAgents = await surface.agents(ctx.runtime);
+  } catch (error) {
+    throw localRemovalStageFailure(error, lane, 'notAttempted');
+  }
+  let dispatchLocal;
+  try {
+    dispatchLocal = exactLocalRecordAfterSeatRemoval(dispatchAgents, lane, target);
+  } catch (error) {
+    throw localRemovalIdentityFailure(error, lane);
+  }
+  if (!dispatchLocal) {
+    journalLocalRemoved(ctx, { localRemovalObservedAbsent: true });
+    return;
+  }
+  ctx.pending = updatePending(options.repoRoot, lane.laneId, ctx.pending, {
+    state: 'localRemovalDispatching',
+    details: { ...ctx.pending.details, localRemovalTarget: target, localRemovalDispatchStartedAt: nowMs(options) },
+  }, env);
+  const markUnknown = () => {
+    try { updatePending(options.repoRoot, lane.laneId, ctx.pending, { state: 'localRemovalUnknown' }, env); } catch {}
+  };
+  try {
+    await surface.run(ctx.runtime, ['rm', lane.providerIdentity.jobId], {
+      cwd: options.repoRoot, timeoutMs: options.commandTimeoutMs,
+    });
+    ctx.pending = updatePending(options.repoRoot, lane.laneId, ctx.pending, {
+      state: 'localRemovalDispatched',
+      details: { ...ctx.pending.details, localRemovalDispatchFinishedAt: nowMs(options) },
+    }, env);
+  } catch (error) {
+    markUnknown();
+    throw localRemovalStageFailure(new ClaudeTransmogrifyError(
+      'LOCAL_REMOVAL_UNCERTAIN',
+      'Claude local job removal outcome is unknown',
+      { ...(typeof error?.code === 'string' ? { causeCode: error.code } : {}) },
+    ), lane, 'unknown');
+  }
+  let removed;
+  try {
+    removed = await pollAgents(surface, ctx.runtime, (listed) =>
+      listed.some((agent) => agent?.sessionId === lane.providerId) ? null : true,
+    { attempts: options.removeVerifyAttempts, delayMs: options.removeVerifyDelayMs });
+  } catch (error) {
+    markUnknown();
+    throw localRemovalStageFailure(error, lane, 'unknown');
+  }
+  if (!removed) {
+    updatePending(options.repoRoot, lane.laneId, ctx.pending, { state: 'localRemovalUnknown' }, env);
+    throw localRemovalStageFailure(new ClaudeTransmogrifyError(
+      'LOCAL_REMOVAL_UNCERTAIN', 'Claude local job removal was not verified',
+    ), lane, 'unknown');
+  }
+  journalLocalRemoved(ctx, {});
 }
 
 // Settle a pending stop by observation only. stopOwnedLane runs with mutation
