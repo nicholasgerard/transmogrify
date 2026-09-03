@@ -111,8 +111,22 @@ test('provenance rendering is deterministic and rejects line injection', () => {
     () => renderProvenanceBlock({ ...metadata, profile: { resolved: { model: 'bad\u0000profile' } } }),
     /single-line/,
   );
+  // A model with no effort selector resolves to { level: null, ... } and must
+  // render without an effort part, never refuse the dispatch.
+  const haiku = renderProvenanceBlock({ ...metadata, profile: {
+    requested: { intent: 'fast-loop' },
+    resolved: {
+      model: { selector: 'claude-haiku-4-5-20251001', selection: 'intent' },
+      effort: { level: null, selection: 'documented-model-default' },
+      speed: { mode: 'standard', selection: 'implicit-standard' },
+    },
+  } });
+  assert.match(haiku, /^│ To {8}Claude Code · claude-haiku-4-5-20251001 · standard speed$/m);
+  assert.match(haiku, /^│ Intent {4}fast-loop$/m);
+  assert.match(renderProvenanceBlock({ ...metadata, profile: { resolved: { effort: { id: 'object-without-level' } } } }),
+    /^│ To {8}Claude Code$/m);
   assert.throws(
-    () => renderProvenanceBlock({ ...metadata, profile: { resolved: { effort: { id: 'object-without-level' } } } }),
+    () => renderProvenanceBlock({ ...metadata, profile: { resolved: { effort: 42 } } }),
     /must be a string/,
   );
 });

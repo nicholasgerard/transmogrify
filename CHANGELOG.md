@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5
+
+- Render a provenance block for a model that has no effort selector. Since
+  0.2.1 every Claude `fast-loop` dispatch, which resolves to Haiku with a null
+  effort, was refused with "profile effort must be a string" before any
+  provider mutation. Found by the Codex-host acceptance run.
+
 ## 0.2.4
 
 - Contain a forked Claude recovery: on the pinned CLI a background resume of

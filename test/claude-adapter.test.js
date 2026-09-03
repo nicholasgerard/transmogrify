@@ -2192,3 +2192,23 @@ test('Claude spawn gives up on a receipt that never arrives once the window clos
   );
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
 });
+
+test('Claude fast-loop dispatch renders provenance for a model with no effort selector', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  const parentContext = createParentContext({
+    hostProvider: 'codex', hostApp: 'codex-desktop', displayName: 'Acceptance: Codex host',
+  }, fixture.env);
+  const result = await spawn({
+    ...spawnOptions(fixture, surface), parentContext, intent: 'fast-loop',
+  }, fixture.env);
+  assert.equal(result.ok, true);
+  const launch = surface.calls.find((call) => call.method === 'launch');
+  assert.ok(launch.args.includes('claude-haiku-4-5-20251001'));
+  assert.equal(launch.args.includes('--effort'), false);
+  const prompt = launch.args[launch.args.length - 1];
+  assert.match(prompt, /^│ To {8}Claude Code · claude-haiku-4-5-20251001 · standard speed$/m);
+  assert.match(prompt, /^│ Intent {4}fast-loop$/m);
+  const [lane] = listLanes(fixture.repoRoot, fixture.env);
+  assert.equal(lane.executionProfile.resolved.effort.level, null);
+});

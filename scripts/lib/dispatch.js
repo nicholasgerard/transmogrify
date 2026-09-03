@@ -416,24 +416,33 @@ const PROVENANCE_BLOCK_WIDTH = 60;
 // The displayable execution selection for the provenance block, accepting both
 // the current and the legacy profile field names. Every part must be bounded and
 // safe or the dispatch is refused.
+// A resolved dimension is either a bare string or a receipt object whose named
+// field may legitimately be null: a model with no effort selector resolves to
+// { level: null, selection: ... } and simply renders without an effort part.
+function profileDimension(value, key, label) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return value ? assertSafeVisible(value, `profile ${label}`, 128) : null;
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const inner = value[key];
+    if (inner === null || inner === undefined || inner === '') return null;
+    if (typeof inner !== 'string') {
+      throw new DispatchError('USAGE_ERROR', `profile ${label} must be a string`);
+    }
+    return assertSafeVisible(inner, `profile ${label}`, 128);
+  }
+  throw new DispatchError('USAGE_ERROR', `profile ${label} must be a string`);
+}
+
 function profileParts(profile) {
   const requested = profile?.requested || profile?.requestedProfile || {};
   const resolved = profile?.resolved || profile?.resolvedProfile || {};
-  const parts = {
-    intent: requested.intent || null,
-    model: resolved.model?.selector || resolved.model || null,
-    effort: resolved.effort?.level || resolved.effort || null,
-    setting: resolved.setting?.id || resolved.setting || null,
-    speed: resolved.speed?.mode || resolved.speed || null,
+  return {
+    intent: profileDimension(requested.intent, 'intent', 'intent'),
+    model: profileDimension(resolved.model, 'selector', 'model'),
+    effort: profileDimension(resolved.effort, 'level', 'effort'),
+    setting: profileDimension(resolved.setting, 'id', 'setting'),
+    speed: profileDimension(resolved.speed, 'mode', 'speed'),
   };
-  for (const [key, value] of Object.entries(parts)) {
-    if (value === null) continue;
-    if (typeof value !== 'string') {
-      throw new DispatchError('USAGE_ERROR', `profile ${key} must be a string`);
-    }
-    assertSafeVisible(value, `profile ${key}`, 128);
-  }
-  return parts;
 }
 
 // Every visible value is reduced to printable ASCII. The frame itself uses
