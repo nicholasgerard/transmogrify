@@ -150,7 +150,7 @@ test('wakeMessage names the lane, the kind, and the exact next commands without 
     child: { laneId: 'lane-9' }, dispatchId: 'd-9', sequence: 4, eventId: 'e-9',
   }, { parentContextFile: '/state/parents/p.json' });
   assert.match(text, /child lane lane-9 reached a terminal state \(failed\)/);
-  assert.match(text, /terminal, terminal\)|\(terminal, terminal\)/);
+  assert.match(text, /\(kind terminal\)/);
   assert.match(text, /lane\.js" wait --parent-context-file "\/state\/parents\/p\.json" --timeout-ms 0/);
   assert.match(text, /ack --parent-context-file "\/state\/parents\/p\.json" --event e-9/);
   assert.match(wakeMessage({ type: 'child.turn-completed', kind: 'complete', child: {}, sequence: 1, eventId: 'x' }),

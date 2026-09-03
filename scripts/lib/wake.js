@@ -202,7 +202,7 @@ function wakeMessage(event, options = {}) {
   const contextFile = options.parentContextFile ? ` --parent-context-file "${options.parentContextFile}"` : '';
   return [
     `[transmogrify] child lane ${event.child?.laneId || 'unknown'} ${kindText}.`,
-    `Event ${event.type} (${event.kind}${event.terminal ? ', terminal' : ''}), dispatch ${event.dispatchId}, sequence ${event.sequence}.`,
+    `Event ${event.type} (kind ${event.kind}), dispatch ${event.dispatchId}, sequence ${event.sequence}.`,
     `Handle it, then acknowledge: node "$SKILL_ROOT/scripts/lane.js" wait${contextFile} --timeout-ms 0` +
       ` && node "$SKILL_ROOT/scripts/lane.js" ack${contextFile} --event ${event.eventId}`,
   ].join('\n');
