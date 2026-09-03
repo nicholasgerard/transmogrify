@@ -31,7 +31,7 @@ const {
 } = require('./state');
 const { AppServerClient, validateUrl } = require('./app-server');
 const {
-  AdapterError, executionRequest, laneResult, profileFailure, worktreesRoot,
+  AdapterError, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot,
 } = require('./adapter-kit');
 const { phaseFields } = require('./output-schema');
 const { sleep } = require('./async');
@@ -109,12 +109,23 @@ const RETIRED_STATES = new Set([
 const UNRESOLVED_SPAWN_STATES = new Set([
   'turnRequestDispatched', 'materialized', 'partial', 'unknown',
 ]);
+// Spawn journal states in which the first turn's input receipt may simply not
+// exist: turn/start was dispatched (or its outcome became unknown) but no turn
+// carrying our client message ever appeared. Deliberately excludes
+// 'materialized', where the receipt was already verified before a later
+// postcondition failed, so a settled turn is never relabeled absent.
+const SPAWN_ABSENCE_JOURNAL_STATES = new Set(['turnRequestDispatched', 'partial', 'unknown']);
 // Bounds for every paginated provider read, plus the measured retry budget for
 // the input receipt that a turn/start response can omit on this runtime line.
 const MAX_PAGINATION_PAGES = 100;
 const MAX_PAGINATION_ROWS = 10_000;
 const DEFAULT_INPUT_RECEIPT_VERIFY_ATTEMPTS = 100;
 const DEFAULT_INPUT_RECEIPT_VERIFY_DELAY_MS = 100;
+// Default and bound for the spawn-absence grace period: how long a
+// turn/start dispatch may go unreceipted before recovery treats the input as
+// proven absent rather than merely not yet observed.
+const DEFAULT_SPAWN_ABSENCE_GRACE_MS = 60_000;
+const MAX_SPAWN_ABSENCE_GRACE_MS = 86_400_000;
 
 // The shared adapter error under the name this adapter has always exported.
 const TransmogrifyError = AdapterError;
@@ -211,6 +222,17 @@ function turnReceiptVerificationBounds(options) {
     throw new TransmogrifyError('USAGE_ERROR', 'invalid turn input receipt verification bounds');
   }
   return { attempts, delayMs };
+}
+
+// Bounded grace period before an absent turn/start receipt settles the spawn
+// journal as not delivered. Out of range is USAGE_ERROR, so no caller can turn
+// this into an instant or unbounded failure trigger.
+function spawnAbsenceGraceMs(options) {
+  const graceMs = options.spawnAbsenceGraceMs ?? DEFAULT_SPAWN_ABSENCE_GRACE_MS;
+  if (!Number.isSafeInteger(graceMs) || graceMs < 0 || graceMs > MAX_SPAWN_ABSENCE_GRACE_MS) {
+    throw new TransmogrifyError('USAGE_ERROR', 'invalid spawn absence grace period');
+  }
+  return graceMs;
 }
 
 // Open one app-server connection for the duration of a callback and always
@@ -1125,6 +1147,9 @@ async function status(options, env = process.env) {
 // newest turn that is not inProgress is NO_ACTIVE_TURN and proven not delivered.
 // A transport failure journals the operation unknown, marks the lane
 // delivery-unknown, and returns DELIVERY_UNCERTAIN without resending anything.
+// The steer carries the operation UUID as clientUserMessageId, the same marker
+// turn/start uses, so an unknown outcome can later be settled by the exact
+// persisted receipt instead of staying unknown until abandoned.
 async function steer(options, env = process.env) {
   if (!options.message) throw new TransmogrifyError('USAGE_ERROR', 'steer requires message');
   let lane = ownedLane(options, env, 'mutate');
@@ -1182,6 +1207,7 @@ async function steer(options, env = process.env) {
         result = await client.call('turn/steer', {
           threadId: lane.providerId,
           expectedTurnId: turn.id,
+          clientUserMessageId: operation.operationId,
           input: [{ type: 'text', text: options.message }],
         });
         if (!result || result.turnId !== turn.id) {
@@ -2249,18 +2275,73 @@ async function recover(options, env = process.env) {
                 repaired: [`clearedUndispatched${pending.type[0].toUpperCase()}${pending.type.slice(1)}`],
               };
             }
+            const pendingInspection = await inspectThread(client, lane);
             if (pending.type === 'steer') {
+              // turn/steer's response carries only { turnId }, no item body to
+              // verify inline the way turn/start's response can. The exact
+              // receipt is the same clientId marker turn/start uses, searched
+              // the same way; its absence only proves non-delivery once the
+              // target turn can no longer accept more steered input.
+              const recoveredTurnId = await findTurnByClientMessage(
+                client,
+                lane.providerId,
+                pending.operationId,
+                pending.details.messageSha256,
+              );
+              if (recoveredTurnId) {
+                if (recoveredTurnId !== pending.details.expectedTurnId) {
+                  throw new TransmogrifyError(
+                    'PROTOCOL_ERROR',
+                    'persisted steer input receipt named a different turn than the steer target',
+                  );
+                }
+                lane = updateLaneFromInspection(options, lane, pendingInspection, env);
+                completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+                  state: 'complete',
+                  details: {
+                    ...pending.details,
+                    recoveredTurnId,
+                    postconditionObservedAt: new Date().toISOString(),
+                  },
+                }, env);
+                return {
+                  laneId: lane.laneId,
+                  providerId: lane.providerId,
+                  state: lane.state,
+                  ...phaseFields('codex', pendingInspection.phase),
+                  delivery: 'confirmed',
+                  repaired: ['steerInputReceipt'],
+                };
+              }
+              const targetIsActive = pendingInspection.turn?.id === pending.details.expectedTurnId &&
+                pendingInspection.turn.status === 'inProgress';
+              if (targetIsActive) {
+                return {
+                  laneId: lane.laneId,
+                  providerId: lane.providerId,
+                  state: lane.state,
+                  delivery: 'unknown',
+                  pendingOperation: 'steer',
+                  repaired: [],
+                };
+              }
+              lane = updateLaneFromInspection(options, lane, pendingInspection, env);
+              completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+                state: 'notDelivered',
+                details: {
+                  ...pending.details,
+                  notDeliveredObservedAt: new Date().toISOString(),
+                },
+              }, env);
               return {
                 laneId: lane.laneId,
                 providerId: lane.providerId,
                 state: lane.state,
-                delivery: 'unknown',
-                pendingOperation: 'steer',
-                repaired: [],
+                ...phaseFields('codex', pendingInspection.phase),
+                delivery: 'notDelivered',
+                repaired: ['steerInputAbsent'],
               };
             }
-
-            const pendingInspection = await inspectThread(client, lane);
             if (pending.type === 'interrupt') {
               const targetIsActive = pendingInspection.turn?.id === pending.details.turnId &&
                 pendingInspection.turn.status === 'inProgress';
@@ -2341,6 +2422,43 @@ async function recover(options, env = process.env) {
               operation.details.inputSha256,
             )
             : null;
+          if (spawnPending && !recoveredSpawnTurnId &&
+              SPAWN_ABSENCE_JOURNAL_STATES.has(operation.state) &&
+              inspected.turn?.status !== 'inProgress' &&
+              typeof operation.details.turnDispatchStartedAt === 'string') {
+            const dispatchedAtMs = Date.parse(operation.details.turnDispatchStartedAt);
+            if (Number.isFinite(dispatchedAtMs) &&
+                nowMs(options) - dispatchedAtMs >= spawnAbsenceGraceMs(options)) {
+              const observedAbsentAt = new Date(nowMs(options)).toISOString();
+              completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+                state: 'notDelivered',
+                details: {
+                  ...operation.details,
+                  outcome: 'spawnInputAbsent',
+                  observedAbsentAt,
+                },
+              }, env);
+              // A spawn only reaches these journal states once its provider id
+              // is bound, so the lane here is one of created, deliveryUnknown,
+              // idle, or active (an earlier observation in this same call can
+              // advance it that far). LANE_TRANSITIONS gives every one of
+              // those a direct edge to failed, so no intermediate hop is
+              // needed.
+              lane = updateLane(options.repoRoot, lane.laneId, {
+                state: 'failed',
+                providerState: inspected.thread.status,
+                turnId: inspected.turn?.id || lane.turnId,
+                lastVerifiedAt: observedAbsentAt,
+              }, env);
+              return {
+                laneId: lane.laneId,
+                providerId: lane.providerId,
+                state: lane.state,
+                delivery: 'notDelivered',
+                repaired: ['spawnInputAbsent'],
+              };
+            }
+          }
           if (['created', 'materialized', 'deliveryUnknown'].includes(lane.state) &&
               inspected.turn && (!spawnPending || recoveredSpawnTurnId)) {
             if (inspected.thread.name !== lane.displayName) {

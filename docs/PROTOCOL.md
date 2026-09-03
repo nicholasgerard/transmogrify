@@ -267,6 +267,14 @@ rendered as a user message in the native Codex app. Steering a thread whose
 newest turn was not active returned the operation-specific JSON-RPC precondition
 error, which `lane.js steer` reports as `NO_ACTIVE_TURN` with exit 2.
 
+**Schema-derived, not yet live-verified.** `v2/TurnSteerParams.json` accepts
+an optional `clientUserMessageId` with the same shape as
+`TurnStartParams.clientUserMessageId`, and `v2/TurnSteerResponse.json` carries
+only `turnId`. The adapter sends the steer operation id as that marker and
+reconciliation looks for it among the target turn's `userMessage` items, so a
+steer whose outcome was lost can be settled from the persisted receipt. The
+first live steer recovery should be recorded here.
+
 `thread/read {includeTurns:true}` returned `list_turns is not supported yet`
 even though `includeTurns` appears in `v2/ThreadReadParams.json`. Use
 `thread/turns/list`; never infer turn history from `thread/read` on this runtime

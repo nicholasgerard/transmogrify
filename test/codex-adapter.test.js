@@ -1060,14 +1060,17 @@ test('Codex steer and interrupt use only the newest exact active turn', async (t
     url: server.url,
   }, fixture.env);
   await interrupt({ repoRoot: fixture.repoRoot, providerId: 'thread-owned', url: server.url }, fixture.env);
-  assert.deepEqual(mutations.map((request) => request.params), [
-    {
-      threadId: 'thread-owned',
-      expectedTurnId: 'turn-newest',
-      input: [{ type: 'text', text: 'Orchestrator: adjust' }],
-    },
-    { threadId: 'thread-owned', turnId: 'turn-newest' },
-  ]);
+  assert.equal(mutations.length, 2);
+  const { clientUserMessageId, ...steerParams } = mutations[0].params;
+  const steerOperation = listOperations(fixture.repoRoot, fixture.env)
+    .find((entry) => entry.type === 'steer');
+  assert.equal(clientUserMessageId, steerOperation.operationId);
+  assert.deepEqual(steerParams, {
+    threadId: 'thread-owned',
+    expectedTurnId: 'turn-newest',
+    input: [{ type: 'text', text: 'Orchestrator: adjust' }],
+  });
+  assert.deepEqual(mutations[1].params, { threadId: 'thread-owned', turnId: 'turn-newest' });
 });
 
 test('Codex steer journals dispatch before delivery and never replays an unknown result', async (t) => {
@@ -2587,4 +2590,313 @@ test('Codex recovery repairs a transport-unknown first turn without replaying in
   assert.equal(lane.state, 'active');
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].state, 'complete');
+});
+
+// A pending spawn journal already bound to its provider thread, stuck in one
+// of the states in which turn/start's input receipt may simply be absent.
+function spawnAbsenceFixture(fixture, server, state, turnDispatchStartedAt) {
+  const lane = registerOwned(fixture, server.url, 'created');
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'spawn',
+    state,
+    providerId: lane.providerId,
+    details: {
+      target: 'codex',
+      name: lane.displayName,
+      inputSha256: 'a'.repeat(64),
+      turnDispatchStartedAt,
+    },
+  }, fixture.env);
+  return { lane, operation };
+}
+
+const FORBIDDEN_MUTATIONS = ['turn/start', 'turn/steer', 'thread/resume', 'thread/archive'];
+
+test('Codex recovery keeps a spawn absence pending before its grace period elapses', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, { id: 'thread-owned', status: { type: 'idle' } });
+    }
+    if (request.method === 'thread/turns/list') return { result: { data: [] } };
+    if (request.method === 'thread/items/list') return { result: { data: [], nextCursor: null } };
+    throw new Error(`unexpected provider request ${request.method}`);
+  });
+  t.after(() => server.close());
+  const turnDispatchStartedAt = '2026-09-01T00:00:00.000Z';
+  const { lane, operation } = spawnAbsenceFixture(fixture, server, 'turnRequestDispatched', turnDispatchStartedAt);
+
+  const result = await recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    url: server.url,
+    clock: () => Date.parse(turnDispatchStartedAt) + 59_000,
+  }, fixture.env);
+  assert.equal(result.ok, false);
+  assert.equal(result.recovered[0].delivery, 'unknown');
+  assert.equal(result.recovered[0].pendingOperation, 'spawn');
+  assert.deepEqual(result.recovered[0].repaired, []);
+  const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
+  assert.equal(pending.operationId, operation.operationId);
+  assert.equal(pending.state, 'turnRequestDispatched');
+  assert.equal(server.requests.some((request) => FORBIDDEN_MUTATIONS.includes(request.method)), false);
+});
+
+test('Codex recovery settles an elapsed spawn absence as not delivered without dispatching input', async (t) => {
+  for (const state of ['turnRequestDispatched', 'partial', 'unknown']) {
+    await t.test(state, async (st) => {
+      const fixture = createRepoWithSeat(st);
+      const server = await startMockAppServer((request) => {
+        if (request.method === 'thread/read') {
+          return threadReadResult(fixture, { id: 'thread-owned', status: { type: 'idle' } });
+        }
+        if (request.method === 'thread/turns/list') return { result: { data: [] } };
+        if (request.method === 'thread/items/list') return { result: { data: [], nextCursor: null } };
+        throw new Error(`unexpected provider request ${request.method}`);
+      });
+      st.after(() => server.close());
+      const turnDispatchStartedAt = '2026-09-01T00:00:00.000Z';
+      const { lane, operation } = spawnAbsenceFixture(fixture, server, state, turnDispatchStartedAt);
+
+      const result = await recover({
+        repoRoot: fixture.repoRoot,
+        laneId: lane.laneId,
+        url: server.url,
+        clock: () => Date.parse(turnDispatchStartedAt) + 61_000,
+      }, fixture.env);
+      assert.equal(result.ok, true);
+      assert.equal(result.recovered[0].delivery, 'notDelivered');
+      assert.deepEqual(result.recovered[0].repaired, ['spawnInputAbsent']);
+      assert.equal(result.recovered[0].state, 'failed');
+      assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'failed');
+      assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+      const settled = listOperations(fixture.repoRoot, fixture.env)
+        .find((entry) => entry.operationId === operation.operationId);
+      assert.equal(settled.state, 'notDelivered');
+      assert.equal(settled.details.outcome, 'spawnInputAbsent');
+      assert.match(settled.details.observedAbsentAt, /^\d{4}-\d{2}-\d{2}T/);
+      assert.equal(server.requests.some((request) => FORBIDDEN_MUTATIONS.includes(request.method)), false);
+    });
+  }
+});
+
+test('Codex recovery keeps a spawn absence pending while a turn is in progress', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, { id: 'thread-owned', status: { type: 'active', activeFlags: [] } });
+    }
+    if (request.method === 'thread/turns/list') {
+      return { result: { data: [{ id: 'turn-in-flight', status: 'inProgress', items: [] }] } };
+    }
+    if (request.method === 'thread/items/list') return { result: { data: [], nextCursor: null } };
+    throw new Error(`unexpected provider request ${request.method}`);
+  });
+  t.after(() => server.close());
+  const turnDispatchStartedAt = '2026-09-01T00:00:00.000Z';
+  const { lane, operation } = spawnAbsenceFixture(fixture, server, 'unknown', turnDispatchStartedAt);
+
+  const result = await recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    url: server.url,
+    clock: () => Date.parse(turnDispatchStartedAt) + 3_600_000,
+  }, fixture.env);
+  assert.equal(result.ok, false);
+  assert.equal(result.recovered[0].delivery, 'unknown');
+  assert.equal(result.recovered[0].pendingOperation, 'spawn');
+  assert.deepEqual(result.recovered[0].repaired, []);
+  const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
+  assert.equal(pending.operationId, operation.operationId);
+  assert.equal(pending.state, 'unknown');
+  assert.equal(server.requests.some((request) => FORBIDDEN_MUTATIONS.includes(request.method)), false);
+});
+
+test('Codex recovery settles a pending steer as complete when its persisted receipt is found', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const message = 'steer settles from receipt';
+  let steerOperationId;
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, { id: 'thread-owned', status: { type: 'active', activeFlags: [] } });
+    }
+    if (request.method === 'thread/turns/list') {
+      return { result: { data: [{ id: 'turn-steer-active', status: 'inProgress', items: [] }] } };
+    }
+    if (request.method === 'thread/items/list') {
+      return { result: { data: [{
+        turnId: 'turn-steer-active',
+        item: {
+          id: 'user-steer-1',
+          type: 'userMessage',
+          clientId: steerOperationId,
+          content: [{ type: 'text', text: message }],
+        },
+      }], nextCursor: null } };
+    }
+    throw new Error(`unexpected provider request ${request.method}`);
+  });
+  t.after(() => server.close());
+  const lane = registerOwned(fixture, server.url, 'active');
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'steer',
+    state: 'unknown',
+    providerId: lane.providerId,
+    details: {
+      target: 'codex',
+      expectedTurnId: 'turn-steer-active',
+      messageSha256: crypto.createHash('sha256').update(message).digest('hex'),
+    },
+  }, fixture.env);
+  steerOperationId = operation.operationId;
+
+  const result = await recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    url: server.url,
+  }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(result.recovered[0].delivery, 'confirmed');
+  assert.deepEqual(result.recovered[0].repaired, ['steerInputReceipt']);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  const settled = listOperations(fixture.repoRoot, fixture.env)
+    .find((entry) => entry.operationId === operation.operationId);
+  assert.equal(settled.state, 'complete');
+  assert.equal(settled.details.recoveredTurnId, 'turn-steer-active');
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'active');
+});
+
+test('Codex recovery settles a pending steer as not delivered once its target turn ends unreceipted', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const message = 'steer never landed';
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, { id: 'thread-owned', status: { type: 'idle' } });
+    }
+    if (request.method === 'thread/turns/list') {
+      return { result: { data: [{ id: 'turn-steer-done', status: 'completed', items: [] }] } };
+    }
+    if (request.method === 'thread/items/list') return { result: { data: [], nextCursor: null } };
+    throw new Error(`unexpected provider request ${request.method}`);
+  });
+  t.after(() => server.close());
+  const lane = registerOwned(fixture, server.url, 'active');
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'steer',
+    state: 'dispatching',
+    providerId: lane.providerId,
+    details: {
+      target: 'codex',
+      expectedTurnId: 'turn-steer-done',
+      messageSha256: crypto.createHash('sha256').update(message).digest('hex'),
+    },
+  }, fixture.env);
+
+  const result = await recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    url: server.url,
+  }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.equal(result.recovered[0].delivery, 'notDelivered');
+  assert.deepEqual(result.recovered[0].repaired, ['steerInputAbsent']);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  const settled = listOperations(fixture.repoRoot, fixture.env)
+    .find((entry) => entry.operationId === operation.operationId);
+  assert.equal(settled.state, 'notDelivered');
+  assert.match(settled.details.notDeliveredObservedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'idle');
+  assert.equal(server.requests.some((request) => FORBIDDEN_MUTATIONS.includes(request.method)), false);
+});
+
+test('Codex recovery keeps a pending steer unknown while its target turn is still active and unreceipted', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const message = 'steer still in flight';
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, { id: 'thread-owned', status: { type: 'active', activeFlags: [] } });
+    }
+    if (request.method === 'thread/turns/list') {
+      return { result: { data: [{ id: 'turn-steer-active', status: 'inProgress', items: [] }] } };
+    }
+    if (request.method === 'thread/items/list') return { result: { data: [], nextCursor: null } };
+    throw new Error(`unexpected provider request ${request.method}`);
+  });
+  t.after(() => server.close());
+  const lane = registerOwned(fixture, server.url, 'active');
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'steer',
+    state: 'unknown',
+    providerId: lane.providerId,
+    details: {
+      target: 'codex',
+      expectedTurnId: 'turn-steer-active',
+      messageSha256: crypto.createHash('sha256').update(message).digest('hex'),
+    },
+  }, fixture.env);
+
+  const result = await recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    url: server.url,
+  }, fixture.env);
+  assert.equal(result.ok, false);
+  assert.equal(result.recovered[0].delivery, 'unknown');
+  assert.equal(result.recovered[0].pendingOperation, 'steer');
+  assert.deepEqual(result.recovered[0].repaired, []);
+  const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
+  assert.equal(pending.operationId, operation.operationId);
+  assert.equal(pending.state, 'unknown');
+  assert.equal(server.requests.some((request) => FORBIDDEN_MUTATIONS.includes(request.method)), false);
+});
+
+test('Codex recovery fails closed when a persisted steer receipt names a different turn', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const message = 'steer receipt mismatch';
+  let steerOperationId;
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return threadReadResult(fixture, { id: 'thread-owned', status: { type: 'active', activeFlags: [] } });
+    }
+    if (request.method === 'thread/turns/list') {
+      return { result: { data: [{ id: 'turn-steer-active', status: 'inProgress', items: [] }] } };
+    }
+    if (request.method === 'thread/items/list') {
+      return { result: { data: [{
+        turnId: 'turn-other',
+        item: {
+          id: 'user-steer-mismatch',
+          type: 'userMessage',
+          clientId: steerOperationId,
+          content: [{ type: 'text', text: message }],
+        },
+      }], nextCursor: null } };
+    }
+    throw new Error(`unexpected provider request ${request.method}`);
+  });
+  t.after(() => server.close());
+  const lane = registerOwned(fixture, server.url, 'active');
+  const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
+    type: 'steer',
+    state: 'unknown',
+    providerId: lane.providerId,
+    details: {
+      target: 'codex',
+      expectedTurnId: 'turn-steer-active',
+      messageSha256: crypto.createHash('sha256').update(message).digest('hex'),
+    },
+  }, fixture.env);
+  steerOperationId = operation.operationId;
+
+  const result = await recover({
+    repoRoot: fixture.repoRoot,
+    laneId: lane.laneId,
+    url: server.url,
+  }, fixture.env);
+  assert.equal(result.ok, false);
+  assert.equal(result.recovered[0].code, 'PROTOCOL_ERROR');
+  assert.match(result.recovered[0].error, /different turn/);
+  const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
+  assert.equal(pending.operationId, operation.operationId);
+  assert.equal(pending.state, 'unknown');
 });

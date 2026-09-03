@@ -305,8 +305,15 @@ was explicitly authorized for this run.
   pinned CLI forks instead, the adapter stops that copy and the lane stays
   stopped (`forkedCopyStopped`).
 - A Codex thread whose first turn has no receipt keeps its spawn journal
-  open and the parent receives `child.needs-attention`; its exact `retire`
-  closes the journal and archives the empty thread.
+  open and the parent receives `child.needs-attention` until the input has
+  been absent for the grace period (60 s by default); reconciliation then
+  settles it `notDelivered` (`spawnInputAbsent`) and fails the lane without
+  touching the thread. Its exact `retire` archives the thread.
+- A Codex steer left unknown is settled by reconciliation from the steer's
+  own client message marker in the turn's items: `complete`
+  (`steerInputReceipt`) when found, `notDelivered` (`steerInputAbsent`) once
+  the target turn ended without it; it stays unknown only while that turn is
+  still active.
 - A Claude spawn returning `SPAWN_UNCERTAIN` with
   `causeCode: REMOTE_CONTROL_UNAVAILABLE` never registered Remote Control,
   almost always a broken login. Follow the printed `ownerAction`; the lane

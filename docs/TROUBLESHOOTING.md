@@ -390,13 +390,27 @@ continued explicitly with `--finish-retirements --private-archive`. Do not use
 that flag for general reconciliation.
 
 A Codex lane whose thread was created but whose first turn never receipted
-stays pending after reconciliation, and its parent receives one
-`child.needs-attention` event per journal state. Reconciliation never replays
-the input. To abandon the lane, run its exact `retire` command with the harvest
-digest of whatever output exists; retirement re-inspects the thread, refuses
-while a turn is active, closes the spawn journal, and archives the empty
-thread. A lane that never received its thread ID keeps its attention event and
-its seat for owner review; no provider call can be replayed for it.
+stays pending, and its parent receives one `child.needs-attention` event per
+journal state, until the `turn/start` dispatch is older than the spawn-absence
+grace period (`spawnAbsenceGraceMs`, 60 s by default). Once that period has
+passed with no turn in progress and no turn carrying the client's message
+marker, reconciliation proves the input absent: it settles the spawn journal
+`notDelivered` (`spawnInputAbsent`) and moves the lane to `failed`, still
+without replaying the input or touching the thread. Either way, the exact
+`retire` command with the harvest digest of whatever output exists
+re-inspects the thread, refuses while a turn is active, closes any journal
+still open, and archives the thread. A lane that never received its thread
+ID is unaffected by the grace period: it keeps its attention event and its
+seat for owner review, and no provider call can be replayed for it.
+
+A Codex steer left unknown by a crash or transport failure is provable by
+reconciliation as well: every steer carries its operation id as the
+`clientUserMessageId`, so reconciliation searches the target turn's items for
+that marker and settles the journal `complete` (`steerInputReceipt`) when it
+is found, or `notDelivered` (`steerInputAbsent`) once that turn is no longer
+in progress and the marker is absent. It stays open only while the target turn
+is still active and unreceipted. The marker on `turn/steer` is schema-derived
+from the pinned runtime line and not yet observed live.
 
 When reconciliation leaves a spawn, steer, stop, recover, resume, or interrupt
 journal open and the owner decides to stop waiting, `abandon` closes it:
