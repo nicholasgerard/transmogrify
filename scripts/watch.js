@@ -14,7 +14,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { parseArgs } = require('node:util');
-const { countEvents, listEvents, loadParentContext, pathsFor } = require('./lib/dispatch');
+const { countEvents, listEvents, loadParentContext, watcherPaths } = require('./lib/dispatch');
 const { observeParentChildren, outstandingDispatches, resolveDispatchLane } = require('./lib/observe');
 const { createObserverCache } = require('./lib/observer-cache');
 const { AppServerClient, validateUrl } = require('./lib/app-server');
@@ -71,16 +71,6 @@ exit codes (shared by every Transmogrify command):
   2  usage error
   3  the watcher could not run (lock, parent context, or observation failure)
   1  unexpected internal error`;
-
-function watcherPaths(parentRef, env) {
-  const root = path.join(pathsFor(env).root, 'watchers');
-  return {
-    root,
-    record: path.join(root, `${parentRef}.json`),
-    log: path.join(root, `${parentRef}.log`),
-    nudge: path.join(root, `${parentRef}.nudge`),
-  };
-}
 
 // Ask a running watcher to observe now instead of at its next poll. Called by
 // the parent's own commands after they change a child, so an idle child that
@@ -405,7 +395,9 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
       if (subscription && !subscription.connected() && pass.codexOutstanding > 0) subscription.start();
     }
     const interval = pass.working ? ACTIVE_POLL_MS : pass.outstanding > 0 ? QUIET_POLL_MS : SETTLED_POLL_MS;
-    await sleepUntilNudged(interval, paths, dependencies, subscription);
+    if (await sleepUntilNudged(interval, paths, dependencies, subscription)) {
+      appendLog(paths, `nudged ${subscription?.pending() ? 'by a runtime notification' : 'by a command or child hook'}`);
+    }
   }
   if (subscription) subscription.stop();
   cache.forget();

@@ -20,6 +20,12 @@
   (`lib/observer-cache.js`), shares one loopback connection per round for
   Codex reads, and subscribes to the app-server's notifications so an
   outstanding Codex child is read the moment the runtime reports a change.
+- Claude children spawned for a parent carry session hooks (one private
+  settings file per lane, passed with `--settings`) that nudge the parent's
+  watcher when a turn ends, the session ends, or a notification is raised,
+  so a child is read the moment it finishes instead of being polled;
+  `TRANSMOGRIFY_CHILD_HOOKS=off` disables it. Verified live on the pinned
+  CLI.
 
 ## 0.3.1
 

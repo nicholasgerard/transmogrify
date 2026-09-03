@@ -17,7 +17,8 @@ const {
 } = require('../scripts/lib/claude-adapter');
 const { errorEffect } = require('../scripts/lane');
 const { deadlineFor } = require('../scripts/lib/adapter-kit');
-const { createParentContext, readDispatch } = require('../scripts/lib/dispatch');
+const { createParentContext, readDispatch, childHooksPath, watcherPaths,
+} = require('../scripts/lib/dispatch');
 const { exactOwnedAgent, MAX_STEER_BYTES } = require('../scripts/lib/claude-surface');
 const {
   beginLaneOperation, completeLaneOperation, listLanes, listOperations,
@@ -368,8 +369,9 @@ test('Claude dispatched profiles render provenance and survive exact-session rec
     '--bg', '--name', '::: native Claude lane',
     '--remote-control', '::: native Claude lane',
     '--model', 'claude-opus-5', '--effort', 'high',
-    '--settings', '{"fastMode":false}',
+    '--settings', childHooksPath(lane.laneId, fixture.env),
   ]);
+  assert.equal(JSON.parse(fs.readFileSync(childHooksPath(lane.laneId, fixture.env), 'utf8')).fastMode, false, 'the hooks file carries the fast-mode pin');
   assert.match(launch.args[11], /^╭─ Transmogrify · a task from your user's own session ─+\n/);
   assert.match(launch.args[11], /^│ From {6}Codex Desktop$/m);
   assert.match(launch.args[11], /^│ Task {6}"Release operator"$/m);
@@ -384,7 +386,7 @@ test('Claude dispatched profiles render provenance and survive exact-session rec
 
   surface.expectedResumeArgs = [
     '--resume', SESSION_ID, '--bg', '--model', 'claude-opus-5',
-    '--effort', 'high', '--settings', '{"fastMode":false}',
+    '--effort', 'high', '--settings', childHooksPath(lane.laneId, fixture.env),
   ];
   await stop({
     repoRoot: fixture.repoRoot,
@@ -422,7 +424,7 @@ test('Claude ultracode compiles xhigh plus dynamic workflows and survives recove
     '--bg', '--name', '::: native Claude lane',
     '--remote-control', '::: native Claude lane',
     '--model', 'claude-opus-5', '--effort', 'ultracode',
-    '--settings', '{"fastMode":false}',
+    '--settings', childHooksPath(lane.laneId, fixture.env),
   ]);
   assert.equal(lane.executionProfile.requested.effort, null);
   assert.equal(lane.executionProfile.requested.setting, 'ultracode');
@@ -433,7 +435,7 @@ test('Claude ultracode compiles xhigh plus dynamic workflows and survives recove
 
   surface.expectedResumeArgs = [
     '--resume', SESSION_ID, '--bg', '--model', 'claude-opus-5',
-    '--effort', 'ultracode', '--settings', '{"fastMode":false}',
+    '--effort', 'ultracode', '--settings', childHooksPath(lane.laneId, fixture.env),
   ];
   await stop({
     repoRoot: fixture.repoRoot,
@@ -2383,4 +2385,60 @@ test('Claude reconciliation reports a retired lane as already retired without co
   assert.equal(result.ok, true);
   assert.deepEqual(result.results.map((entry) => [entry.outcome, entry.delivery, entry.pendingOperation]), [['alreadyRetired', 'confirmed', null]]);
   assert.deepEqual(surface.calls.slice(callsBefore).map((call) => call.method), [], 'no runtime preflight for a retired lane');
+});
+
+test('a Claude child spawned for a parent carries hooks that nudge the parent watcher, reapplied on resume and removed at retirement', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  const parentContext = createParentContext({
+    hostProvider: 'claude', hostApp: 'claude-code', displayName: 'Hooked parent',
+  }, fixture.env);
+  const result = await spawn({ ...spawnOptions(fixture, surface), parentContext }, fixture.env);
+  assert.equal(result.ok, true);
+  const lane = listLanes(fixture.repoRoot, fixture.env)[0];
+  const launch = surface.calls.find((call) => call.method === 'launch');
+  const settingsIndex = launch.args.indexOf('--settings');
+  assert.ok(settingsIndex > 0, 'the launch passes a settings file');
+  const settingsFile = launch.args[settingsIndex + 1];
+  assert.equal(settingsFile, childHooksPath(lane.laneId, fixture.env));
+  assert.equal(fs.statSync(settingsFile).mode & 0o077, 0);
+  const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  assert.deepEqual(Object.keys(settings.hooks).sort(), ['Notification', 'SessionEnd', 'Stop']);
+  const nudge = watcherPaths(parentContext.parent.parentRef, fixture.env).nudge;
+  for (const entries of Object.values(settings.hooks)) {
+    assert.equal(entries[0].hooks[0].type, 'command');
+    assert.ok(entries[0].hooks[0].command.includes(`> "${nudge}"`), 'the hook only touches the parent nudge file');
+  }
+  assert.equal(typeof settings.fastMode, 'boolean', 'the execution pin travels in the same file');
+
+  // The hook command works as written and produces the nudge the watcher polls.
+  execFileSync('/bin/sh', ['-c', settings.hooks.Stop[0].hooks[0].command.replace(/^\/bin\/sh -c '/, '').replace(/'$/, '')]);
+  assert.ok(fs.existsSync(nudge));
+
+  await stop({ repoRoot: fixture.repoRoot, laneId: lane.laneId, surface }, fixture.env);
+  const privateApi = { preflight() {}, async ensureArchived() { return { archived: true, alreadyArchived: false }; } };
+  await retire({
+    repoRoot: fixture.repoRoot, laneId: lane.laneId, surface, privateApi, privateArchive: true,
+    harvestedOutputSha256: 'a'.repeat(64), stopVerifyAttempts: 2, stopVerifyDelayMs: 0,
+    removeVerifyAttempts: 2, removeVerifyDelayMs: 0,
+  }, fixture.env);
+  assert.equal(fs.existsSync(settingsFile), false, 'retirement removes the hooks file');
+});
+
+test('a Claude child without a parent, or with child hooks disabled, is launched without a settings file', async (t) => {
+  const plain = await spawnedLane(t);
+  const plainLaunch = plain.surface.calls.find((call) => call.method === 'launch');
+  const plainSettings = plainLaunch.args.filter((arg, index) => index > 0 && plainLaunch.args[index - 1] === '--settings');
+  assert.ok(plainSettings.every((value) => value.startsWith('{')));
+
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  const parentContext = createParentContext({
+    hostProvider: 'claude', hostApp: 'claude-code', displayName: 'Unhooked parent',
+  }, fixture.env);
+  await spawn({ ...spawnOptions(fixture, surface), parentContext }, { ...fixture.env, TRANSMOGRIFY_CHILD_HOOKS: 'off' });
+  const launch = surface.calls.find((call) => call.method === 'launch');
+  const settingsValues = launch.args.filter((arg, index) => index > 0 && launch.args[index - 1] === '--settings');
+  assert.ok(settingsValues.every((value) => value.startsWith('{')), 'only the inline fast-mode pin, never a hooks file');
+  assert.equal(fs.existsSync(childHooksPath(listLanes(fixture.repoRoot, fixture.env)[0].laneId, fixture.env)), false);
 });

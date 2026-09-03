@@ -21,7 +21,56 @@ const {
   createClaudeSurface,
   MAX_STEER_BYTES, parseJobId, sha256,
 } = require('./claude-surface');
-const { failDispatch, markDispatchJournaled, recordEvent, reserveDispatch } = require('./dispatch');
+const {
+  childHooksPath, failDispatch, markDispatchJournaled, recordEvent, reserveDispatch, watcherPaths,
+} = require('./dispatch');
+
+// A child launched for a parent carries session hooks (through the CLI's
+// --settings) whose only action is to touch the parent's watcher nudge file
+// when the child's turn ends, when its session ends, and when it raises a
+// notification. The watcher then reads the child at once through the normal
+// verified path instead of polling it; the hook itself asserts nothing.
+// Verified live on the pinned CLI on 2026-09-03 (prompt submit, stop, and
+// session end all fired through --settings). TRANSMOGRIFY_CHILD_HOOKS=off
+// disables it.
+function childHooksEnabled(env) {
+  return env.TRANSMOGRIFY_CHILD_HOOKS !== 'off';
+}
+
+function safeHookPath(candidate) {
+  return typeof candidate === 'string' && /^[A-Za-z0-9._\/-]+$/.test(candidate);
+}
+
+// Returns the settings file path, or null when the state root cannot be
+// named safely inside a shell command (the child then runs without hooks and
+// the watcher polls it).
+function writeChildHooksSettings(laneId, parentRef, execution, env) {
+  const file = childHooksPath(laneId, env);
+  const nudge = watcherPaths(parentRef, env).nudge;
+  if (!safeHookPath(nudge)) return null;
+  const command = "/bin/sh -c 'mkdir -p \"" + path.dirname(nudge) + "\" && date +%s > \"" + nudge + "\"'";
+  const hook = [{ hooks: [{ type: 'command', command, timeout: 5 }] }];
+  const settings = {
+    ...(execution?.fastMode !== undefined ? { fastMode: execution.fastMode } : {}),
+    hooks: { Stop: hook, SessionEnd: hook, Notification: hook },
+  };
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = file + '.' + process.pid + '.tmp';
+  fs.writeFileSync(temporary, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(temporary, file);
+  return file;
+}
+
+// The settings file a lane's session was launched with, when it still exists,
+// so a resume reapplies the same hooks and fast-mode pin.
+function existingChildHooksSettings(laneId, env) {
+  const file = childHooksPath(laneId, env);
+  try { return fs.statSync(file).isFile() ? file : null; } catch { return null; }
+}
+
+function removeChildHooksSettings(laneId, env) {
+  try { fs.unlinkSync(childHooksPath(laneId, env)); } catch { /* never written or already gone */ }
+}
 
 // A spawn that fails before its lane is reserved leaves the parent a dispatch
 // with nothing to observe; settle it as failed so the parent is told once and
@@ -718,8 +767,13 @@ async function spawnLane(options, env = process.env) {
   const spawnNonce = crypto.randomUUID();
   const marker = `[transmogrify spawn ${spawnNonce}]`;
   const prompt = `${options.input}\n\n${marker}`;
+  const execution = options.executionProfile ? resolvedExecution : { model: options.model };
+  const settingsFile = (dispatchEnvelope && childHooksEnabled(env)
+    ? writeChildHooksSettings(laneId, dispatchEnvelope.dispatch.parentRef, execution, env)
+    : null) || undefined;
   const argv = claudeSpawnArgs(options.name, prompt, {
-    ...(options.executionProfile ? resolvedExecution : { model: options.model }),
+    ...execution,
+    ...(settingsFile ? { fastMode: undefined, settingsFile } : {}),
   });
   const paths = projectPaths(options.repoRoot, env);
   const stdoutPath = path.join(paths.operations, `${operationId}.spawn.stdout`);
@@ -804,6 +858,7 @@ async function spawnLane(options, env = process.env) {
       }, env);
       updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
       removeDurableSpawnReceipts(options.repoRoot, lane, env);
+      removeChildHooksSettings(lane.laneId, env);
       completePending(options.repoRoot, lane.laneId, operation, {
         state: 'notDelivered', details: { ...operation.details, errorCode: error.code },
       }, env);
@@ -1446,9 +1501,10 @@ async function recover(options, env = process.env) {
       state: 'dispatching',
     }, env);
     try {
+      const resumeSettings = existingChildHooksSettings(lane.laneId, env);
       const dispatched = await surface.run(runtime, claudeResumeArgs(
         lane.providerId,
-        executionArgs(lane.executionProfile),
+        { ...executionArgs(lane.executionProfile), ...(resumeSettings ? { fastMode: undefined, settingsFile: resumeSettings } : {}) },
       ), {
         cwd: lane.seat.path, timeoutMs: options.commandTimeoutMs,
       });
@@ -1896,6 +1952,7 @@ async function retire(options, env = process.env) {
       lane = updateLane(options.repoRoot, lane.laneId, {
         state: 'archivedVerified', lastVerifiedAt: new Date().toISOString(),
       }, env);
+      removeChildHooksSettings(lane.laneId, env);
     }
 
     if (lane.seat.managed !== true) {
@@ -2099,6 +2156,7 @@ async function reconcilePendingSpawn(options, env, surface, runtime, lane, opera
   }
   if (operation.state === 'notDeliveredCaptureCleanup') {
     removeDurableSpawnReceipts(options.repoRoot, lane, env);
+    removeChildHooksSettings(lane.laneId, env);
     if (lane.state !== 'failed') lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
     completePending(options.repoRoot, lane.laneId, operation, { state: 'notDelivered' }, env);
     return { lane, outcome: 'spawnNotDelivered' };

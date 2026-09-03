@@ -351,6 +351,25 @@ const HOST_APPS = Object.freeze({
   claude: Object.freeze(['claude-code', 'claude-desktop', 'claude-web']),
 });
 
+// Where a parent's watcher keeps its record, log, and nudge file, and where a
+// child's hook settings live. Shared by the watcher, the lane commands that
+// nudge it, and the adapters that write child hooks.
+function watcherPaths(parentRef, env = process.env) {
+  if (!UUID_PATTERN.test(parentRef || '')) throw new DispatchError('USAGE_ERROR', 'parent reference is invalid');
+  const root = path.join(pathsFor(env).root, 'watchers');
+  return {
+    root,
+    record: path.join(root, `${parentRef}.json`),
+    log: path.join(root, `${parentRef}.log`),
+    nudge: path.join(root, `${parentRef}.nudge`),
+  };
+}
+
+function childHooksPath(laneId, env = process.env) {
+  if (!UUID_PATTERN.test(laneId || '')) throw new DispatchError('USAGE_ERROR', 'lane id is invalid');
+  return path.join(pathsFor(env).root, 'hooks', `${laneId}.json`);
+}
+
 function createParentContext(options, env = process.env) {
   if (!SLUG_PATTERN.test(options?.hostProvider || '') || !SLUG_PATTERN.test(options?.hostApp || '')) {
     throw new DispatchError('USAGE_ERROR', 'parent host provider and app must be lowercase slugs');
@@ -1251,6 +1270,8 @@ module.exports = {
   loadParentContext,
   failDispatch,
   markDispatchJournaled,
+  watcherPaths,
+  childHooksPath,
   pathsFor,
   profileParts,
   readDispatch,

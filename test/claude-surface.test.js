@@ -553,3 +553,19 @@ test('Claude delivery receipts survive the CLI peer-message wrapper around the m
     deliveryToken: token,
   }).state, 'consumedObserved');
 });
+
+test('a settings file replaces the inline fast-mode settings in the spawn and resume argv', () => {
+  const { claudeSpawnArgs, claudeResumeArgs } = require('../scripts/lib/claude-surface');
+  const spawnArgs = claudeSpawnArgs('::: lane: hooked', 'do work', {
+    model: 'claude-opus-5', fastMode: undefined, settingsFile: '/state/hooks/lane.json',
+  });
+  assert.deepEqual(spawnArgs.slice(-5, -1), ['--model', 'claude-opus-5', '--settings', '/state/hooks/lane.json']);
+  assert.equal(spawnArgs.filter((arg) => arg === '--settings').length, 1);
+  const resumeArgs = claudeResumeArgs('11111111-1111-4111-8111-111111111111', {
+    fastMode: true, settingsFile: '/state/hooks/lane.json',
+  });
+  assert.ok(resumeArgs.includes('/state/hooks/lane.json'));
+  assert.equal(resumeArgs.includes('{"fastMode":true}'), false, 'the file carries the pin instead');
+  assert.throws(() => claudeSpawnArgs('::: lane: hooked', 'do work', { settingsFile: 'relative.json' }),
+    (error) => error.code === 'USAGE_ERROR');
+});

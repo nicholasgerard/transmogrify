@@ -136,10 +136,17 @@ function appendExecutionArgs(args, options = {}) {
     }
     args.push('--effort', options.effort);
   }
-  if (options.fastMode !== undefined) {
-    if (typeof options.fastMode !== 'boolean') {
-      throw new ClaudeSurfaceError('USAGE_ERROR', 'Claude fast mode must be boolean');
+  if (options.fastMode !== undefined && typeof options.fastMode !== 'boolean') {
+    throw new ClaudeSurfaceError('USAGE_ERROR', 'Claude fast mode must be boolean');
+  }
+  if (options.settingsFile !== undefined) {
+    // One settings file carries every setting the lane pins (fast mode and
+    // its hooks); the CLI accepts a single --settings.
+    if (typeof options.settingsFile !== 'string' || !path.isAbsolute(options.settingsFile)) {
+      throw new ClaudeSurfaceError('USAGE_ERROR', 'Claude settings file must be an absolute path');
     }
+    args.push('--settings', options.settingsFile);
+  } else if (options.fastMode !== undefined) {
     args.push('--settings', JSON.stringify({ fastMode: options.fastMode }));
   }
   return args;

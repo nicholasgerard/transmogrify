@@ -159,9 +159,14 @@ connection per round for Codex reads; a subscription to the app-server's
 own notifications (`thread/status/changed`, `turn/started`,
 `turn/completed`, `item/completed`, `thread/archived`) that makes the
 watcher read an outstanding Codex child the moment the runtime reports a
-change, while polling stays as the safety net. Still open: let a Claude
-child signal its turn end through a session hook (`--settings` on spawn)
-so the watcher reads it only then; to be verified live before it ships.
+change, while polling stays as the safety net. A Claude child spawned for a parent
+carries session hooks (through the CLI's `--settings`, a private file per
+lane under the state root) whose only action is to touch the parent's
+watcher nudge file when its turn ends, its session ends, or it raises a
+notification, so the watcher reads it at once and never polls it while it
+works or waits; verified live on the pinned CLI on 2026-09-03 (`Stop`,
+`SessionEnd`, and `UserPromptSubmit` fired through `--settings`).
+`TRANSMOGRIFY_CHILD_HOOKS=off` launches children without hooks.
 
 ## Receipts and open experiments
 
