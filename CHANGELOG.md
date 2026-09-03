@@ -31,9 +31,10 @@
   `lib/codex-adapter.js`; `lib/claude-runtime.js`, `lib/claude-spawn.js`,
   `lib/claude-retire.js`, and `lib/claude-recover.js` beside
   `lib/claude-adapter.js`. Pure moves; the adapters' public surfaces are
-  unchanged. Codex recovery is further decomposed into one function per
-  phase (seat and provider binding, retirement states, pending mutation
-  settlement, bound-lane observation) with one entry builder.
+  unchanged. The largest lifecycle functions (Codex spawn, resume, retire,
+  and recovery; Claude spawn, retire, and reconciliation; the lane CLI
+  entry) are each decomposed into named phases that share one context, with
+  behavior, journal phases, and error shapes unchanged.
 
 ## 0.3.1
 

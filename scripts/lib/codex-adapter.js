@@ -861,208 +861,204 @@ async function interrupt(options, env = process.env) {
 async function resume(options, env = process.env) {
   if (!options.message) throw new TransmogrifyError('USAGE_ERROR', 'resume requires message');
   const receiptVerification = turnReceiptVerificationBounds(options);
-  let lane = ownedLane(options, env, 'mutate');
-  assertSeatIdentity(options, lane, env);
-  const laneId = lane.laneId;
-  const digest = messageDigest(options.message);
+  const initial = ownedLane(options, env, 'mutate');
+  assertSeatIdentity(options, initial, env);
+  const laneId = initial.laneId;
   return withLaneLease(options.repoRoot, laneId, async () => {
-    lane = ownedLane({ ...options, laneId }, env, 'mutate');
-    assertSeatIdentity(options, lane, env);
-    const resolvedModel = lane.executionProfile?.resolved.model.selector;
-    const resolvedEffort = lane.executionProfile?.resolved.effort.level;
-    const resolvedControl = lane.executionProfile?.resolved.speed.nativeControl;
-    if (resolvedControl && (resolvedControl.kind !== 'service-tier' ||
-        !['default', 'priority'].includes(resolvedControl.value))) {
-      throw new TransmogrifyError(
-        'EXECUTION_PROFILE_UNSUPPORTED', 'Codex profile has an invalid service-tier control',
-      );
+    const ctx = {
+      options, env, laneId, receiptVerification, digest: messageDigest(options.message),
+      lane: ownedLane({ ...options, laneId }, env, 'mutate'), operation: null,
+    };
+    assertSeatIdentity(options, ctx.lane, env);
+    const controls = resumeControls(ctx.lane);
+    ctx.operation = pendingOperationForLane(options.repoRoot, laneId, env);
+    if (ctx.operation) {
+      assertPendingMutation(ctx.operation, 'resume', ctx.lane, { messageSha256: ctx.digest });
+    } else if (ctx.lane.state !== 'idle') {
+      throw new TransmogrifyError('INVALID_STATE', `boundary resume requires an idle lane, got ${ctx.lane.state}`);
     }
-    const resolvedTier = resolvedControl?.value;
-    let operation = pendingOperationForLane(options.repoRoot, laneId, env);
-    if (operation) {
-      assertPendingMutation(operation, 'resume', lane, { messageSha256: digest });
-    } else if (lane.state !== 'idle') {
-      throw new TransmogrifyError('INVALID_STATE', `boundary resume requires an idle lane, got ${lane.state}`);
-    }
-
     return withClient(options, async (client) => {
-      assertRuntimeIdentity(lane, client);
-      const currentInspection = await inspectThread(client, lane);
-      const current = currentInspection.turn;
-      if (operation) {
-        const baselineTurnId = operation.details.baselineTurnId;
-        if (['turnDispatching', 'unknownTurn'].includes(operation.state)) {
-          const recoveredTurnId = await findTurnByClientMessage(
-            client,
-            lane.providerId,
-            operation.operationId,
-            operation.details.messageSha256,
-          );
-          if (recoveredTurnId) {
-            const inspected = await inspectThread(client, lane);
-            lane = updateLaneFromInspection(options, lane, inspected, env);
-            completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
-              state: 'complete',
-              details: {
-                ...operation.details,
-                recoveredTurnId,
-                postconditionObservedAt: new Date().toISOString(),
-              },
-            }, env);
-            return laneResult('resume', lane, {
-              operationId: operation.operationId,
-              receipt: { turnId: recoveredTurnId, reconciled: true },
-            });
-          }
-          throw new TransmogrifyError(
-            'RECOVERY_UNCERTAIN',
-            'prior resume input has no exact client-message receipt; refusing to replay it',
-            { laneId, operationId: operation.operationId },
-          );
-        }
-        if (operation.state === 'planned' && (current?.id || null) !== baselineTurnId) {
-          completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
-            state: 'notDelivered',
-            details: { ...operation.details, notDeliveredObservedAt: new Date().toISOString() },
-          }, env);
-          throw new TransmogrifyError('INVALID_STATE', 'lane history changed before resume dispatch');
-        }
-        if (current?.id && current.id !== baselineTurnId) {
-          throw new TransmogrifyError(
-            'RECOVERY_UNCERTAIN',
-            'a new turn exists but cannot be attributed to the pending resume input',
-            { laneId, operationId: operation.operationId },
-          );
-        }
-        if (!['planned', 'resumeAcknowledged'].includes(operation.state)) {
-          throw new TransmogrifyError(
-            'RECOVERY_UNCERTAIN',
-            'prior resume delivery remains unobservable; refusing to replay it',
-            { laneId, operationId: operation.operationId },
-          );
-        }
+      assertRuntimeIdentity(ctx.lane, client);
+      const current = (await inspectThread(client, ctx.lane)).turn;
+      if (ctx.operation) {
+        const settled = await settlePriorResume(ctx, client, current);
+        if (settled) return settled;
       }
-      if (current?.status === 'inProgress') {
-        if (operation?.state === 'planned') {
-          completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
-            state: 'notDelivered',
-            details: { ...operation.details, notDeliveredObservedAt: new Date().toISOString() },
-          }, env);
-        }
-        throw new TransmogrifyError('TARGET_ACTIVE', 'boundary resume requires no active newest turn');
-      }
-      if (!operation) {
-        operation = beginLaneOperation(options.repoRoot, laneId, {
+      refuseActiveTurn(ctx, current);
+      if (!ctx.operation) {
+        ctx.operation = beginLaneOperation(options.repoRoot, laneId, {
           type: 'resume',
-          providerId: lane.providerId,
-          details: {
-            target: 'codex',
-            messageSha256: digest,
-            baselineTurnId: current?.id || null,
-          },
+          providerId: ctx.lane.providerId,
+          details: { target: 'codex', messageSha256: ctx.digest, baselineTurnId: current?.id || null },
         }, env);
       }
-
-      if (operation.state === 'planned') {
-        operation = updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
-          state: 'resumeDispatching',
-          details: { ...operation.details, resumeDispatchStartedAt: new Date().toISOString() },
-        }, env);
-        try {
-          const resumed = await client.call('thread/resume', {
-            threadId: lane.providerId,
-            cwd: lane.seat.path,
-            excludeTurns: true,
-            ...(resolvedModel ? { model: resolvedModel } : {}),
-            ...(resolvedTier ? { serviceTier: resolvedTier } : {}),
-          });
-          if (resumed?.thread?.id !== lane.providerId) {
-            throw new TransmogrifyError('PROTOCOL_ERROR', 'thread/resume response did not match lane provider id');
-          }
-          assertProviderSeat(lane, resumed.thread, resumed.cwd, 'thread/resume', true);
-          if (resolvedTier && resumed.serviceTier !== null && resumed.serviceTier !== undefined &&
-              resumed.serviceTier !== resolvedTier) {
-            throw new TransmogrifyError(
-              'EXECUTION_PROFILE_UNSUPPORTED',
-              'thread/resume reported a service tier that contradicts the resolved profile',
-            );
-          }
-        } catch (error) {
-          updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
-            state: 'unknownResume',
-            details: {
-              ...operation.details,
-              deliveryBecameUnknownAt: new Date().toISOString(),
-              causeCode: error.code || 'TRANSPORT_UNKNOWN',
-              ...(error.details?.providerSeatVerification
-                ? { providerSeatVerification: error.details.providerSeatVerification }
-                : {}),
-            },
-          }, env);
-          markLaneDeliveryUnknown(options, lane, env);
-          throw new TransmogrifyError(
-            'RECOVERY_UNCERTAIN',
-            'thread resume outcome is unknown; refusing to replay it',
-            { laneId, operationId: operation.operationId },
-          );
-        }
-        operation = updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
-          state: 'resumeAcknowledged',
-          details: { ...operation.details, resumeAcknowledgedAt: new Date().toISOString() },
-        }, env);
-      }
-
-      operation = updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
-        state: 'turnDispatching',
-        details: { ...operation.details, turnDispatchStartedAt: new Date().toISOString() },
-      }, env);
-      try {
-        const started = await client.call('turn/start', {
-          threadId: lane.providerId,
-          cwd: lane.seat.path,
-          input: [{ type: 'text', text: options.message }],
-          clientUserMessageId: operation.operationId,
-          ...(resolvedModel ? { model: resolvedModel } : {}),
-          ...(resolvedEffort ? { effort: resolvedEffort } : {}),
-          ...(resolvedTier ? { serviceTier: resolvedTier } : {}),
-          ...(resolvedTier ? { serviceTierForTurn: resolvedTier } : {}),
-        }, options.turnStartTimeoutMs ?? 30000);
-        const turn = started?.turn;
-        const inputReceiptSource = await verifiedUserMessageTurnReceipt(
-          client,
-          lane.providerId,
-          turn,
-          operation.operationId,
-          operation.details.messageSha256,
-          receiptVerification,
-        );
-        lane = updateLane(options.repoRoot, laneId, {
-          state: 'active',
-          turnId: turn.id,
-          lastVerifiedAt: new Date().toISOString(),
-        }, env);
-        completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
-          state: 'complete',
-          details: { ...operation.details, turnId: turn.id },
-        }, env);
-        return laneResult('resume', lane, {
-          operationId: operation.operationId,
-          receipt: { turnId: turn.id, acknowledgedBy: 'response', inputReceiptSource },
-        });
-      } catch (error) {
-        updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
-          state: 'unknownTurn',
-          details: { ...operation.details, turnDeliveryBecameUnknownAt: new Date().toISOString() },
-        }, env);
-        markLaneDeliveryUnknown(options, lane, env);
-        throw new TransmogrifyError(
-          'RECOVERY_UNCERTAIN',
-          'resumed turn delivery outcome is unknown; refusing to replay it',
-          { laneId, operationId: operation.operationId },
-        );
-      }
+      if (ctx.operation.state === 'planned') await dispatchThreadResume(ctx, client, controls);
+      return dispatchResumedTurn(ctx, client, controls);
     }, env);
   }, env);
+}
+
+// The model, effort, and service tier the lane's pinned profile resolves to.
+function resumeControls(lane) {
+  const resolved = lane.executionProfile?.resolved;
+  const control = resolved?.speed.nativeControl;
+  if (control && (control.kind !== 'service-tier' || !['default', 'priority'].includes(control.value))) {
+    throw new TransmogrifyError('EXECUTION_PROFILE_UNSUPPORTED', 'Codex profile has an invalid service-tier control');
+  }
+  return { model: resolved?.model.selector, effort: resolved?.effort.level, tier: control?.value };
+}
+
+function journalResumePhase(ctx, state, details = {}) {
+  ctx.operation = updatePendingLaneOperation(ctx.options.repoRoot, ctx.laneId, ctx.operation.operationId, {
+    state, details: { ...ctx.operation.details, ...details },
+  }, ctx.env);
+}
+
+// A pending resume journal is settled from provider evidence before anything
+// is sent again: a turn carrying the input's client message completes it; a
+// journal that never dispatched, on a lane whose history moved, is not
+// delivered; anything else that cannot be attributed stays uncertain and is
+// never replayed. Returns the result for a completed prior resume, or null
+// when the resume may proceed from its journaled phase.
+async function settlePriorResume(ctx, client, current) {
+  const { options, env, laneId, operation } = ctx;
+  const uncertain = (message) => new TransmogrifyError('RECOVERY_UNCERTAIN', message, { laneId, operationId: operation.operationId });
+  const baselineTurnId = operation.details.baselineTurnId;
+  if (['turnDispatching', 'unknownTurn'].includes(operation.state)) {
+    const recoveredTurnId = await findTurnByClientMessage(client, ctx.lane.providerId, operation.operationId, operation.details.messageSha256);
+    if (!recoveredTurnId) throw uncertain('prior resume input has no exact client-message receipt; refusing to replay it');
+    const inspected = await inspectThread(client, ctx.lane);
+    ctx.lane = updateLaneFromInspection(options, ctx.lane, inspected, env);
+    completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
+      state: 'complete',
+      details: { ...operation.details, recoveredTurnId, postconditionObservedAt: new Date().toISOString() },
+    }, env);
+    return laneResult('resume', ctx.lane, {
+      operationId: operation.operationId,
+      receipt: { turnId: recoveredTurnId, reconciled: true },
+    });
+  }
+  if (operation.state === 'planned' && (current?.id || null) !== baselineTurnId) {
+    completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
+      state: 'notDelivered',
+      details: { ...operation.details, notDeliveredObservedAt: new Date().toISOString() },
+    }, env);
+    throw new TransmogrifyError('INVALID_STATE', 'lane history changed before resume dispatch');
+  }
+  if (current?.id && current.id !== baselineTurnId) {
+    throw uncertain('a new turn exists but cannot be attributed to the pending resume input');
+  }
+  if (!['planned', 'resumeAcknowledged'].includes(operation.state)) {
+    throw uncertain('prior resume delivery remains unobservable; refusing to replay it');
+  }
+  return null;
+}
+
+// A boundary resume needs no active newest turn; a still-planned journal is
+// closed as not delivered before the refusal.
+function refuseActiveTurn(ctx, current) {
+  if (current?.status !== 'inProgress') return;
+  if (ctx.operation?.state === 'planned') {
+    completeLaneOperation(ctx.options.repoRoot, ctx.laneId, ctx.operation.operationId, {
+      state: 'notDelivered',
+      details: { ...ctx.operation.details, notDeliveredObservedAt: new Date().toISOString() },
+    }, ctx.env);
+  }
+  throw new TransmogrifyError('TARGET_ACTIVE', 'boundary resume requires no active newest turn');
+}
+
+// thread/resume at the owned seat, journaled as resumeDispatching before and
+// resumeAcknowledged after; an unverifiable outcome leaves the journal
+// unknownResume and the lane delivery-unknown.
+async function dispatchThreadResume(ctx, client, controls) {
+  const { options, env, laneId } = ctx;
+  journalResumePhase(ctx, 'resumeDispatching', { resumeDispatchStartedAt: new Date().toISOString() });
+  try {
+    const resumed = await client.call('thread/resume', {
+      threadId: ctx.lane.providerId,
+      cwd: ctx.lane.seat.path,
+      excludeTurns: true,
+      ...(controls.model ? { model: controls.model } : {}),
+      ...(controls.tier ? { serviceTier: controls.tier } : {}),
+    });
+    if (resumed?.thread?.id !== ctx.lane.providerId) {
+      throw new TransmogrifyError('PROTOCOL_ERROR', 'thread/resume response did not match lane provider id');
+    }
+    assertProviderSeat(ctx.lane, resumed.thread, resumed.cwd, 'thread/resume', true);
+    if (controls.tier && resumed.serviceTier !== null && resumed.serviceTier !== undefined &&
+        resumed.serviceTier !== controls.tier) {
+      throw new TransmogrifyError(
+        'EXECUTION_PROFILE_UNSUPPORTED',
+        'thread/resume reported a service tier that contradicts the resolved profile',
+      );
+    }
+  } catch (error) {
+    updatePendingLaneOperation(options.repoRoot, laneId, ctx.operation.operationId, {
+      state: 'unknownResume',
+      details: {
+        ...ctx.operation.details,
+        deliveryBecameUnknownAt: new Date().toISOString(),
+        causeCode: error.code || 'TRANSPORT_UNKNOWN',
+        ...(error.details?.providerSeatVerification
+          ? { providerSeatVerification: error.details.providerSeatVerification }
+          : {}),
+      },
+    }, env);
+    markLaneDeliveryUnknown(options, ctx.lane, env);
+    throw new TransmogrifyError(
+      'RECOVERY_UNCERTAIN',
+      'thread resume outcome is unknown; refusing to replay it',
+      { laneId, operationId: ctx.operation.operationId },
+    );
+  }
+  journalResumePhase(ctx, 'resumeAcknowledged', { resumeAcknowledgedAt: new Date().toISOString() });
+}
+
+// turn/start with the durable client message id, verified by its input
+// receipt; an unverifiable outcome leaves the journal unknownTurn.
+async function dispatchResumedTurn(ctx, client, controls) {
+  const { options, env, laneId } = ctx;
+  journalResumePhase(ctx, 'turnDispatching', { turnDispatchStartedAt: new Date().toISOString() });
+  try {
+    const started = await client.call('turn/start', {
+      threadId: ctx.lane.providerId,
+      cwd: ctx.lane.seat.path,
+      input: [{ type: 'text', text: options.message }],
+      clientUserMessageId: ctx.operation.operationId,
+      ...(controls.model ? { model: controls.model } : {}),
+      ...(controls.effort ? { effort: controls.effort } : {}),
+      ...(controls.tier ? { serviceTier: controls.tier } : {}),
+      ...(controls.tier ? { serviceTierForTurn: controls.tier } : {}),
+    }, options.turnStartTimeoutMs ?? 30000);
+    const turn = started?.turn;
+    const inputReceiptSource = await verifiedUserMessageTurnReceipt(
+      client, ctx.lane.providerId, turn, ctx.operation.operationId, ctx.operation.details.messageSha256, ctx.receiptVerification,
+    );
+    ctx.lane = updateLane(options.repoRoot, laneId, {
+      state: 'active',
+      turnId: turn.id,
+      lastVerifiedAt: new Date().toISOString(),
+    }, env);
+    completeLaneOperation(options.repoRoot, laneId, ctx.operation.operationId, {
+      state: 'complete',
+      details: { ...ctx.operation.details, turnId: turn.id },
+    }, env);
+    return laneResult('resume', ctx.lane, {
+      operationId: ctx.operation.operationId,
+      receipt: { turnId: turn.id, acknowledgedBy: 'response', inputReceiptSource },
+    });
+  } catch (error) {
+    updatePendingLaneOperation(options.repoRoot, laneId, ctx.operation.operationId, {
+      state: 'unknownTurn',
+      details: { ...ctx.operation.details, turnDeliveryBecameUnknownAt: new Date().toISOString() },
+    }, env);
+    markLaneDeliveryUnknown(options, ctx.lane, env);
+    throw new TransmogrifyError(
+      'RECOVERY_UNCERTAIN',
+      'resumed turn delivery outcome is unknown; refusing to replay it',
+      { laneId, operationId: ctx.operation.operationId },
+    );
+  }
 }
 
 // Recovery as the lane CLI invokes it: with input it resumes the exact thread
