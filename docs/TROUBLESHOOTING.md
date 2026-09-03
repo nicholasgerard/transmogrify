@@ -32,7 +32,7 @@ Add `--url` only to Codex commands when the runtime is not the default
 | Refused `WORKTREES` root inside the repository | [Managed worktree is not ignored](#managed-worktree-is-not-ignored) |
 | Ownership or mode refusal on state and seat paths | [Private state or worktree permissions](#private-state-or-worktree-permissions) |
 | `boundary:sandbox-loopback-denied`, occupied or incompatible endpoint | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
-| `NATIVE_VISIBILITY_REQUIRED`, `DESKTOP_RELAUNCH_REQUIRED`, `DESKTOP_HOST_SESSION`, `ATTACHED_ELSEWHERE`, `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, `DESKTOP_QUIT_TIMEOUT` | [Codex Desktop is not attached](#codex-desktop-is-not-attached) |
+| `NATIVE_VISIBILITY_REQUIRED`, `DESKTOP_RELAUNCH_REQUIRED`, `DESKTOP_HOST_SESSION`, `ATTACHED_ELSEWHERE`, `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, `DESKTOP_QUIT_TIMEOUT`, `DESKTOP_LAUNCH_FAILED` | [Codex Desktop is not attached](#codex-desktop-is-not-attached) |
 | `NO_ACTIVE_TURN`, unmarked or foreign native rows | [Codex lane and native row symptoms](#codex-lane-and-native-row-symptoms) |
 | `NOT_OWNED`, `RUNTIME_MISMATCH`, `OWNERSHIP_MISMATCH`, `SEAT_MISMATCH`, `EXECUTION_EPOCH_UNBOUND`, `ADAPTER_MISMATCH` | [Ownership or identity refused](#ownership-or-identity-refused) |
 | `DELIVERY_UNCERTAIN` on a Claude steer | [Claude steer delivery is uncertain](#claude-steer-delivery-is-uncertain) |
@@ -183,6 +183,17 @@ Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 `TRANSMOGRIFY_LOG` for an absolute owned-runtime log path. A command-line
 `--url` takes precedence over the URL environment variables.
 
+`runtime-probe.js` names the reason it refused, so the repair is unambiguous:
+
+| Probe reason | Meaning | Do |
+| --- | --- | --- |
+| `TRANSPORT_ERROR`, `TRANSPORT_UNKNOWN` | nothing answered the endpoint, or the connection closed before the handshake finished | confirm the listener with `lsof`; start or reuse a runtime |
+| `RUNTIME_MISMATCH` | something answered but the initialize response is not a recognizable Codex app-server | check what actually holds the port before reusing it |
+| `UNSUPPORTED_VERSION_LINE` | a real app-server on a version outside the supported line; the reported user-agent is printed | install a Codex build on the supported line, then re-probe |
+
+The launcher treats every one of these as "not verified" rather than as a
+launcher failure, so a refused runtime never surfaces as an opaque tool error.
+
 The detached child receives a bounded allowlist containing ordinary process,
 locale, home, temp, and certificate-path settings. Ambient API keys, access
 tokens, proxy credentials, `NODE_OPTIONS`, and unrelated secrets are excluded.
@@ -224,6 +235,7 @@ whatever the app's private runtime was doing, so ask first.
 | `RUNTIME_UNAVAILABLE` | Nothing listens on the selected endpoint yet | Reuse or start a runtime first |
 | `ATTACH_TIMEOUT` | Desktop launched but no connection appeared inside the wait window | Re-run `check`; raise `--timeout-ms` if the host is slow to start the app |
 | `DESKTOP_QUIT_TIMEOUT` | Desktop did not exit after its own quit request | Finish or discard the app's open work, then retry |
+| `DESKTOP_LAUNCH_FAILED` | The relaunch quit Desktop and then could not start it again. LaunchServices refusals immediately after a quit are retried, and the exact bundle path is tried once, before this is reported | Start Codex Desktop yourself, then re-run `check`; the app is not running |
 
 `TRANSMOGRIFY_DESKTOP_ATTACH=off` reports the check as disabled without probing;
 `ensure` then refuses with `ATTACH_DISABLED`. The app is located by bundle
