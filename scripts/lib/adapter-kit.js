@@ -39,6 +39,17 @@ function nowMs(options) {
   return typeof options?.clock === 'function' ? options.clock() : Date.now();
 }
 
+// An aggregate deadline computed once, on whatever clock options carries, so
+// every later "how much is left" read stays on that same clock instead of a
+// fresh Date.now() call. null when the caller set no bound at all; a caller
+// that wants the exhausted-budget error wraps msLeft() itself, since the
+// coded error is the adapter's, not the kit's, to throw.
+function deadlineFor(options, timeoutMs) {
+  if (!Number.isInteger(timeoutMs)) return null;
+  const at = nowMs(options) + timeoutMs;
+  return { at, msLeft: () => at - nowMs(options) };
+}
+
 // The managed worktrees root: explicit option, then WORKTREES, then the
 // repository's own .worktrees directory.
 function worktreesRoot(options, env = process.env) {
@@ -86,6 +97,7 @@ function laneResult(operation, lane, extra = {}) {
 
 module.exports = {
   AdapterError,
+  deadlineFor,
   executionRequest,
   laneResult,
   nowMs,

@@ -16,6 +16,7 @@ const {
   stop,
 } = require('../scripts/lib/claude-adapter');
 const { errorEffect } = require('../scripts/lane');
+const { deadlineFor } = require('../scripts/lib/adapter-kit');
 const { createParentContext, readDispatch } = require('../scripts/lib/dispatch');
 const { exactOwnedAgent, MAX_STEER_BYTES } = require('../scripts/lib/claude-surface');
 const {
@@ -27,6 +28,14 @@ const { createRepoWithSeat } = require('./helpers/repo-fixture');
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
 const BRIDGE_ID = 'session_testBridge';
+
+// A clock a test drives by hand: dispatch windows and command deadlines read
+// it through options.clock, so a test crosses one by calling advance() rather
+// than actually waiting out the window.
+function createClock(startMs) {
+  let now = startMs;
+  return { clock: () => now, advance(ms) { now += ms; } };
+}
 
 function fakeRuntime() {
   return {
@@ -246,6 +255,21 @@ async function spawnedLane(t, overrides = {}) {
   const result = await spawn({ ...spawnOptions(fixture, surface), ...overrides }, fixture.env);
   return { fixture, surface, result, lane: listLanes(fixture.repoRoot, fixture.env)[0] };
 }
+
+test('deadlineFor refuses a non-integer timeout and otherwise tracks the injected clock', () => {
+  assert.equal(deadlineFor({}, undefined), null);
+  assert.equal(deadlineFor({}, '1000'), null);
+  assert.equal(deadlineFor({}, 12.5), null);
+  assert.equal(deadlineFor({}, NaN), null);
+  const clock = createClock(1_000);
+  const deadline = deadlineFor({ clock: clock.clock }, 500);
+  assert.equal(deadline.at, 1_500);
+  assert.equal(deadline.msLeft(), 500);
+  clock.advance(200);
+  assert.equal(deadline.msLeft(), 300);
+  clock.advance(1_000);
+  assert.equal(deadline.msLeft(), -700, 'msLeft goes negative rather than clamping at zero');
+});
 
 test('Claude capabilities expose the pinned CLI catalog and neutral intent vocabulary', () => {
   const surface = createFakeSurface();
@@ -1011,15 +1035,17 @@ test('Claude reconcile binds only an exact job from the durable spawn receipt an
   assert.equal(fs.existsSync(uncertain.ownership.spawnIntent.stdoutPath), true);
   assert.equal(fs.existsSync(uncertain.ownership.spawnIntent.stderrPath), true);
   const launchesBefore = surface.calls.filter((call) => call.method === 'launch').length;
-  // The whole reconcile shares one deadline; a loaded CI runner needs more than
-  // a few hundred milliseconds for preflight, census, transcript, and worker
-  // verification, while the deep-link dispatch below must still inherit it.
+  // An injected clock that never advances on its own keeps the deadline from
+  // expiring no matter how long preflight, census, transcript, worker, and
+  // deep-link verification actually take to run.
+  const clock = createClock(0);
   const result = await reconcile({
     repoRoot: fixture.repoRoot,
     surface,
     discoveryAttempts: 2,
     discoveryDelayMs: 0,
     commandTimeoutMs: 3000,
+    clock: clock.clock,
   }, fixture.env);
   assert.equal(result.ok, true);
   assert.equal(result.results[0].outcome, 'spawnBoundFromDurableReceipt');
@@ -1547,18 +1573,24 @@ test('Claude reconcile settles a recovery that never produced a running session'
   const { fixture, surface, lane } = await spawnedLane(t);
   await stop({ repoRoot: fixture.repoRoot, laneId: lane.laneId, surface, stopVerifyAttempts: 1 }, fixture.env);
   surface.resumeDoesNothing = true;
+  // A shared fake clock lets the test cross the recovery window by advancing
+  // it, rather than actually sleeping past the real 1000ms + slack.
+  const clock = createClock(0);
   await assert.rejects(() => recover({
     repoRoot: fixture.repoRoot, laneId: lane.laneId, surface,
     recoveryVerifyAttempts: 1, recoveryVerifyDelayMs: 0, commandTimeoutMs: 1000, recoveryWindowSlackMs: 0,
+    clock: clock.clock,
   }, fixture.env), (error) => error.code === 'RECOVERY_UNCERTAIN');
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'deliveryUnknown');
   const early = await reconcile({
     repoRoot: fixture.repoRoot, laneId: lane.laneId, surface, recoveryVerifyAttempts: 1, recoveryVerifyDelayMs: 0,
+    clock: clock.clock,
   }, fixture.env);
   assert.equal(early.results[0].outcome, 'recoveryUnknown');
-  await new Promise((resolve) => setTimeout(resolve, 1100));
+  clock.advance(1100);
   const result = await reconcile({
     repoRoot: fixture.repoRoot, laneId: lane.laneId, surface, recoveryVerifyAttempts: 1, recoveryVerifyDelayMs: 0,
+    clock: clock.clock,
   }, fixture.env);
   assert.equal(result.ok, true);
   assert.equal(result.results[0].outcome, 'recoveryNotAchieved');

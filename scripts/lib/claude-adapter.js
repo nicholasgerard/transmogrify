@@ -23,7 +23,7 @@ const {
 } = require('./claude-surface');
 const { markDispatchJournaled, recordEvent, reserveDispatch } = require('./dispatch');
 const {
-  AdapterError, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot,
+  AdapterError, deadlineFor, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot,
 } = require('./adapter-kit');
 const { phaseFields } = require('./output-schema');
 const { sleep } = require('./async');
@@ -117,15 +117,15 @@ function spawnCause(error) {
 function ownerActionFor(causeCode) {
   return OWNER_ACTIONS.get(causeCode) || null;
 }
+// The lane's aggregate command budget, on whatever clock options carries.
 function commandDeadline(options) {
-  return Number.isInteger(options.commandTimeoutMs)
-    ? Date.now() + options.commandTimeoutMs : null;
+  return deadlineFor(options, options.commandTimeoutMs);
 }
 // Time left in the aggregate command deadline. Exhaustion is TIMEOUT, so no
 // single provider call can spend an unbounded budget.
 function remainingCommandMs(deadline, minimum = 1) {
   if (deadline === null) return undefined;
-  const remaining = Math.floor(deadline - Date.now());
+  const remaining = Math.floor(deadline.msLeft());
   if (remaining < minimum) {
     throw new ClaudeTransmogrifyError('TIMEOUT', 'Claude operation exceeded its command deadline');
   }
@@ -412,10 +412,9 @@ function updateRunningLane(repoRoot, lane, agent, env, patch = {}) {
 async function pollAgents(surface, runtime, predicate, options = {}) {
   const attempts = options.attempts ?? 30;
   const delayMs = options.delayMs ?? 100;
-  const deadline = options.deadline ?? (Number.isInteger(options.timeoutMs)
-    ? Date.now() + options.timeoutMs : null);
+  const deadline = options.deadline ?? deadlineFor(options, options.timeoutMs);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    if (deadline !== null && deadline - Date.now() < 100) return null;
+    if (deadline !== null && deadline.msLeft() < 100) return null;
     const remaining = remainingCommandMs(deadline, 100);
     const agents = await surface.agents(runtime, remaining === undefined
       ? {} : { timeoutMs: remaining });
@@ -423,7 +422,7 @@ async function pollAgents(surface, runtime, predicate, options = {}) {
     if (result) return { agents, result };
     if (attempt < attempts && delayMs) {
       const boundedDelay = deadline === null
-        ? delayMs : Math.min(delayMs, Math.max(0, deadline - Date.now()));
+        ? delayMs : Math.min(delayMs, Math.max(0, deadline.msLeft()));
       if (boundedDelay > 0) await sleep(boundedDelay);
     }
   }
@@ -962,7 +961,7 @@ async function awaitSteerDelivery(options, surface, runtime, lane, operation, ti
     } catch (error) {
       const remaining = Math.min(
         windowEnd - nowMs(options),
-        deadline === null ? Infinity : deadline - Date.now() - 100,
+        deadline === null ? Infinity : deadline.msLeft() - 100,
       );
       if (error.code !== 'DELIVERY_UNCERTAIN' || remaining <= 0) throw error;
       await sleep(Math.min(delayMs, Math.max(0, remaining)));
@@ -1993,7 +1992,7 @@ async function retire(options, env = process.env) {
             state: 'localRemovalDispatching',
             details: {
               ...pending.details, localRemovalTarget: target,
-              localRemovalDispatchStartedAt: Date.now(),
+              localRemovalDispatchStartedAt: nowMs(options),
             },
           }, env);
           try {
@@ -2002,7 +2001,7 @@ async function retire(options, env = process.env) {
             });
             pending = updatePending(options.repoRoot, lane.laneId, pending, {
               state: 'localRemovalDispatched',
-              details: { ...pending.details, localRemovalDispatchFinishedAt: Date.now() },
+              details: { ...pending.details, localRemovalDispatchFinishedAt: nowMs(options) },
             }, env);
           } catch (error) {
             try {
@@ -2162,7 +2161,7 @@ async function awaitSpawnReceipts(options, surface, runtime, lane, jobId, candid
       return { transcript, discovery };
     } catch (error) {
       const retryable = RETRYABLE_SPAWN_RECEIPT_CODES.has(error?.code);
-      const remaining = Math.min(windowEnd - nowMs(options), deadline === null ? Infinity : deadline - Date.now() - 100);
+      const remaining = Math.min(windowEnd - nowMs(options), deadline === null ? Infinity : deadline.msLeft() - 100);
       if (!retryable || remaining <= 0) throw error;
       await sleep(Math.min(delayMs, Math.max(0, remaining)));
     }
