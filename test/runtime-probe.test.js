@@ -48,7 +48,8 @@ test('runtime probe rejects a listener with a non-Codex handshake', async (t) =>
     '--url', `ws://127.0.0.1:${port}`,
   ]);
   assert.equal(result.code, 3, result.stderr);
-  assert.match(result.stderr, /handshake or compatibility verification failed/i);
+  assert.match(result.stderr, /runtime probe failed: RUNTIME_MISMATCH/);
+  assert.equal(result.stderr.includes('different-service'), false);
 });
 
 test('runtime probe never echoes provider-supplied initialize errors', async (t) => {
@@ -59,6 +60,28 @@ test('runtime probe never echoes provider-supplied initialize errors', async (t)
   t.after(() => server.close());
   const result = await runNodeScript('scripts/runtime-probe.js', ['--url', server.url]);
   assert.equal(result.code, 3);
-  assert.match(result.stderr, /handshake or compatibility verification failed/);
+  // The reason code is this installation's own bounded token, never remote text.
+  assert.match(result.stderr, /^runtime probe failed: [A-Z][A-Z_]{1,39}\n$/);
   assert.equal(result.stderr.includes(secret), false);
+});
+
+test('runtime probe separates an unsupported version line from an unusable listener', async (t) => {
+  const server = await startMockAppServer(undefined, {
+    initializeResult: {
+      codexHome: '/tmp/codex-home',
+      platformFamily: 'unix',
+      platformOs: 'test',
+      userAgent: 'codex_cli_rs/0.150.0 (test)',
+    },
+  });
+  t.after(() => server.close());
+
+  const result = await runNodeScript('scripts/runtime-probe.js', ['--url', server.url]);
+  assert.equal(result.code, 3);
+  // A supported-shape runtime on the wrong line reports its own reason and the
+  // canonicalized user-agent, so the operator knows to change the build rather
+  // than to hunt for a missing listener.
+  assert.match(result.stderr, /runtime probe failed: UNSUPPORTED_VERSION_LINE \(codex_cli_rs\/0\.150\.0\)/);
+  assert.match(result.stderr, /verified line is 0\.151\.x/);
+  assert.equal(result.stderr.includes('RUNTIME_MISMATCH'), false);
 });
