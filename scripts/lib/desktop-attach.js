@@ -18,7 +18,7 @@
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { validateUrl } = require('./app-server');
-const { inspectListeners } = require('../runtime-launch');
+const { inspectListeners } = require('./listeners');
 
 const ATTACH_ENV = 'CODEX_APP_SERVER_WS_URL';
 const DISABLE_ENV = 'TRANSMOGRIFY_DESKTOP_ATTACH';

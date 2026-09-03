@@ -58,14 +58,14 @@ test('lane CLI rejects unknown operations, targets, and flags without provider m
   await assert.rejects(() => main([
     'spawn', '--repo-root', '/tmp', '--target', 'codex', '--name', 'x', '--input', 'y',
     '--claude-bin', '/tmp/claude',
-  ], {}), /only for Claude targets/);
+  ], {}), /only for claude spawns/);
   await assert.rejects(() => main([
     'spawn', '--repo-root', '/tmp', '--target', 'codex', '--name', 'x', '--input', 'y',
     '--model', 'gpt-5.6-sol',
   ], {}), /parent-context-file/);
   await assert.rejects(() => main([
-    'reconcile', '--repo-root', '/tmp', '--target', 'codex', '--finish-retirements',
-  ], {}), /only for Claude reconciliation/);
+    'reconcile', '--repo-root', '/tmp', '--target', 'codex', '--private-archive',
+  ], {}), /only for claude reconciliation/);
   await assert.rejects(() => main([
     'reconcile', '--repo-root', '/tmp', '--target', 'claude',
     '--accept-manual-seat-removal',

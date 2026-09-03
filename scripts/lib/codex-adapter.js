@@ -19,6 +19,7 @@ const {
   listLanes,
   listOperations,
   pendingOperationForLane,
+  repairUnstartedSpawn,
   requireOwnedLane,
   requireOwnedProviderLane,
   settleTerminalLaneOperationPointer,
@@ -29,6 +30,9 @@ const {
   withLaneLease,
 } = require('./state');
 const { AppServerClient, validateUrl } = require('./app-server');
+const {
+  AdapterError, executionRequest, laneResult, profileFailure, worktreesRoot,
+} = require('./adapter-kit');
 const { check: desktopAttachCheck } = require('./desktop-attach');
 const { VERSION } = require('./version');
 const {
@@ -59,6 +63,18 @@ const {
 const {
   boundedCursor, canonicalLaneName, laneNameError, normalizeThreadStatus, ownedLaneNameError,
 } = require('./validation');
+
+// What the lane CLI needs to know about this adapter without reading its
+// code: the lifecycle operations it implements, the provider flags it accepts,
+// and whether recovery takes input. --finish-retirements is accepted for
+// symmetry; Codex finishes every eligible retirement during recovery anyway.
+const descriptor = Object.freeze({
+  target: 'codex',
+  backend: 'codex-app-server',
+  operations: new Set(['spawn', 'status', 'steer', 'interrupt', 'recover', 'retire', 'reconcile']),
+  options: new Set(['url', 'finish-retirements', 'allow-protocol-only']),
+  recoverAcceptsInput: true,
+});
 
 // The complete thread/list source set. Listing every kind is what makes an
 // archived-thread census complete rather than a partial view of one client.
@@ -91,42 +107,14 @@ const MAX_PAGINATION_ROWS = 10_000;
 const DEFAULT_INPUT_RECEIPT_VERIFY_ATTEMPTS = 100;
 const DEFAULT_INPUT_RECEIPT_VERIFY_DELAY_MS = 100;
 
-// Adapter failure carrying a stable code. The code, not the message, is what
-// the CLI maps to an exit status and a public delivery projection.
-class TransmogrifyError extends Error {
-  constructor(code, message, details = {}) {
-    super(message);
-    this.code = code;
-    this.details = details;
-  }
-}
+// The shared adapter error under the name this adapter has always exported.
+const TransmogrifyError = AdapterError;
 
 // The selected runtime endpoint: explicit option, then TRANSMOGRIFY_URL, then
 // the default loopback port. Callers still pass the result through validateUrl.
 function runtimeUrl(options, env = process.env) {
   return options.url || env.TRANSMOGRIFY_URL ||
     `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`;
-}
-
-function worktreesRoot(options, env = process.env) {
-  return options.worktrees || env.WORKTREES || `${options.repoRoot}/.worktrees`;
-}
-
-// The uniform success envelope. It carries lane state, capabilities, and
-// visibility so a caller never has to re-read the registry to interpret it.
-function laneResult(operation, lane, extra = {}) {
-  return {
-    version: 1,
-    ok: true,
-    operation,
-    operationId: lane.operationId || null,
-    laneId: lane.laneId,
-    adapter: lane.backend,
-    state: lane.state,
-    capabilities: lane.capabilities,
-    visibility: lane.visibility,
-    ...extra,
-  };
 }
 
 // Resolve the lane a command may act on, by lane id or provider id. Refuses
@@ -220,7 +208,10 @@ function turnReceiptVerificationBounds(options) {
 // close it. A runtime outside the supported version line is UNVERIFIED_RUNTIME
 // and no lifecycle mutation is attempted behind it.
 async function withClient(options, callback, env = process.env) {
-  const client = new AppServerClient({
+  // options.clientFactory lets a test or an embedding host supply the
+  // app-server client; the default is the real loopback WebSocket client.
+  const createClient = options.clientFactory || ((config) => new AppServerClient(config));
+  const client = createClient({
     url: runtimeUrl(options, env),
     timeoutMs: options.timeoutMs ?? 20000,
     clientInfo: {
@@ -271,26 +262,6 @@ async function readModelCatalog(client) {
     cursor = response.nextCursor;
   }
   throw new TransmogrifyError('PROTOCOL_ERROR', 'model/list exceeded the bounded page count');
-}
-
-// The caller's execution intent with unset controls omitted, so a provider
-// default stays a default instead of being pinned to a resolved value.
-function executionRequest(options) {
-  return Object.fromEntries([
-    ['intent', options.intent],
-    ['model', options.model],
-    ['effort', options.effort],
-    ['speed', options.speed],
-  ].filter(([, value]) => value !== undefined));
-}
-
-// Re-project an execution-profile failure as EXECUTION_PROFILE_UNSUPPORTED,
-// keeping the original profile code in details. Any other error rethrows.
-function profileFailure(error) {
-  if (!(error instanceof ExecutionProfileError)) throw error;
-  throw new TransmogrifyError('EXECUTION_PROFILE_UNSUPPORTED', error.message, {
-    profileCode: error.code,
-  });
 }
 
 // Resolve the immutable execution profile against the live model catalog. A
@@ -1990,46 +1961,19 @@ async function retire(options, env = process.env) {
 // lane genuinely requires provider observation.
 async function repairLocalRecoveryState(options, initial, operations, env) {
   return withLaneLease(options.repoRoot, initial.laneId, async () => {
-    let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
-    const pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-    const recorded = pending || operations.get(lane.operationId);
-    const repaired = [];
-    if (pending?.type === 'spawn' && ['planned', 'seatReady'].includes(pending.state) &&
-        ['planned', 'failed'].includes(lane.state) && !lane.providerId) {
-      if (lane.state === 'planned') {
-        lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
-        repaired.push('unstartedSpawnState');
-      }
-      completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
-        state: 'notDelivered',
-        details: {
-          ...pending.details,
-          notDeliveredObservedAt: new Date().toISOString(),
-        },
-      }, env);
-      repaired.push('unstartedSpawnOperation');
-    }
-    if (recorded?.type === 'spawn' && ['failed', 'notDelivered'].includes(recorded.state) &&
-        lane.state === 'planned' && !lane.providerId) {
-      lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
-      repaired.push('failedSpawnState');
-    }
-    const settled = settleTerminalLaneOperationPointer(options.repoRoot, lane.laneId, env);
-    if (settled) repaired.push('terminalOperationPointer');
-    const failedSpawnTerminal = recorded?.type === 'spawn' &&
-      ['failed', 'notDelivered'].includes(recorded.state) &&
-      lane.state === 'failed' && !lane.providerId;
-    if (settled || repaired.length > 0 || failedSpawnTerminal) {
-      lane = requireOwnedLane(options.repoRoot, lane.laneId, env);
-      const terminalState = settled?.state || recorded?.state;
+    const repair = repairUnstartedSpawn(
+      options.repoRoot, initial.laneId, operations.get(initial.operationId), env,
+    );
+    if (repair) {
       return {
-        laneId: lane.laneId,
-        providerId: lane.providerId || null,
-        state: lane.state,
-        delivery: terminalState === 'complete' ? 'confirmed' : 'notDelivered',
-        repaired,
+        laneId: repair.lane.laneId,
+        providerId: repair.lane.providerId || null,
+        state: repair.lane.state,
+        delivery: repair.delivery,
+        repaired: repair.repaired,
       };
     }
+    const lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
     if (lane.state === 'worktreeRemoved') {
       return {
         laneId: lane.laneId,
@@ -2075,7 +2019,9 @@ async function recover(options, env = process.env) {
     if (exact.backend !== 'codex-app-server') {
       throw new TransmogrifyError('ADAPTER_MISMATCH', `lane ${exact.laneId} uses ${exact.backend}`);
     }
-    if (exact.runtime?.endpoint !== endpoint) {
+    // A reservation that never bound a runtime has no endpoint to compare; its
+    // local crash repair below needs no provider at all.
+    if (exact.runtime?.endpoint && exact.runtime.endpoint !== endpoint) {
       throw new TransmogrifyError('RUNTIME_MISMATCH', `lane ${exact.laneId} is owned on another runtime endpoint`);
     }
     lanes = [exact];
@@ -2088,7 +2034,7 @@ async function recover(options, env = process.env) {
   const localResults = [];
   const providerLanes = [];
   for (const initial of lanes) {
-    if (initial.runtime?.endpoint !== endpoint) {
+    if (initial.runtime?.endpoint && initial.runtime.endpoint !== endpoint) {
       localResults.push({
         laneId: initial.laneId,
         providerId: initial.providerId,
@@ -2467,11 +2413,23 @@ async function recover(options, env = process.env) {
   }, env);
 }
 
+// Recovery as the lane CLI invokes it: with input it resumes the exact thread
+// at a turn boundary; without input it observes and reconciles.
+async function recoverLane(options, env = process.env) {
+  if (options.message !== undefined) {
+    const result = await resume(options, env);
+    return { ...result, operation: 'recover' };
+  }
+  return recover(options, env);
+}
+
 module.exports = {
   TransmogrifyError,
+  descriptor,
   executionCapabilities,
   interrupt,
-  recover,
+  reconcile: recover,
+  recover: recoverLane,
   resume,
   retire,
   spawn,

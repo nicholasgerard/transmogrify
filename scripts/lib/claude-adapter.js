@@ -13,7 +13,7 @@ const path = require('node:path');
 const {
   appendLaneExecutionEpoch, beginLaneOperation, beginOperation, bindClaudeSpawnObservation, bindLaneSeat,
   completeLaneOperation, ensureRegistry, listLanes, listOperations, observeLaneStopped,
-  pendingOperationForLane, projectPaths, rebindClaudeRuntime, requireOwnedLane, reserveSpawn, updateLane,
+  pendingOperationForLane, projectPaths, rebindClaudeRuntime, repairUnstartedSpawn, requireOwnedLane, reserveSpawn, updateLane,
   settleTerminalLaneOperationPointer, updateOperation, updatePendingLaneOperation, withLaneLease,
 } = require('./state');
 const {
@@ -22,6 +22,9 @@ const {
   MAX_STEER_BYTES, parseJobId, sha256,
 } = require('./claude-surface');
 const { markDispatchJournaled, recordEvent, reserveDispatch } = require('./dispatch');
+const {
+  AdapterError, executionRequest, laneResult, profileFailure, worktreesRoot,
+} = require('./adapter-kit');
 const {
   ExecutionProfileError,
   createClaudeCliCatalog,
@@ -41,6 +44,16 @@ const {
 } = require('./worktree');
 
 const BACKEND = 'claude-code';
+// What the lane CLI needs to know about this adapter without reading its
+// code: the lifecycle operations it implements, the provider flags it accepts,
+// and whether recovery takes input (Claude recovery never does).
+const descriptor = Object.freeze({
+  target: 'claude',
+  backend: BACKEND,
+  operations: new Set(['spawn', 'status', 'steer', 'stop', 'recover', 'retire', 'reconcile']),
+  options: new Set(['claude-bin', 'private-archive', 'finish-retirements']),
+  recoverAcceptsInput: false,
+});
 // Retired lanes have released their provider and seat; retiring lanes are
 // mid-retirement. Neither accepts a new mutation.
 const RETIRED_STATES = new Set(['archivedVerified', 'cleanupEligible', 'worktreeRemoved']);
@@ -50,12 +63,10 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 // Adapter failure carrying a stable code. The code, not the message, drives the
 // CLI exit status and the public delivery projection.
-class ClaudeTransmogrifyError extends Error {
+class ClaudeTransmogrifyError extends AdapterError {
   constructor(code, message, details = {}) {
-    super(message);
+    super(code, message, details);
     this.name = 'ClaudeTransmogrifyError';
-    this.code = code;
-    this.details = details;
   }
 }
 
@@ -113,9 +124,6 @@ function remainingCommandMs(deadline, minimum = 1) {
   }
   return remaining;
 }
-function worktreesRoot(options, env) {
-  return options.worktrees || env.WORKTREES || `${options.repoRoot}/.worktrees`;
-}
 // The runtime tuple with the prepared environment and org id stripped, so no
 // durable record carries account or environment material.
 function publicRuntime(runtime) {
@@ -160,12 +168,6 @@ function capabilities() {
     nativePresentation: 'remoteControlDeepLink', approvalRelay: false,
   };
 }
-function laneResult(operation, lane, extra = {}) {
-  return {
-    version: 1, ok: true, operation, adapter: BACKEND, laneId: lane.laneId,
-    providerId: lane.providerId, state: lane.state, capabilities: lane.capabilities, ...extra,
-  };
-}
 // The lane's immutable spawn intent and its journal must name the same model
 // selector; a disagreement is OWNERSHIP_MISMATCH before reconciliation acts.
 function assertSpawnSelection(lane, operation) {
@@ -188,15 +190,6 @@ function preflight(options, env, surface) {
   }
 }
 
-function executionRequest(options) {
-  return Object.fromEntries([
-    ['intent', options.intent],
-    ['model', options.model],
-    ['effort', options.effort],
-    ['speed', options.speed],
-  ].filter(([, value]) => value !== undefined));
-}
-
 // Provenance for the pinned Claude capability catalog: the measured CLI build
 // plus the documentation the selection contract was derived from.
 function claudeCatalogSource(runtime) {
@@ -214,15 +207,6 @@ function claudeCatalogSource(runtime) {
       'https://platform.claude.com/docs/en/models/overview',
     ],
   };
-}
-
-// Re-project an execution-profile failure as EXECUTION_PROFILE_UNSUPPORTED,
-// keeping the original profile code. Any other error rethrows.
-function profileFailure(error) {
-  if (!(error instanceof ExecutionProfileError)) throw error;
-  throw new ClaudeTransmogrifyError('EXECUTION_PROFILE_UNSUPPORTED', error.message, {
-    profileCode: error.code,
-  });
 }
 
 // Resolve the immutable execution profile against the pinned Claude catalog. A
@@ -2339,53 +2323,17 @@ async function reconcile(options, env = process.env) {
   for (const initial of lanes) {
     try {
       const terminalRepair = await withLaneLease(options.repoRoot, initial.laneId, async () => {
-        let lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
-        const pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-        const recorded = pending || operations.get(lane.operationId);
-        const repaired = [];
-        if (pending?.type === 'spawn' && ['planned', 'seatReady'].includes(pending.state) &&
-            ['planned', 'failed'].includes(lane.state) && !lane.providerId) {
-          // No provider request precedes the later dispatching state. Make the
-          // lane terminal before clearing the operation pointer so either
-          // crash boundary remains locally repairable without spawn replay.
-          if (lane.state === 'planned') {
-            lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
-            repaired.push('unstartedSpawnState');
-          }
-          completePending(options.repoRoot, lane.laneId, pending, {
-            state: 'notDelivered',
-            details: {
-              ...pending.details,
-              notDeliveredObservedAt: new Date().toISOString(),
-            },
-          }, env);
-          repaired.push('unstartedSpawnOperation');
-        }
-        if (recorded?.type === 'spawn' && ['failed', 'notDelivered'].includes(recorded.state) &&
-            lane.state === 'planned' && !lane.providerId) {
-          lane = updateLane(options.repoRoot, lane.laneId, { state: 'failed' }, env);
-          repaired.push('failedSpawnState');
-        }
-        const settled = settleTerminalLaneOperationPointer(
-          options.repoRoot,
-          lane.laneId,
-          env,
+        const repair = repairUnstartedSpawn(
+          options.repoRoot, initial.laneId, operations.get(initial.operationId), env,
         );
-        if (settled) repaired.push('terminalOperationPointer');
-        const failedSpawnTerminal = recorded?.type === 'spawn' &&
-          ['failed', 'notDelivered'].includes(recorded.state) &&
-          lane.state === 'failed' && !lane.providerId;
-        if (!settled && repaired.length === 0 && !failedSpawnTerminal) return null;
-        lane = requireOwnedLane(options.repoRoot, lane.laneId, env);
+        if (!repair) return null;
         return {
-          laneId: lane.laneId,
-          providerId: lane.providerId || null,
-          state: lane.state,
-          outcome: repaired.some((entry) => entry.startsWith('unstartedSpawn'))
-            ? 'spawnNotDelivered' : 'terminalOperationPointerCleared',
-          delivery: (settled?.state || recorded?.state) === 'complete'
-            ? 'confirmed' : 'notDelivered',
-          repaired,
+          laneId: repair.lane.laneId,
+          providerId: repair.lane.providerId || null,
+          state: repair.lane.state,
+          outcome: repair.unstartedSpawn ? 'spawnNotDelivered' : 'terminalOperationPointerCleared',
+          delivery: repair.delivery,
+          repaired: repair.repaired,
         };
       }, env);
       if (terminalRepair) {
@@ -2543,6 +2491,6 @@ async function reconcile(options, env = process.env) {
 }
 
 module.exports = {
-  BACKEND, ClaudeTransmogrifyError, capabilities, reconcile, recover, retire,
+  BACKEND, ClaudeTransmogrifyError, capabilities, descriptor, reconcile, recover, retire,
   executionCapabilities, spawn: spawnLane, status, steer, stop,
 };

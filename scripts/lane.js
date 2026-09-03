@@ -35,28 +35,28 @@ const {
 } = require('./lib/state');
 
 const MAX_INPUT_BYTES = 64 * 1024;
-// Provider registry: a new provider is one adapter module plus one entry here.
-// Every adapter exposes spawn, status, steer, recover/reconcile, retire, and
-// executionCapabilities; the fleet reconciliation entry point name differs
-// per provider, so it is bound once in this table.
-const PROVIDERS = new Map([
-  ['codex', {
-    target: 'codex',
-    backend: 'codex-app-server',
-    adapter: codex,
-    reconcile: (options, env) => codex.recover(options, env),
-  }],
-  ['claude', {
-    target: 'claude',
-    backend: claude.BACKEND,
-    adapter: claude,
-    reconcile: (options, env) => claude.reconcile(options, env),
-  }],
-]);
+// Provider registry: a new provider is one adapter module listed here. Each
+// adapter publishes a descriptor naming its operations and the provider flags
+// it accepts, so no operation below branches on a provider by name.
+const PROVIDERS = new Map([codex, claude].map((adapter) => [
+  adapter.descriptor.target, { ...adapter.descriptor, adapter },
+]));
 const TARGETS = [...PROVIDERS.keys()];
+const PROVIDER_FLAGS = ['url', 'claude-bin', 'private-archive', 'finish-retirements', 'allow-protocol-only'];
 
 function providerForTarget(target) {
   return PROVIDERS.get(target) || null;
+}
+
+// Refuse a provider flag on a provider that does not accept it, naming the
+// providers that do.
+function rejectForeignFlags(provider, values, context) {
+  for (const flag of PROVIDER_FLAGS) {
+    if (values[flag] === undefined || provider.options.has(flag)) continue;
+    const accepting = [...PROVIDERS.values()]
+      .filter((entry) => entry.options.has(flag)).map((entry) => entry.target).join('|') || 'no';
+    usage(`--${flag} is valid only for ${accepting} ${context}`);
+  }
 }
 
 function providerForBackend(backend) {
@@ -238,14 +238,14 @@ function readInput(values) {
 
 // The adapter that owns a lane, chosen from the durable record's backend. An
 // unowned lane is NOT_OWNED and an unknown backend is ADAPTER_MISMATCH.
-function adapterForLane(repoRoot, laneId, env) {
+function providerForLane(repoRoot, laneId, env) {
   let lane;
   try { lane = requireOwnedLane(repoRoot, laneId, env); } catch (error) {
     if (/^NOT_OWNED:/.test(error.message)) error.code = 'NOT_OWNED';
     throw error;
   }
   const provider = providerForBackend(lane.backend);
-  if (provider) return provider.adapter;
+  if (provider) return provider;
   const error = new Error(`unsupported lane backend ${lane.backend}`);
   error.code = 'ADAPTER_MISMATCH';
   throw error;
@@ -500,7 +500,7 @@ async function reconcilePendingSpawnDispatch(dispatch, lane, values, env, timeou
     commandTimeoutMs: timeoutMs,
   };
   try {
-    await providerForBackend(lane.backend).reconcile(options, env);
+    await providerForBackend(lane.backend).adapter.reconcile(options, env);
   } catch (error) {
     // Exhausting this child's share of the wait budget is not an observation
     // failure: the journal is unchanged and the next round retries.
@@ -907,29 +907,17 @@ async function main(argv, env = process.env) {
     if (!TARGETS.includes(values.target)) {
       usage('capabilities requires --target codex|claude');
     }
-    if (values.target === 'codex' && values['claude-bin'] !== undefined) {
-      usage('--claude-bin is valid only for Claude capabilities');
-    }
-    if (values.target === 'claude' && values.url !== undefined) {
-      usage('--url is valid only for Codex capabilities');
-    }
-    const { adapter } = providerForTarget(values.target);
+    const provider = providerForTarget(values.target);
+    rejectForeignFlags(provider, values, 'capabilities');
+    const { adapter } = provider;
     if (typeof adapter.executionCapabilities !== 'function') {
       usage(`${values.target} execution capabilities are unavailable`);
     }
     return adapter.executionCapabilities({ url: values.url, claudeBin: values['claude-bin'] }, env);
   }
-  if (operation === 'spawn' && !TARGETS.includes(values.target)) {
-    usage('spawn requires --target codex|claude');
-  }
-  if (operation === 'spawn' && values.target === 'codex' && values['claude-bin'] !== undefined) {
-    usage('--claude-bin is valid only for Claude targets');
-  }
-  if (operation === 'spawn' && values.target === 'claude' && values.url !== undefined) {
-    usage('--url is valid only for Codex targets');
-  }
-  if (operation === 'spawn' && values.target === 'claude' && values['allow-protocol-only'] !== undefined) {
-    usage('--allow-protocol-only is valid only for Codex targets');
+  if (operation === 'spawn') {
+    if (!TARGETS.includes(values.target)) usage('spawn requires --target codex|claude');
+    rejectForeignFlags(providerForTarget(values.target), values, 'spawns');
   }
   const needsParent = ['spawn', 'children', 'wait', 'ack'].includes(operation);
   const parentContext = needsParent
@@ -998,41 +986,20 @@ async function main(argv, env = process.env) {
   }
   if (operation === 'reconcile') {
     if (!TARGETS.includes(values.target)) usage('reconcile requires --target codex|claude');
-    if (values.target === 'codex' && (values['claude-bin'] !== undefined || values['private-archive'] !== undefined)) {
-      usage('Claude options are valid only for Claude reconciliation');
-    }
-    if (values.target === 'codex' && values['finish-retirements'] !== undefined) {
-      usage('--finish-retirements is valid only for Claude reconciliation');
-    }
-    if (values.target === 'claude' && values.url !== undefined) {
-      usage('--url is valid only for Codex reconciliation');
-    }
-    const result = await providerForTarget(values.target).reconcile(options, env);
+    const provider = providerForTarget(values.target);
+    rejectForeignFlags(provider, values, 'reconciliation');
+    const result = await provider.adapter.reconcile(options, env);
     return { ...result, operation: 'reconcile' };
   }
   if (!values.lane) usage(`${operation} requires --lane`);
-  const adapter = adapterForLane(repoRoot, values.lane, env);
-  if (values.url !== undefined && adapter !== codex) usage('--url is valid only for Codex lanes');
-  if (values['claude-bin'] !== undefined && adapter !== claude) usage('--claude-bin is valid only for Claude lanes');
-  if (values['private-archive'] !== undefined && adapter !== claude) {
-    usage('--private-archive is valid only for Claude retirement');
-  }
+  const provider = providerForLane(repoRoot, values.lane, env);
+  rejectForeignFlags(provider, values, 'lanes');
   if (operation === 'abandon') return abandonLaneOperation(repoRoot, values, env);
-  if (operation === 'interrupt') {
-    if (adapter !== codex) usage('interrupt is supported only for Codex turn cancellation');
-    return codex.interrupt(options, env);
+  if (!provider.operations.has(operation)) usage(`${operation} is not supported by ${provider.target} lanes`);
+  if (operation === 'recover' && input !== undefined && !provider.recoverAcceptsInput) {
+    usage(`--input is not accepted by ${provider.target} recovery`);
   }
-  if (operation === 'stop') {
-    if (adapter !== claude) usage('stop is supported only for Claude whole-session stopping');
-    return claude.stop(options, env);
-  }
-  if (operation === 'recover' && input !== undefined) {
-    if (adapter !== codex) usage('--input is valid only for Codex boundary recovery');
-    const result = await codex.resume(options, env);
-    return { ...result, operation: 'recover' };
-  }
-  if (typeof adapter[operation] !== 'function') usage(`${operation} is not supported by ${adapter === codex ? 'codex' : 'claude'}`);
-  return adapter[operation](options, env);
+  return provider.adapter[operation](options, env);
 }
 
 if (require.main === module) {

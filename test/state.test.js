@@ -928,7 +928,7 @@ test('Claude identity reservation requires exact backend, intent, receipts, and 
     operationId: operation.operationId,
     providerIdentity: identity,
     spawnIntent: claudeSpawnIntent(operation.operationId, '[test] invalid backend', 'c'),
-  }, fixture.env), /uses Claude provider identity with backend/);
+  }, fixture.env), /carries a provider identity for backend/);
 
   const lane = reserveLane(fixture.repoRoot, {
     laneId: 'claude-valid',
