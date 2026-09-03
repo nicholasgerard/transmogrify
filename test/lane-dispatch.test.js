@@ -380,3 +380,13 @@ test('observation leaves an in-flight spawn journal alone until its spawner is g
   assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env).state, 'planned');
   assert.equal(listLanes(fixture.repoRoot, fixture.env).find((lane) => lane.laneId === laneId).state, 'planned');
 });
+
+test('a retirement that is still progressing does not raise attention until it stalls', () => {
+  const { retireInFlight } = require('../scripts/lib/observe');
+  const fresh = { type: 'retire', state: 'remoteArchived', updatedAt: new Date().toISOString() };
+  assert.equal(retireInFlight(fresh), true);
+  assert.equal(retireInFlight({ ...fresh, updatedAt: new Date(Date.now() - 3 * 60_000).toISOString() }), false);
+  assert.equal(retireInFlight({ ...fresh, state: 'providerRetiredCleanupBlocked' }), false, 'a real block is never transient');
+  assert.equal(retireInFlight({ ...fresh, state: 'cleanupDeferred' }), false, 'a deliberate deferral is reported at once');
+  assert.equal(retireInFlight({ type: 'steer', state: 'unknown', updatedAt: fresh.updatedAt }), false);
+});

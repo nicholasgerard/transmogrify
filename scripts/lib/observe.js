@@ -24,6 +24,20 @@ const PRE_DISPATCH_SPAWN_STATES = new Set([
 // A pre-dispatch journal younger than this, with no recorded spawner process
 // to check, is assumed to be in flight.
 const SPAWN_IN_FLIGHT_GRACE_MS = 5 * 60 * 1000;
+// Retirement journal states that a running retire command passes through on
+// its way to completion. They raise attention only once they have stood
+// still for this long, which is what a crashed retirement looks like.
+const TRANSIENT_RETIRE_STATES = new Set([
+  'providerRetired', 'remoteArchived', 'worktreeRemoved', 'localRemovalDispatching', 'localRemovalDispatched',
+  'localRemoved',
+]);
+const RETIRE_IN_FLIGHT_GRACE_MS = 2 * 60 * 1000;
+
+function retireInFlight(pending) {
+  if (!pending || pending.type !== 'retire' || !TRANSIENT_RETIRE_STATES.has(pending.state)) return false;
+  const updatedAtMs = Date.parse(pending.updatedAt || '');
+  return Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs < RETIRE_IN_FLIGHT_GRACE_MS;
+}
 
 // True while the process that reserved a spawn may still be driving it
 // through its pre-dispatch states. A continuous observer (the watcher, a
@@ -141,6 +155,7 @@ function localEventForLane(dispatch, lane, env) {
         data: { state: 'cleanup-blocked' },
       }, env).event;
     }
+    if (retireInFlight(pending)) return null;
     if (['providerRetiredCleanupDeferred', 'cleanupDeferred', 'localRemovalUnknown',
       'providerRetired', 'remoteArchived', 'worktreeRemoved',
       'localRemovalDispatching', 'localRemovalDispatched', 'localRemoved']
@@ -371,8 +386,10 @@ async function observeParentChildren(context, values, env, deadline) {
 
 module.exports = {
   EVENT_KINDS,
+  RETIRE_IN_FLIGHT_GRACE_MS,
   SPAWN_IN_FLIGHT_GRACE_MS,
   classifyObservation,
+  retireInFlight,
   spawnInFlight,
   kindForEvent,
   kindSatisfies,

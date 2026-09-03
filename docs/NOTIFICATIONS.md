@@ -59,6 +59,14 @@ Every layer is observation-based: the watcher and the wake never trust a
 child's own claim of completion. A child that says "done" is still observed
 through the provider before any event exists.
 
+Two guards keep a continuous observer from racing the parent's own commands.
+A spawn journal still in a pre-dispatch state (`planned`, `seatReady`,
+`dispatching`, `providerRequestDispatched`, `providerCreated`) is left alone
+while its launching process is alive, or for five minutes when no launcher
+is recorded; the crash repair exists for a launcher that died. A retirement
+passing through its transient states raises attention only after two
+minutes without progress, which is what a crashed retirement looks like.
+
 ## Done versus intermediate
 
 Every event carries `kind` and `terminal`:
