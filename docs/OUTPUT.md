@@ -123,14 +123,18 @@ Lane envelope. `receipt`: `archived`, `alreadyRetired`, `worktreeRemoved`,
 ### `children`
 
 `parentRef`, `unacknowledgedEvents`, `children`: `dispatchId`, `laneId`,
-`target`, `displayName`, `state`, `laneObservation`, `createdAt`,
-`requestedProfile`, `resolvedProfile`, `observedProfile`.
+`target`, `displayName`, `state`, `phase` (with `--observe`),
+`laneObservation`, `createdAt`, `unacknowledgedEvents`, `latestEventType`,
+`latestEventKind`, `requestedProfile`, `resolvedProfile`, `observedProfile`.
 
 ### `wait`
 
-`events`: `schemaVersion`, `sequence`, `parentRef`, `dispatchId`, `type`,
-`observationFingerprint`, `occurredAt`, `eventId`, `child` (`provider`,
-`laneId`, `projectKey`), `data` (`state`, `status`). `observerErrors`:
+`until` (the threshold that was waited for), `events`: `schemaVersion`,
+`sequence`, `parentRef`, `dispatchId`, `type`, `kind` (`progress`,
+`complete`, `attention`, `terminal`), `terminal`, `observationFingerprint`,
+`occurredAt`, `eventId`, `child` (`provider`, `laneId`, `projectKey`),
+`data` (`state`, `status`). `observed`: `dispatchId`, `laneId`, `phase`,
+`eventType` for every child this call observed. `observerErrors`:
 `dispatchId`, `code`.
 
 ### `ack`

@@ -142,6 +142,9 @@ const PUBLIC_ERROR_MESSAGES = new Map([
   ['UNVERIFIED_PRIVATE_VERSION', 'the installed Claude private surface is not pinned'],
   ['UNVERIFIED_RUNTIME', 'the app-server runtime is outside the verified version line; run doctor.js for discovery'],
   ['USAGE_ERROR', 'invalid operator request'],
+  ['WAKE_UNAVAILABLE', 'the parent context has no wake channel; run wait in the foreground or background instead'],
+  ['WAKE_UNCERTAIN', 'the wake message may not have reached the parent session; the durable event still waits for wait and ack'],
+  ['WAKE_UNDELIVERED', 'the wake message was not delivered to the parent session; the durable event still waits for wait and ack'],
 ]);
 
 // The only error-detail keys that reach public output. Everything else is

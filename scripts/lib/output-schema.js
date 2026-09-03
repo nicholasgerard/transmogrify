@@ -137,18 +137,20 @@ const SCHEMAS = Object.freeze({
   children: {
     version: true, ok: true, operation: true, parentRef: true, unacknowledgedEvents: true,
     children: {
-      dispatchId: true, laneId: true, target: true, displayName: true, state: true,
-      laneObservation: true, createdAt: true, ...PROFILE_FIELDS,
+      dispatchId: true, laneId: true, target: true, displayName: true, state: true, phase: true,
+      laneObservation: true, createdAt: true, unacknowledgedEvents: true, latestEventType: true,
+      latestEventKind: true, ...PROFILE_FIELDS,
     },
   },
   wait: {
-    version: true, ok: true, operation: true,
+    version: true, ok: true, operation: true, until: true,
     events: {
-      schemaVersion: true, sequence: true, parentRef: true, dispatchId: true, type: true,
-      observationFingerprint: true, occurredAt: true, eventId: true,
+      schemaVersion: true, sequence: true, parentRef: true, dispatchId: true, type: true, kind: true,
+      terminal: true, observationFingerprint: true, occurredAt: true, eventId: true,
       child: { provider: true, laneId: true, projectKey: true },
       data: { state: true, status: true },
     },
+    observed: { dispatchId: true, laneId: true, phase: true, eventType: true },
     observerErrors: { dispatchId: true, code: true },
   },
   ack: { version: true, ok: true, operation: true, eventId: true, acknowledgedAt: true },

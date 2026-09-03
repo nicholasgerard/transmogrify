@@ -37,6 +37,41 @@ const EVENT_TYPES = new Set([
   'child.delivery-unknown',
 ]);
 const DISPATCH_STATES = new Set(['reserved', 'journaled']);
+// What an event means to the parent. `complete` is harvestable now and the
+// child can still be steered; `terminal` means no further work will come.
+// Kinds are derived when events are read, never stored, so event ids and
+// acknowledgement digests stay stable.
+const EVENT_KINDS = Object.freeze({
+  'child.spawned': 'progress',
+  'child.turn-completed': 'complete',
+  'child.idle-observed': 'complete',
+  'child.needs-attention': 'attention',
+  'child.delivery-unknown': 'attention',
+  'child.cleanup-blocked': 'attention',
+  'child.failed': 'terminal',
+  'child.stopped': 'terminal',
+  'child.retired': 'terminal',
+});
+const KIND_RANK = Object.freeze({ progress: 0, complete: 1, attention: 2, terminal: 3 });
+const WAIT_THRESHOLDS = Object.freeze(['any', 'complete', 'terminal']);
+
+function kindForEvent(type) {
+  return EVENT_KINDS[type] || 'progress';
+}
+
+// True when an event of `kind` satisfies a wait for events of at least
+// `threshold` significance. Attention counts for a complete wait because the
+// parent must act either way.
+function kindSatisfies(kind, threshold) {
+  if (!threshold || threshold === 'any') return true;
+  return KIND_RANK[kind] >= KIND_RANK[threshold];
+}
+
+// The read-side view of a stored event: the record plus its derived kind.
+function decorateEvent(event) {
+  const kind = kindForEvent(event.type);
+  return { ...event, kind, terminal: kind === 'terminal' };
+}
 // Every collection here is bounded: a directory past its limit is refused rather
 // than scanned, and a visible label is capped before it can reach a prompt.
 const MAX_STATE_BYTES = 256 * 1024;
@@ -1075,7 +1110,7 @@ function listEvents(parentContext, options = {}, env = process.env) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_EVENT_BATCH) {
     throw new DispatchError('USAGE_ERROR', `event batch limit must be 1..${MAX_EVENT_BATCH}`);
   }
-  return collectEvents(parentContext, options, env).slice(0, limit);
+  return collectEvents(parentContext, options, env).slice(0, limit).map(decorateEvent);
 }
 
 function countEvents(parentContext, options = {}, env = process.env) {
@@ -1119,6 +1154,11 @@ function acknowledgeEvent(parentContext, eventId, env = process.env) {
 }
 
 module.exports = {
+  EVENT_KINDS,
+  WAIT_THRESHOLDS,
+  decorateEvent,
+  kindForEvent,
+  kindSatisfies,
   HOST_APPS,
   DispatchError,
   EVENT_TYPES,

@@ -5,8 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const {
-  acknowledgeEvent,
+const { acknowledgeEvent, decorateEvent,
   assertWriteCapacity,
   countEvents,
   createParentContext,
@@ -210,12 +209,12 @@ test('events are stable, monotonic, at-least-once, and separately acknowledged',
     data: { state: 'idle' },
   }, fixture.env);
   assert.equal(idle.sequence, spawned.sequence + 1);
-  assert.deepEqual(listEvents(fixture.context, {}, fixture.env), [spawned, idle]);
+  assert.deepEqual(listEvents(fixture.context, {}, fixture.env), [spawned, idle].map(decorateEvent));
   assert.equal(countEvents(fixture.context, {}, fixture.env), 2);
 
   const acknowledgement = acknowledgeEvent(fixture.context, spawned.eventId, fixture.env);
   assert.equal(acknowledgement.eventId, spawned.eventId);
-  assert.deepEqual(listEvents(fixture.context, {}, fixture.env), [idle]);
+  assert.deepEqual(listEvents(fixture.context, {}, fixture.env), [idle].map(decorateEvent));
   assert.equal(countEvents(fixture.context, {}, fixture.env), 1);
   assert.deepEqual(recordEvent({
     dispatchId: reserved.dispatch.dispatchId,
@@ -223,10 +222,10 @@ test('events are stable, monotonic, at-least-once, and separately acknowledged',
     fingerprint: 'provider-bound',
     data: { state: 'active' },
   }, fixture.env), spawned);
-  assert.deepEqual(listEvents(fixture.context, {}, fixture.env), [idle]);
+  assert.deepEqual(listEvents(fixture.context, {}, fixture.env), [idle].map(decorateEvent));
   assert.deepEqual(
     listEvents(fixture.context, { includeAcknowledged: true }, fixture.env),
-    [spawned, idle],
+    [spawned, idle].map(decorateEvent),
   );
   assert.deepEqual(
     acknowledgeEvent(fixture.context, spawned.eventId, fixture.env),

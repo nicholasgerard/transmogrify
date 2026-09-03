@@ -145,19 +145,25 @@ authority. The private exact receipts are.
 
 ## Event stream
 
-Each parent has an immutable sequence of stable event records:
+Each parent has an immutable sequence of stable event records. Every event
+read back carries a derived `kind` and `terminal` flag so the parent can tell
+"done with the assignment" from "gone for good" without knowing the provider:
 
-| Event | Meaning |
-| --- | --- |
-| `child.spawned` | The exact spawn operation completed and its provider identity is bound. |
-| `child.turn-completed` | A Codex turn reached a terminal completed or interrupted state. |
-| `child.idle-observed` | The exact provider lane is idle. |
-| `child.needs-attention` | The child is waiting for user input/approval or a safe reconciliation decision. |
-| `child.failed` | The exact child reached a provider or local failed state. |
-| `child.stopped` | The exact child is stopped. |
-| `child.delivery-unknown` | A provider mutation may have landed and must be reconciled without replay. |
-| `child.cleanup-blocked` | Retirement is verified but automatic worktree cleanup is permanently unsafe. |
-| `child.retired` | Provider retirement and every enabled cleanup step are complete. |
+| Event | Kind | Meaning |
+| --- | --- | --- |
+| `child.spawned` | progress | The exact spawn operation completed and its provider identity is bound. |
+| `child.turn-completed` | complete | The input the parent sent has been fully processed: a Codex turn completed or was interrupted, or a Claude lane went from working to idle. Harvest now, steer again, or retire. |
+| `child.idle-observed` | complete | The lane was first observed idle with no preceding working phase. |
+| `child.needs-attention` | attention | The child is waiting for user input/approval or a safe reconciliation decision. |
+| `child.delivery-unknown` | attention | A provider mutation may have landed and must be reconciled without replay. |
+| `child.cleanup-blocked` | attention | Retirement is verified but automatic worktree cleanup is permanently unsafe. |
+| `child.failed` | terminal | The exact child reached a provider or local failed state. |
+| `child.stopped` | terminal | The exact child is stopped. |
+| `child.retired` | terminal | Provider retirement and every enabled cleanup step are complete. |
+
+A child that completes and is then steered returns to progress; its next
+completion is a new event with a new fingerprint. How events reach a parent
+in real time is in [NOTIFICATIONS.md](NOTIFICATIONS.md).
 
 Event IDs are deterministic from installation, dispatch, type, and observation
 fingerprint, so repeating an observation recreates the same ID. A transition
@@ -191,8 +197,20 @@ not end an orchestration turn merely because spawn returned.
 node "$SKILL_ROOT/scripts/lane.js" wait \
   --parent-context-file "$PARENT_CONTEXT" \
   --repo-root "$REPO_ROOT" \
-  --timeout-ms 60000
+  --until complete \
+  --timeout-ms 1800000
 ```
+
+Every `wait` first observes every outstanding child (each round bounded to
+thirty seconds so one slow provider read cannot stall the others), then
+returns everything still unacknowledged, old and new together, as soon as
+one event meets `--until` (`any` by default; `complete` also returns on
+attention and terminal events; `terminal` only on failed, stopped, or
+retired). An unacknowledged old event can therefore never hide a newer
+completion. `--timeout-ms` runs up to thirty minutes so a host that can run
+the command in the background is re-invoked when it returns; `--timeout-ms 0`
+drains pending events without observing. `children --observe` refreshes
+every child's live phase without waiting.
 
 On each event:
 

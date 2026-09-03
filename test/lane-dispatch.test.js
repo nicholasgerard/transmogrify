@@ -283,3 +283,64 @@ test('parent wait names each child whose observation failed', async (t) => {
       typeof error.details.failures[0].code === 'string',
   );
 });
+
+test('parent wait observes first, returns old and new events together, and honours --until', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'claude', hostApp: 'claude-code', displayName: 'Kinds parent',
+  }, fixture.env);
+  const cwd = fs.realpathSync(fixture.seat);
+  let turnId = 'turn-1';
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/read') {
+      return { result: { thread: { id: 'thread-k', cwd, name: '::: kinds child', status: { type: 'idle' } } } };
+    }
+    if (request.method === 'thread/turns/list') {
+      return { result: { data: [{ id: turnId, status: 'completed', items: [] }] } };
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  t.after(() => server.close());
+  const laneId = crypto.randomUUID();
+  const dispatch = reserveDispatch({
+    parentContext, repoRoot: fixture.repoRoot, laneId, targetProvider: 'codex',
+    backend: 'codex-app-server', displayName: '::: kinds child', prompt: 'Work.',
+  }, fixture.env);
+  registerLane(fixture.repoRoot, {
+    laneId, backend: 'codex-app-server', target: 'codex', providerId: 'thread-k',
+    displayName: '::: kinds child', state: 'idle', runtime: runtimeFor(server.url),
+    seat: verifySeat(fixture.repoRoot, fixture.seat, fixture.worktreesRoot), lineage: dispatch.lineage,
+  }, fixture.env);
+  const waitArgs = (extra) => [
+    'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, ...extra,
+  ];
+
+  const first = await main(waitArgs(['--timeout-ms', '5000']), fixture.env);
+  assert.equal(first.until, 'any');
+  assert.deepEqual(first.events.map((event) => [event.type, event.kind, event.terminal]),
+    [['child.turn-completed', 'complete', false]]);
+  assert.deepEqual(first.observed.map((entry) => [entry.laneId, entry.phase]), [[laneId, 'idle']]);
+
+  // The first event stays unacknowledged; a new turn must still surface.
+  turnId = 'turn-2';
+  const second = await main(waitArgs(['--timeout-ms', '5000']), fixture.env);
+  assert.deepEqual(second.events.map((event) => event.type), ['child.turn-completed', 'child.turn-completed']);
+  assert.notEqual(second.events[0].eventId, second.events[1].eventId);
+
+  await assert.rejects(() => main(waitArgs(['--timeout-ms', '300', '--until', 'terminal']), fixture.env),
+    (error) => error.code === 'NO_EVENT' && error.details.pending === 2 && error.details.until === 'terminal');
+  await assert.rejects(() => main(waitArgs(['--timeout-ms', '0', '--until', 'bogus']), fixture.env),
+    (error) => error.code === 'USAGE_ERROR');
+
+  const drained = await main(waitArgs(['--timeout-ms', '0', '--until', 'complete']), fixture.env);
+  assert.equal(drained.events.length, 2);
+  assert.deepEqual(drained.observed, []);
+
+  const children = await main([
+    'children', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--observe',
+  ], fixture.env);
+  assert.equal(children.children[0].phase, 'idle');
+  assert.equal(children.children[0].unacknowledgedEvents, 2);
+  assert.equal(children.children[0].latestEventKind, 'complete');
+  assert.equal(children.unacknowledgedEvents, 2);
+});

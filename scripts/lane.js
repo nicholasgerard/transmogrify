@@ -11,19 +11,23 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { parseArgs, TextDecoder } = require('node:util');
-const codex = require('./lib/codex-adapter');
-const claude = require('./lib/claude-adapter');
 const {
+  PROVIDER_FLAGS, PROVIDERS, TARGETS, providerForBackend, providerForTarget, targetsAccepting,
+} = require('./lib/providers');
+const { observeParentChildren, resolveDispatchLane } = require('./lib/observe');
+const { sleep } = require('./lib/async');
+const {
+  WAIT_THRESHOLDS,
   acknowledgeEvent,
   countEvents,
   createParentContext,
   digest,
+  kindForEvent,
+  kindSatisfies,
   listDispatches,
   listEvents,
   listParentContexts,
   loadParentContext,
-  recordEvent,
-  recordObservation,
 } = require('./lib/dispatch');
 const {
   SAFE_REFUSALS, exitCodeForError, failureBody, publicErrorMessage, safeDetails, safeString,
@@ -36,36 +40,16 @@ const {
 } = require('./lib/state');
 
 const MAX_INPUT_BYTES = 64 * 1024;
-// Provider registry: a new provider is one adapter module listed here. Each
-// adapter publishes a descriptor naming its operations and the provider flags
-// it accepts, so no operation below branches on a provider by name.
-const PROVIDERS = new Map([codex, claude].map((adapter) => [
-  adapter.descriptor.target, { ...adapter.descriptor, adapter },
-]));
-const TARGETS = [...PROVIDERS.keys()];
-const PROVIDER_FLAGS = ['url', 'claude-bin', 'private-archive', 'finish-retirements', 'allow-protocol-only'];
-
-function providerForTarget(target) {
-  return PROVIDERS.get(target) || null;
-}
-
 // Refuse a provider flag on a provider that does not accept it, naming the
 // providers that do.
 function rejectForeignFlags(provider, values, context) {
   for (const flag of PROVIDER_FLAGS) {
     if (values[flag] === undefined || provider.options.has(flag)) continue;
-    const accepting = [...PROVIDERS.values()]
-      .filter((entry) => entry.options.has(flag)).map((entry) => entry.target).join('|') || 'no';
+    const accepting = targetsAccepting(flag).join('|') || 'no';
     usage(`--${flag} is valid only for ${accepting} ${context}`);
   }
 }
 
-function providerForBackend(backend) {
-  for (const provider of PROVIDERS.values()) {
-    if (provider.backend === backend) return provider;
-  }
-  return null;
-}
 const HELP = `usage: lane.js <operation> [options]
 
 operations:
@@ -79,8 +63,9 @@ operations:
              [--cwd <absolute>] [--worktrees <absolute> (or WORKTREES)]
              [--intent <intent>] [--model <provider-model>] [--effort <level>]
              [--speed standard|fast] [--allow-protocol-only]
-  children   --parent-context-file <absolute>
-  wait       --parent-context-file <absolute> [--after <sequence>] [--timeout-ms <0..60000>]
+  children   --parent-context-file <absolute> [--observe]
+  wait       --parent-context-file <absolute> [--after <sequence>] [--timeout-ms <0..1800000>]
+             [--until any|complete|terminal]
              [--url <loopback-ws-url>] [--claude-bin <absolute-path>]
   ack        --parent-context-file <absolute> --event <event-id>
   steer      --lane <lane-id> (--input <text> | --input-file <absolute|->)
@@ -144,9 +129,9 @@ const OPERATION_OPTIONS = {
     'url', 'claude-bin', 'parent-context-file', 'intent', 'model', 'effort', 'speed',
     'allow-protocol-only', 'timeout-ms',
   ]),
-  children: new Set(['repo-root', 'parent-context-file']),
+  children: new Set(['repo-root', 'parent-context-file', 'observe', 'url', 'claude-bin']),
   wait: new Set([
-    'repo-root', 'parent-context-file', 'after', 'timeout-ms', 'url', 'claude-bin',
+    'repo-root', 'parent-context-file', 'after', 'timeout-ms', 'until', 'url', 'claude-bin',
   ]),
   ack: new Set(['parent-context-file', 'event']),
   steer: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin', 'timeout-ms']),
@@ -288,351 +273,50 @@ function dispatchSummary(dispatch, resolved = { lane: null, reason: 'missing' })
 
 // Whether a lane lookup failed because its repository or registry is gone rather
 // than because the lane is not owned.
-function repositoryUnavailable(error) {
-  return error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ||
-    /not a git repository|ownership registry does not exist|REPO_ROOT must be/.test(error?.message || '');
-}
-
-// Resolve the exact owned lane behind a dispatch. `lane` is null when the lane
-// record is missing (`reason: 'missing'`) or when its repository can no longer
-// be resolved (`reason: 'repository-unavailable'`); both are observed as
-// attention conditions instead of failing the whole parent.
-function resolveDispatchLane(dispatch, env) {
-  let lane;
-  try { lane = requireOwnedLane(dispatch.child.repoRoot, dispatch.child.laneId, env); } catch (error) {
-    if (/^NOT_OWNED:/.test(error.message)) return { lane: null, reason: 'missing' };
-    if (repositoryUnavailable(error)) return { lane: null, reason: 'repository-unavailable' };
-    throw error;
-  }
-  const expectedBackend = providerForTarget(dispatch.child.targetProvider)?.backend ?? null;
-  if (!lane.lineage || lane.lineage.dispatchId !== dispatch.dispatchId ||
-      lane.lineage.parentRef !== dispatch.parentRef ||
-      lane.lineage.installationId !== dispatch.installationId ||
-      lane.backend !== dispatch.child.backend || lane.backend !== expectedBackend ||
-      lane.target !== dispatch.child.targetProvider ||
-      lane.displayName !== dispatch.child.displayName) {
-    const error = new Error('dispatch lineage does not match the exact owned lane');
-    error.code = 'NOT_OWNED';
-    throw error;
-  }
-  return { lane, reason: null };
-}
-
-function laneForDispatch(dispatch, env) {
-  return resolveDispatchLane(dispatch, env).lane;
-}
-
-// The one completed spawn journal for this dispatch, used to emit the spawned
-// event a crashed launch never recorded. Two matches is invalid local state.
-function completedSpawnOperation(dispatch, lane, env) {
-  if (!lane?.providerId) return null;
-  const matches = listOperations(dispatch.child.repoRoot, env).filter((operation) =>
-    operation.type === 'spawn' && operation.state === 'complete' &&
-    operation.laneId === lane.laneId && operation.providerId === lane.providerId &&
-    operation.details?.dispatchId === dispatch.dispatchId
-  );
-  if (matches.length > 1) {
-    const error = new Error('multiple completed spawn receipts match one dispatch');
-    error.code = 'INVALID_LOCAL_STATE';
-    throw error;
-  }
-  return matches[0] || null;
-}
-
-// The one terminal spawn journal for a dispatch whose lane never bound a
-// provider: a proven failure rather than an unknown.
-function terminalUnstartedSpawnOperation(dispatch, lane, env) {
-  if (lane?.providerId) return null;
-  const matches = listOperations(dispatch.child.repoRoot, env).filter((operation) =>
-    operation.type === 'spawn' && ['failed', 'notDelivered'].includes(operation.state) &&
-    operation.laneId === lane.laneId && operation.details?.dispatchId === dispatch.dispatchId
-  );
-  if (matches.length > 1) {
-    const error = new Error('multiple terminal spawn receipts match one dispatch');
-    error.code = 'INVALID_LOCAL_STATE';
-    throw error;
-  }
-  return matches[0] || null;
-}
-
-// Derive at most one child event from durable local state alone: a completed or
-// terminal spawn journal, a retirement phase needing attention, or a
-// delivery-unknown lane. It contacts no provider and never invents an event for
-// an open spawn journal.
-function localEventForLane(dispatch, lane, env) {
-  if (!lane) return null;
-  const spawnOperation = completedSpawnOperation(dispatch, lane, env);
-  if (spawnOperation) {
-    recordEvent({
-      dispatchId: dispatch.dispatchId,
-      type: 'child.spawned',
-      fingerprint: `spawn-complete:${spawnOperation.operationId}:${lane.providerId}`,
-      data: { state: 'spawned' },
-    }, env);
-  }
-  const unstartedSpawn = terminalUnstartedSpawnOperation(dispatch, lane, env);
-  if (unstartedSpawn) {
-    return recordObservation({
-      dispatchId: dispatch.dispatchId,
-      phase: 'failed',
-      providerFingerprint: `spawn-terminal:${unstartedSpawn.operationId}:${unstartedSpawn.state}`,
-      eventType: 'child.failed',
-      data: { state: 'failed' },
-    }, env).event;
-  }
-  const pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
-  if (pending?.type === 'retire') {
-    if (pending.state === 'providerRetiredCleanupBlocked') {
-      return recordObservation({
-        dispatchId: dispatch.dispatchId,
-        phase: 'cleanup-blocked',
-        providerFingerprint: `retire:${pending.operationId}:${pending.state}`,
-        eventType: 'child.cleanup-blocked',
-        data: { state: 'cleanup-blocked' },
-      }, env).event;
-    }
-    if (['providerRetiredCleanupDeferred', 'cleanupDeferred', 'localRemovalUnknown']
-      .includes(pending.state)) {
-      return recordObservation({
-        dispatchId: dispatch.dispatchId,
-        phase: 'needs-attention',
-        providerFingerprint: `retire:${pending.operationId}:${pending.state}`,
-        eventType: 'child.needs-attention',
-        data: { state: 'needs-attention' },
-      }, env).event;
-    }
-    if (['providerRetired', 'remoteArchived', 'worktreeRemoved',
-      'localRemovalDispatching', 'localRemovalDispatched', 'localRemoved']
-      .includes(pending.state)) {
-      return recordObservation({
-        dispatchId: dispatch.dispatchId,
-        phase: 'needs-attention',
-        providerFingerprint: `retire:${pending.operationId}:${pending.state}`,
-        eventType: 'child.needs-attention',
-        data: { state: 'needs-attention' },
-      }, env).event;
-    }
-  }
-  const terminal = new Map([
-    ['deliveryUnknown', ['delivery-unknown', 'child.delivery-unknown']],
-    ['archiveUnknown', ['delivery-unknown', 'child.delivery-unknown']],
-  ]).get(lane.state);
-  if (!terminal && !pending && ['archivedVerified', 'worktreeRemoved']
-    .includes(lane.state)) {
-    return recordObservation({
-      dispatchId: dispatch.dispatchId,
-      phase: 'retired',
-      providerFingerprint: `retired:${lane.state}:${lane.updatedAt}`,
-      eventType: 'child.retired',
-      data: { state: 'retired' },
-    }, env).event;
-  }
-  if (!terminal) return null;
-  // An open spawn journal is reported once by the unresolved-spawn path after
-  // non-replaying reconciliation; reporting it here as well would alternate
-  // observation phases and re-notify the parent on every wait.
-  if (pending?.type === 'spawn') return null;
-  const [phase, eventType] = terminal;
-  return recordObservation({
-    dispatchId: dispatch.dispatchId,
-    phase,
-    providerFingerprint: `${lane.state}:${lane.turnId || 'none'}:${pending?.operationId || 'none'}`,
-    eventType,
-    data: { state: phase },
-  }, env).event;
-}
-
-// Reconcile a child's open spawn journal through its own adapter, without
-// replaying the launch. Returns the refreshed lane.
-async function reconcilePendingSpawnDispatch(dispatch, lane, values, env, timeoutMs) {
-  const pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
-  if (pending?.type !== 'spawn') return lane;
-  const options = {
-    repoRoot: dispatch.child.repoRoot,
-    laneId: lane.laneId,
-    url: values.url || lane.runtime?.endpoint,
-    claudeBin: values['claude-bin'],
-    timeoutMs,
-    commandTimeoutMs: timeoutMs,
-  };
-  try {
-    await providerForBackend(lane.backend).adapter.reconcile(options, env);
-  } catch (error) {
-    // Exhausting this child's share of the wait budget is not an observation
-    // failure: the journal is unchanged and the next round retries.
-    if (error.code !== 'TIMEOUT') throw error;
-  }
-  return requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
-}
-
-// Observe one child and record at most one event for it. A dispatch whose lane
-// stays unresolvable past a grace period becomes an attention event rather than
-// a failure of the whole parent.
-async function observeDispatch(dispatch, values, env, deadline, remainingChildren) {
-  const resolved = resolveDispatchLane(dispatch, env);
-  let lane = resolved.lane;
-  if (!lane) {
-    const ageMs = Date.now() - Date.parse(dispatch.createdAt);
-    if (Number.isFinite(ageMs) && ageMs >= 30_000) {
-      const unavailable = resolved.reason === 'repository-unavailable';
-      const attention = unavailable || dispatch.state === 'reserved';
-      const observation = recordObservation({
-        dispatchId: dispatch.dispatchId,
-        phase: attention ? 'needs-attention' : 'delivery-unknown',
-        providerFingerprint: unavailable
-          ? `repository-unavailable:${dispatch.child.repoRoot}`
-          : `missing-lane:${dispatch.state}:${dispatch.createdAt}`,
-        eventType: attention ? 'child.needs-attention' : 'child.delivery-unknown',
-        data: { state: attention ? 'needs-attention' : 'delivery-unknown' },
-      }, env);
-      return { lane: null, event: observation.event };
-    }
-    return { lane: null, event: null };
-  }
-  const terminalPending = pendingOperationForLane(
-    dispatch.child.repoRoot,
-    lane.laneId,
-    env,
-  );
-  const locallySettleable = terminalPending &&
-    ['complete', 'failed', 'notDelivered'].includes(terminalPending.state) &&
-    (terminalPending.type !== 'spawn' ||
-      (terminalPending.state === 'complete' && Boolean(lane.providerId)));
-  if (locallySettleable) {
-    await withLaneLease(dispatch.child.repoRoot, lane.laneId, async () => {
-      settleTerminalLaneOperationPointer(dispatch.child.repoRoot, lane.laneId, env);
-    }, env);
-    lane = laneForDispatch(dispatch, env);
-  }
-  let localEvent = localEventForLane(dispatch, lane, env);
-  if (localEvent) return { lane, event: localEvent };
-  let pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
-  if (pending?.type === 'spawn') {
-    const spawnRemainingMs = deadline - Date.now();
-    if (spawnRemainingMs < 100) return { lane, event: null };
-    const spawnBudget = Math.max(
-      100,
-      Math.floor(spawnRemainingMs / Math.max(1, remainingChildren * 4)),
-    );
-    lane = await reconcilePendingSpawnDispatch(dispatch, lane, values, env, spawnBudget);
-    localEvent = localEventForLane(dispatch, lane, env);
-    if (localEvent) return { lane, event: localEvent };
-    pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
-    if (pending?.type === 'spawn') {
-      // The spawn journal is still open after non-replaying reconciliation:
-      // wake the parent exactly once per journal state instead of going silent.
-      const observation = recordObservation({
-        dispatchId: dispatch.dispatchId,
-        phase: 'needs-attention',
-        providerFingerprint: `spawn-unresolved:${pending.operationId}:${pending.state}`,
-        eventType: 'child.needs-attention',
-        data: { state: 'needs-attention' },
-      }, env);
-      return { lane, event: observation.event };
-    }
-  }
-  if (['deliveryUnknown', 'archiveUnknown'].includes(lane.state) ||
-      (!pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env) &&
-       ['archivedVerified', 'worktreeRemoved'].includes(lane.state))) {
-    return { lane, event: localEvent };
-  }
-  const remainingMs = deadline - Date.now();
-  if (remainingMs < 100) return { lane, event: null };
-  const requestBudget = Math.max(100, Math.floor(remainingMs / Math.max(1, remainingChildren * 4)));
-  if (!lane.providerId) return { lane, event: null };
-  const options = {
-    repoRoot: dispatch.child.repoRoot,
-    laneId: lane.laneId,
-    url: values.url || lane.runtime?.endpoint,
-    claudeBin: values['claude-bin'],
-    timeoutMs: requestBudget,
-    commandTimeoutMs: requestBudget,
-  };
-  const provider = providerForBackend(lane.backend);
-  const result = await provider.adapter.status(options, env);
-  lane = requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
-  // Observations and parent events keep the pre-0.3 vocabulary: working,
-  // waiting, idle, stopped, failed.
-  let phase = result.phase === 'executing' ? 'working' : result.phase;
-  let eventType = null;
-  let providerFingerprint;
-  const data = { state: lane.state };
-  if (provider.target === 'codex') {
-    const turn = result.turn;
-    providerFingerprint = `turn:${turn?.id || 'none'}:${turn?.status || phase}`;
-    if (turn && ['completed', 'interrupted', 'failed'].includes(turn.status)) {
-      eventType = turn.status === 'failed' ? 'child.failed' : 'child.turn-completed';
-      phase = turn.status === 'failed' ? 'failed' : 'idle';
-      data.status = turn.status;
-    } else if (phase === 'idle') {
-      eventType = 'child.idle-observed';
-    }
-  } else {
-    const epoch = lane.providerIdentity?.executionEpochs?.at(-1);
-    providerFingerprint = `epoch:${epoch?.epochId || 'none'}:${phase}`;
-    if (phase === 'waiting') eventType = 'child.needs-attention';
-    else if (phase === 'idle') eventType = 'child.idle-observed';
-    else if (phase === 'stopped') eventType = 'child.stopped';
-    else if (phase === 'failed') eventType = 'child.failed';
-  }
-  const observation = recordObservation({
-    dispatchId: dispatch.dispatchId,
-    phase,
-    providerFingerprint,
-    eventType,
-    data: eventType ? {
-      state: phase,
-      ...(data.status ? { status: data.status } : {}),
-    } : {},
-  }, env);
-  return { lane, event: observation.event };
-}
-
-// One observation round over every outstanding child, collecting per-child
-// errors instead of aborting the round.
-async function observeParentChildren(context, values, env, deadline) {
-  const dispatches = listDispatches(context, env)
-    .filter((dispatch) => !values['repo-root'] || dispatch.child.repoRoot === values['repo-root']);
-  const errors = [];
-  // Observe every outstanding child each round; the durable event store is
-  // read afterwards, so one busy child cannot starve a later child's event.
-  for (let index = 0; index < dispatches.length; index += 1) {
-    if (Date.now() >= deadline) break;
-    const dispatch = dispatches[index];
-    try {
-      await observeDispatch(dispatch, values, env, deadline, dispatches.length - index);
-    } catch (error) {
-      errors.push({ dispatchId: dispatch.dispatchId, code: error.code || 'OBSERVATION_FAILED' });
-    }
-  }
-  return { dispatches, errors };
-}
-
-// Bounded parent wait: return pending events immediately, otherwise observe
-// every child and check again until the deadline. Expiry is NO_EVENT, and
-// unacknowledged events stay pending rather than being consumed here.
+// Bounded parent wait. Every call first observes every outstanding child
+// (each round bounded so a slow provider read cannot stall the others), then
+// returns everything unacknowledged, old and new together, as soon as one
+// event meets the `--until` threshold. A wait of 0 ms drains pending events
+// without observing. Expiry is NO_EVENT; the events stay pending until acked.
+const MAX_WAIT_MS = 1_800_000;
+const OBSERVATION_ROUND_MS = 30_000;
 async function waitForParentEvent(context, values, env) {
-  const timeoutMs = boundedInteger(values['timeout-ms'], '--timeout-ms', 0, 60_000, 60_000);
+  const timeoutMs = boundedInteger(values['timeout-ms'], '--timeout-ms', 0, MAX_WAIT_MS, 60_000);
   const after = boundedInteger(values.after, '--after', 0, Number.MAX_SAFE_INTEGER, 0);
+  const until = values.until ?? 'any';
+  if (!WAIT_THRESHOLDS.includes(until)) usage(`--until must be one of: ${WAIT_THRESHOLDS.join(', ')}`);
   const deadline = Date.now() + timeoutMs;
   const project = values['repo-root'] ? resolveProject(values['repo-root']) : null;
   const observationValues = project ? { ...values, 'repo-root': project.root } : values;
   const projectKey = project ? digest(project.commonDir) : undefined;
   const eventOptions = { after, projectKey };
-  while (true) {
-    let events = listEvents(context, eventOptions, env);
-    if (events.length > 0) return { version: 1, ok: true, operation: 'wait', events };
-    if (Date.now() >= deadline) {
-      const error = new Error('bounded child wait expired without an event');
-      error.code = 'NO_EVENT';
-      error.details = { attempted: 0 };
-      throw error;
+  const result = (events, observed) => ({
+    version: 1,
+    ok: true,
+    operation: 'wait',
+    until,
+    events,
+    observed: observed.observed,
+    ...(observed.errors.length > 0 ? { observerErrors: observed.errors } : {}),
+  });
+  const expired = (attempted, pending) => {
+    const error = new Error('bounded child wait expired without an event');
+    error.code = 'NO_EVENT';
+    error.details = { attempted, pending, until };
+    return error;
+  };
+  if (timeoutMs === 0) {
+    const events = listEvents(context, eventOptions, env);
+    if (events.some((event) => kindSatisfies(event.kind, until))) {
+      return result(events, { observed: [], errors: [] });
     }
-    const observed = await observeParentChildren(context, observationValues, env, deadline);
-    events = listEvents(context, eventOptions, env);
-    if (events.length > 0) {
-      return { version: 1, ok: true, operation: 'wait', events, observerErrors: observed.errors };
-    }
+    throw expired(0, events.length);
+  }
+  for (;;) {
+    const roundDeadline = Math.max(Date.now() + 100, Math.min(deadline, Date.now() + OBSERVATION_ROUND_MS));
+    const observed = await observeParentChildren(context, observationValues, env, roundDeadline);
+    const events = listEvents(context, eventOptions, env);
+    if (events.some((event) => kindSatisfies(event.kind, until))) return result(events, observed);
     if (observed.errors.length > 0) {
       const error = new Error('one or more exact child observations failed');
       error.code = 'OBSERVATION_FAILED';
@@ -642,13 +326,8 @@ async function waitForParentEvent(context, values, env) {
       };
       throw error;
     }
-    if (Date.now() >= deadline) {
-      const error = new Error('bounded child wait expired without an event');
-      error.code = 'NO_EVENT';
-      error.details = { attempted: observed.dispatches.length };
-      throw error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+    if (Date.now() >= deadline) throw expired(observed.dispatches.length, events.length);
+    await sleep(Math.min(1000, deadline - Date.now()));
   }
 }
 
@@ -788,6 +467,8 @@ async function main(argv, env = process.env) {
       'parent-context-file': { type: 'string' },
       event: { type: 'string' },
       after: { type: 'string' },
+      until: { type: 'string' },
+      observe: { type: 'boolean' },
       'timeout-ms': { type: 'string' },
       reason: { type: 'string' },
       input: { type: 'string' },
@@ -876,11 +557,34 @@ async function main(argv, env = process.env) {
     const repoFilter = values['repo-root'];
     if (repoFilter !== undefined && !path.isAbsolute(repoFilter)) usage('--repo-root must be absolute');
     const project = repoFilter ? resolveProject(repoFilter) : null;
+    const projectKey = project ? digest(project.commonDir) : undefined;
+    // --observe refreshes every child through its provider first, so the
+    // summary below reflects the live phase and the events that observation
+    // just recorded.
+    let observed = new Map();
+    if (values.observe === true) {
+      const round = await observeParentChildren(parentContext, {
+        ...values, 'repo-root': project ? project.root : undefined,
+      }, env, Date.now() + OBSERVATION_ROUND_MS);
+      observed = new Map(round.observed.map((entry) => [entry.dispatchId, entry]));
+    }
+    const pendingEvents = listEvents(parentContext, { projectKey }, env);
     const children = listDispatches(parentContext, env)
       .filter((dispatch) => !project || dispatch.child.repoRoot === project.root)
-      .map((dispatch) => dispatchSummary(dispatch, resolveDispatchLane(dispatch, env)));
-    const projectKey = project ? digest(project.commonDir) : undefined;
-    const unacknowledgedEvents = countEvents(parentContext, { projectKey }, env);
+      .map((dispatch) => {
+        const summary = dispatchSummary(dispatch, resolveDispatchLane(dispatch, env));
+        const mine = pendingEvents.filter((event) => event.dispatchId === dispatch.dispatchId);
+        const latest = mine.at(-1) || null;
+        const live = observed.get(dispatch.dispatchId);
+        return {
+          ...summary,
+          ...(live ? { phase: live.phase } : {}),
+          unacknowledgedEvents: mine.length,
+          latestEventType: latest?.type ?? null,
+          latestEventKind: latest ? kindForEvent(latest.type) : null,
+        };
+      });
+    const unacknowledgedEvents = pendingEvents.length;
     return {
       version: 1,
       ok: true,
