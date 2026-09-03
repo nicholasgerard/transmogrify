@@ -254,207 +254,196 @@ async function settleUnresolvedSpawnForRetirement(options, lane, pending, env) {
 // once, and accepts only an exact archived-listing row whose cwd matches the
 // seat. An unverified archive leaves the lane in archiveUnknown for recovery.
 async function retire(options, env = process.env) {
-  let lane = ownedLane(options, env, 'read');
-  const existingRetirement = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-  if (lane.state === 'worktreeRemoved' && !existingRetirement) {
-    return laneResult('retire', lane, {
-      receipt: {
-        archived: true,
-        alreadyRetired: true,
-        worktreeRemoved: true,
-      },
-    });
-  }
-  if (options.acceptManualSeatRemoval === true &&
-      existingRetirement?.details?.cleanupBlocked !== true) {
+  const initial = ownedLane(options, env, 'read');
+  const existingRetirement = pendingOperationForLane(options.repoRoot, initial.laneId, env);
+  if (initial.state === 'worktreeRemoved' && !existingRetirement) return alreadyRetiredResult(initial);
+  if (options.acceptManualSeatRemoval === true && existingRetirement?.details?.cleanupBlocked !== true) {
     throw new TransmogrifyError(
       'USAGE_ERROR',
       '--accept-manual-seat-removal requires an exact pending CLEANUP_BLOCKED retirement',
     );
   }
-  return withLaneLease(options.repoRoot, lane.laneId, async () => {
-    lane = ownedLane({ ...options, laneId: lane.laneId }, env, 'read');
-    let pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-    if (pending?.type === 'spawn') {
-      assertSeatIdentity(options, lane, env);
-      lane = await settleUnresolvedSpawnForRetirement(options, lane, pending, env);
-      pending = pendingOperationForLane(options.repoRoot, lane.laneId, env);
-    }
-    if (lane.state === 'worktreeRemoved' && !pending) {
-      return laneResult('retire', lane, {
-        receipt: { archived: true, alreadyRetired: true, worktreeRemoved: true },
-      });
-    }
-    const seatEntryPresent = lane.seat?.managed === true && pathEntryExists(lane.seat.path);
-    const manualRemovalAcknowledged = options.acceptManualSeatRemoval === true ||
-      pending?.details?.manualSeatRemoval?.acknowledged === true;
-    if (pending?.type === 'retire' && pending.details.cleanupBlocked === true &&
-        (seatEntryPresent || !manualRemovalAcknowledged)) {
-      throw new TransmogrifyError(
-        'CLEANUP_BLOCKED',
-        'Codex managed worktree has a permanent cleanup block and requires exact manual-removal acknowledgement',
-        { laneId: lane.laneId, providerRetired: true },
-      );
-    }
-    const recoveringRemovedSeat = lane.state === 'worktreeRemoved' &&
-      pending?.type === 'retire' && lane.seat?.managed === true;
-    const manuallyRemovedBlockedSeat = pending?.type === 'retire' &&
-      pending.details.cleanupBlocked === true && lane.seat?.managed === true &&
-      !seatEntryPresent && manualRemovalAcknowledged;
-    if (!recoveringRemovedSeat && !manuallyRemovedBlockedSeat) assertSeatIdentity(options, lane, env);
-    if (manuallyRemovedBlockedSeat && pending.details.manualSeatRemoval?.acknowledged !== true) {
-      pending = updatePendingLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
-        state: pending.state,
-        details: {
-          ...pending.details,
-          manualSeatRemoval: {
-            acknowledged: true,
-            observedAbsentAt: new Date().toISOString(),
-          },
-        },
-      }, env);
-    }
-    const prepared = prepareRetirementOperation(options, lane, env);
-    let operation = prepared.operation;
-    const { harvestReceipt } = prepared;
-
-    if (lane.state === 'worktreeRemoved') {
-      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-        state: 'complete',
-      }, env);
-      return laneResult('retire', lane, {
-        operationId: operation.operationId,
-        receipt: {
-          archived: true,
-          alreadyRetired: true,
-          worktreeRemoved: true,
-          harvestedOutputSha256: harvestReceipt.outputSha256,
-        },
-      });
-    }
-
-    if (lane.state === 'archivedVerified') {
-      lane = finishRetiredCleanup(options, lane, operation, harvestReceipt, env);
-      return laneResult('retire', lane, {
-        operationId: operation.operationId,
-        receipt: {
-          archived: true,
-          alreadyRetired: true,
-          worktreeRemoved: lane.state === 'worktreeRemoved',
-          harvestedOutputSha256: harvestReceipt.outputSha256,
-        },
-      });
-    }
-
+  return withLaneLease(options.repoRoot, initial.laneId, async () => {
+    const ctx = { options, env, lane: ownedLane({ ...options, laneId: initial.laneId }, env, 'read'), pending: null };
+    const admitted = await admitCodexRetirement(ctx);
+    if (admitted) return admitted;
+    const prepared = prepareRetirementOperation(options, ctx.lane, env);
+    ctx.operation = prepared.operation;
+    ctx.harvestReceipt = prepared.harvestReceipt;
+    const settled = settleRetiredLane(ctx);
+    if (settled) return settled;
     return withClient(options, async (client) => {
-      assertRuntimeIdentity(lane, client);
-      let reconciled = false;
-      if (lane.state === 'retireRequested' || lane.state === 'archiveUnknown') {
-        reconciled = await verifyArchived(client, lane, options);
-        if (!reconciled) {
-          updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-            state: 'unknown',
-          }, env);
-          throw new TransmogrifyError('DELIVERY_UNKNOWN', 'prior archive delivery remains unverified');
-        }
-      } else {
-        let turn;
-        try {
-          ({ turn } = await inspectThread(client, lane));
-        } catch (error) {
-          completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-            state: 'notDelivered',
-            details: {
-              ...operation.details,
-              failedBeforeProviderDispatchAt: new Date().toISOString(),
-            },
-          }, env);
-          throw error;
-        }
-        if (turn?.status === 'inProgress') {
-          completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-            state: 'notDelivered',
-          }, env);
-          throw new TransmogrifyError('TARGET_ACTIVE', 'refusing to retire a lane with an active newest turn');
-        }
-        lane = updateLane(options.repoRoot, lane.laneId, { state: 'retireRequested' }, env);
-        operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-          state: 'providerRequestDispatched',
-        }, env);
-        try {
-          await client.call('thread/archive', { threadId: lane.providerId });
-          operation = updatePendingLaneOperation(
-            options.repoRoot,
-            lane.laneId,
-            operation.operationId,
-            { state: 'providerAcknowledged' },
-            env,
-          );
-        } catch (error) {
-          lane = updateLane(options.repoRoot, lane.laneId, { state: 'archiveUnknown' }, env);
-          updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-            state: 'unknown',
-            details: {
-              ...operation.details,
-              archiveFailurePhase: 'dispatch',
-              causeCode: error.code || 'TRANSPORT_UNKNOWN',
-              archiveDeliveryBecameUnknownAt: new Date().toISOString(),
-            },
-          }, env);
-          throw error;
-        }
-        try {
-          reconciled = await verifyArchived(client, lane, options);
-        } catch (error) {
-          lane = updateLane(options.repoRoot, lane.laneId, { state: 'archiveUnknown' }, env);
-          updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-            state: 'unknown',
-            details: {
-              ...operation.details,
-              archiveFailurePhase: 'verification',
-              causeCode: error.code || 'TRANSPORT_UNKNOWN',
-              archiveDeliveryBecameUnknownAt: new Date().toISOString(),
-            },
-          }, env);
-          throw error;
-        }
-        if (!reconciled) {
-          lane = updateLane(options.repoRoot, lane.laneId, { state: 'archiveUnknown' }, env);
-          updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
-            state: 'unknown',
-            details: {
-              ...operation.details,
-              archiveFailurePhase: 'not-observed',
-              causeCode: 'TRANSPORT_UNKNOWN',
-              archiveDeliveryBecameUnknownAt: new Date().toISOString(),
-            },
-          }, env);
-          throw new TransmogrifyError(
-            'TRANSPORT_UNKNOWN',
-            'archive was acknowledged but not verified in archived listing',
-            { laneId: lane.laneId, providerId: lane.providerId },
-          );
-        }
-      }
-      lane = updateLane(options.repoRoot, lane.laneId, {
+      assertRuntimeIdentity(ctx.lane, client);
+      const reconciled = await archiveThread(ctx, client);
+      ctx.lane = updateLane(options.repoRoot, ctx.lane.laneId, {
         state: 'archivedVerified',
         lastVerifiedAt: new Date().toISOString(),
       }, env);
-      operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+      ctx.operation = updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
         state: 'providerRetired',
       }, env);
-      lane = finishRetiredCleanup(options, lane, operation, harvestReceipt, env);
-      return laneResult('retire', lane, {
-        operationId: operation.operationId,
+      ctx.lane = finishRetiredCleanup(options, ctx.lane, ctx.operation, ctx.harvestReceipt, env);
+      return laneResult('retire', ctx.lane, {
+        operationId: ctx.operation.operationId,
         receipt: {
           archived: true,
           reconciled,
-          worktreeRemoved: lane.state === 'worktreeRemoved',
-          harvestedOutputSha256: harvestReceipt.outputSha256,
+          worktreeRemoved: ctx.lane.state === 'worktreeRemoved',
+          harvestedOutputSha256: ctx.harvestReceipt.outputSha256,
         },
       });
     }, env);
   }, env);
+}
+
+function alreadyRetiredResult(lane, extra = {}) {
+  return laneResult('retire', lane, {
+    ...extra,
+    receipt: { archived: true, alreadyRetired: true, worktreeRemoved: true, ...(extra.receipt || {}) },
+  });
+}
+
+// Under the lease: settle an unresolved first turn, refuse a permanently
+// blocked cleanup without exact acknowledgement, verify the seat unless it is
+// already gone as part of this retirement, and journal an acknowledged
+// manual seat removal. Returns a result only when nothing remains to do.
+async function admitCodexRetirement(ctx) {
+  const { options, env } = ctx;
+  let pending = pendingOperationForLane(options.repoRoot, ctx.lane.laneId, env);
+  if (pending?.type === 'spawn') {
+    assertSeatIdentity(options, ctx.lane, env);
+    ctx.lane = await settleUnresolvedSpawnForRetirement(options, ctx.lane, pending, env);
+    pending = pendingOperationForLane(options.repoRoot, ctx.lane.laneId, env);
+  }
+  if (ctx.lane.state === 'worktreeRemoved' && !pending) return alreadyRetiredResult(ctx.lane);
+  const seatEntryPresent = ctx.lane.seat?.managed === true && pathEntryExists(ctx.lane.seat.path);
+  const manualRemovalAcknowledged = options.acceptManualSeatRemoval === true ||
+    pending?.details?.manualSeatRemoval?.acknowledged === true;
+  if (pending?.type === 'retire' && pending.details.cleanupBlocked === true &&
+      (seatEntryPresent || !manualRemovalAcknowledged)) {
+    throw new TransmogrifyError(
+      'CLEANUP_BLOCKED',
+      'Codex managed worktree has a permanent cleanup block and requires exact manual-removal acknowledgement',
+      { laneId: ctx.lane.laneId, providerRetired: true },
+    );
+  }
+  const recoveringRemovedSeat = ctx.lane.state === 'worktreeRemoved' &&
+    pending?.type === 'retire' && ctx.lane.seat?.managed === true;
+  const manuallyRemovedBlockedSeat = pending?.type === 'retire' &&
+    pending.details.cleanupBlocked === true && ctx.lane.seat?.managed === true &&
+    !seatEntryPresent && manualRemovalAcknowledged;
+  if (!recoveringRemovedSeat && !manuallyRemovedBlockedSeat) assertSeatIdentity(options, ctx.lane, env);
+  if (manuallyRemovedBlockedSeat && pending.details.manualSeatRemoval?.acknowledged !== true) {
+    pending = updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, pending.operationId, {
+      state: pending.state,
+      details: {
+        ...pending.details,
+        manualSeatRemoval: { acknowledged: true, observedAbsentAt: new Date().toISOString() },
+      },
+    }, env);
+  }
+  ctx.pending = pending;
+  return null;
+}
+
+// A lane whose provider side is already retired needs no runtime: a removed
+// seat closes the journal, an archived one finishes its cleanup.
+function settleRetiredLane(ctx) {
+  const { options, env, harvestReceipt } = ctx;
+  if (ctx.lane.state === 'worktreeRemoved') {
+    completeLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { state: 'complete' }, env);
+    return alreadyRetiredResult(ctx.lane, {
+      operationId: ctx.operation.operationId,
+      receipt: { harvestedOutputSha256: harvestReceipt.outputSha256 },
+    });
+  }
+  if (ctx.lane.state === 'archivedVerified') {
+    ctx.lane = finishRetiredCleanup(options, ctx.lane, ctx.operation, harvestReceipt, env);
+    return laneResult('retire', ctx.lane, {
+      operationId: ctx.operation.operationId,
+      receipt: {
+        archived: true,
+        alreadyRetired: true,
+        worktreeRemoved: ctx.lane.state === 'worktreeRemoved',
+        harvestedOutputSha256: harvestReceipt.outputSha256,
+      },
+    });
+  }
+  return null;
+}
+
+function archiveUnknown(ctx, phase, error) {
+  const { options, env } = ctx;
+  ctx.lane = updateLane(options.repoRoot, ctx.lane.laneId, { state: 'archiveUnknown' }, env);
+  updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+    state: 'unknown',
+    details: {
+      ...ctx.operation.details,
+      archiveFailurePhase: phase,
+      causeCode: error?.code || 'TRANSPORT_UNKNOWN',
+      archiveDeliveryBecameUnknownAt: new Date().toISOString(),
+    },
+  }, env);
+}
+
+// Archive the thread once and verify it in the archived listing. A prior
+// archive whose delivery is unknown is only verified; a refused pre-dispatch
+// check settles the journal notDelivered; anything after the dispatch that
+// cannot be verified leaves the lane archiveUnknown. Returns whether the
+// archive was verified by reconciliation of a prior dispatch.
+async function archiveThread(ctx, client) {
+  const { options, env } = ctx;
+  if (ctx.lane.state === 'retireRequested' || ctx.lane.state === 'archiveUnknown') {
+    const reconciled = await verifyArchived(client, ctx.lane, options);
+    if (!reconciled) {
+      updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { state: 'unknown' }, env);
+      throw new TransmogrifyError('DELIVERY_UNKNOWN', 'prior archive delivery remains unverified');
+    }
+    return reconciled;
+  }
+  let turn;
+  try {
+    ({ turn } = await inspectThread(client, ctx.lane));
+  } catch (error) {
+    completeLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+      state: 'notDelivered',
+      details: { ...ctx.operation.details, failedBeforeProviderDispatchAt: new Date().toISOString() },
+    }, env);
+    throw error;
+  }
+  if (turn?.status === 'inProgress') {
+    completeLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { state: 'notDelivered' }, env);
+    throw new TransmogrifyError('TARGET_ACTIVE', 'refusing to retire a lane with an active newest turn');
+  }
+  ctx.lane = updateLane(options.repoRoot, ctx.lane.laneId, { state: 'retireRequested' }, env);
+  ctx.operation = updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+    state: 'providerRequestDispatched',
+  }, env);
+  try {
+    await client.call('thread/archive', { threadId: ctx.lane.providerId });
+    ctx.operation = updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+      state: 'providerAcknowledged',
+    }, env);
+  } catch (error) {
+    archiveUnknown(ctx, 'dispatch', error);
+    throw error;
+  }
+  let reconciled;
+  try {
+    reconciled = await verifyArchived(client, ctx.lane, options);
+  } catch (error) {
+    archiveUnknown(ctx, 'verification', error);
+    throw error;
+  }
+  if (!reconciled) {
+    archiveUnknown(ctx, 'not-observed', null);
+    throw new TransmogrifyError(
+      'TRANSPORT_UNKNOWN',
+      'archive was acknowledged but not verified in archived listing',
+      { laneId: ctx.lane.laneId, providerId: ctx.lane.providerId },
+    );
+  }
+  return reconciled;
 }
 
 module.exports = {
