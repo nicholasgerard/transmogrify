@@ -34,11 +34,13 @@ Add `--url` only to Codex commands when the runtime is not the default
 | `boundary:sandbox-loopback-denied`, occupied or incompatible endpoint | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
 | `NATIVE_VISIBILITY_REQUIRED`, `DESKTOP_RELAUNCH_REQUIRED`, `DESKTOP_HOST_SESSION`, `ATTACHED_ELSEWHERE`, `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, `DESKTOP_QUIT_TIMEOUT` | [Codex Desktop is not attached](#codex-desktop-is-not-attached) |
 | `NO_ACTIVE_TURN`, unmarked or foreign native rows | [Codex lane and native row symptoms](#codex-lane-and-native-row-symptoms) |
+| `NOT_OWNED`, `RUNTIME_MISMATCH`, `OWNERSHIP_MISMATCH`, `SEAT_MISMATCH`, `EXECUTION_EPOCH_UNBOUND`, `ADAPTER_MISMATCH` | [Ownership or identity refused](#ownership-or-identity-refused) |
+| `DELIVERY_UNCERTAIN` on a Claude steer | [Claude steer delivery is uncertain](#claude-steer-delivery-is-uncertain) |
 | Mobile task fails after a Desktop restart | [Codex mobile Remote access](#codex-mobile-remote-access) |
 | Claude CLI, account, Desktop, or Keychain refusal | [Claude compatibility or authentication problems](#claude-compatibility-or-authentication-problems) |
 | `SPAWN_UNCERTAIN` with `causeCode` `TRANSCRIPT_RECEIPT_PENDING` or `REMOTE_CONTROL_UNAVAILABLE`, `spawnJobAbsent` | [Claude spawn did not verify](#claude-spawn-did-not-verify) |
 | `FORKED_COPY`, `forkedCopyStopped`, `recoveryNotAchieved` | [Claude recovery forked or did not resume](#claude-recovery-forked-or-did-not-resume) |
-| `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, `NO_PENDING_OPERATION`, `ABANDON_REFUSED`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
+| `PENDING_OPERATION`, `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, `NO_PENDING_OPERATION`, `ABANDON_REFUSED`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
 | `CLEANUP_RETRYABLE`, `CLEANUP_BLOCKED` | [Cleanup is blocked](#cleanup-is-blocked) |
 
 ## Installation and upgrades
@@ -311,6 +313,29 @@ setup or a compatibility refresh, not a blind retry. If the exact stop was
 already verified, the error receipt says so separately. An auth/trust failure
 before archive dispatch leaves archive not attempted; the same failure after
 POST dispatch is archive-unknown and requires observation, not replay.
+
+## Ownership or identity refused
+
+Every mutating command resolves an exact registry-owned lane, then proves the
+live provider still matches its receipt. Each refusal exits 2 and mutates
+nothing:
+
+| Code | Meaning | Do |
+| --- | --- | --- |
+| `NOT_OWNED` | the id is not a complete lane id this installation owns; a prefix, a name, or a provider id is discovery evidence, never ownership | pass the full `laneId` from `children` or `parent-list`; never adopt by name |
+| `ADAPTER_MISMATCH` | the lane belongs to the other provider, or the flag is provider-specific | use the operation and flags the lane's provider accepts |
+| `RUNTIME_MISMATCH` | the Codex runtime endpoint, Codex home, or platform, or the Claude CLI, account, or config identity, differs from the lane's receipt | rerun the doctor; point `TRANSMOGRIFY_URL` or `CLAUDE_BIN` at the recorded runtime; reconcile, never mutate across runtimes |
+| `OWNERSHIP_MISMATCH` | the provider reports a different cwd, session, or selector than the receipt | stop and report; the row is not this lane |
+| `SEAT_MISMATCH`, `EXECUTION_EPOCH_UNBOUND` | the worktree or the live worker no longer matches the recorded identity | inspect the seat or session by hand; reconcile; retire if the lane is gone |
+
+## Claude steer delivery is uncertain
+
+`DELIVERY_UNCERTAIN` after a Claude `steer` means the public CLI accepted the
+follow-up but the owned transcript had not shown its marker inside the
+verification window; the lane moves to `deliveryUnknown`. Do not re-send.
+Run `reconcile --target claude --lane <laneId>`: it verifies the transcript
+and settles the journal as `steerDeliveredObserved`, restoring the lane
+state, or keeps it open as `steerUnknown` for the next observation.
 
 ## Claude spawn did not verify
 

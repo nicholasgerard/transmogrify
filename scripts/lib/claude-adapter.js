@@ -23,9 +23,10 @@ const {
 } = require('./claude-surface');
 const { markDispatchJournaled, recordEvent, reserveDispatch } = require('./dispatch');
 const {
-  AdapterError, executionRequest, laneResult, profileFailure, worktreesRoot,
+  AdapterError, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot,
 } = require('./adapter-kit');
 const { phaseFields } = require('./output-schema');
+const { sleep } = require('./async');
 const {
   ExecutionProfileError,
   createClaudeCliCatalog,
@@ -71,7 +72,6 @@ class ClaudeTransmogrifyError extends AdapterError {
   }
 }
 
-function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 // A dispatched spawn whose job is missing from the census this long after the
 // launch finished is treated as gone rather than still registering.
@@ -748,7 +748,7 @@ async function spawnLane(options, env = process.env) {
     lane = bindLaneSeat(options.repoRoot, lane.laneId, operation.operationId, seat, env);
     operation = pendingOperationForLane(options.repoRoot, lane.laneId, env);
   }
-  const dispatchStartedAt = Date.now();
+  const dispatchStartedAt = nowMs(options);
   operation = updatePending(options.repoRoot, lane.laneId, operation, {
     state: 'dispatching', details: { ...operation.details, dispatchStartedAt },
   }, env);
@@ -781,7 +781,7 @@ async function spawnLane(options, env = process.env) {
   operation = updatePending(options.repoRoot, lane.laneId, operation, {
     state: 'dispatched',
     details: {
-      ...operation.details, dispatchFinishedAt: Date.now(),
+      ...operation.details, dispatchFinishedAt: nowMs(options),
       stdoutSha256: sha256(launch.stdout), stderrSha256: sha256(launch.stderr),
     },
   }, env);
@@ -1006,7 +1006,7 @@ async function steer(options, env = process.env) {
     try {
       operation = updatePending(options.repoRoot, lane.laneId, operation, {
         state: 'dispatching',
-        details: { ...operation.details, dispatchStartedAt: Date.now() },
+        details: { ...operation.details, dispatchStartedAt: nowMs(options) },
       }, env);
       const write = await surface.sendRemoteFollowup(
         runtime,
@@ -1018,7 +1018,7 @@ async function steer(options, env = process.env) {
         state: 'queued',
         details: {
           ...operation.details,
-          dispatchFinishedAt: Date.now(),
+          dispatchFinishedAt: nowMs(options),
           providerAcknowledged: write.queued,
           providerSessionIdSha256: write.sessionIdSha256,
           stdoutSha256: write.stdoutSha256,
@@ -1232,7 +1232,7 @@ async function observeRecovery(options, env, surface, runtime, lane, operation, 
     // correlated copy: the resume did not happen. Close the journal so the
     // lane can be retired or replaced instead of staying uncertain forever.
     const notAfter = operation.details.dispatchNotAfter;
-    if (Number.isFinite(notAfter) && Date.now() > notAfter) {
+    if (Number.isFinite(notAfter) && nowMs(options) > notAfter) {
       const settled = settleFailedRecovery(options, env, lane, operation, { outcome: 'recoveryNotAchieved' });
       return { settled: 'recoveryNotAchieved', lane: settled };
     }
@@ -1359,7 +1359,7 @@ async function recover(options, env = process.env) {
     if (stoppedAgent.pid !== null) {
       throw new ClaudeTransmogrifyError('RECOVERY_UNCERTAIN', 'Claude session is already running outside this recovery');
     }
-    const dispatchStartedAt = Date.now();
+    const dispatchStartedAt = nowMs(options);
     const commandWindowMs = options.commandTimeoutMs ?? 30_000;
     let operation = beginLaneOperation(options.repoRoot, lane.laneId, {
       type: 'recover', providerId: lane.providerId,
@@ -1386,7 +1386,7 @@ async function recover(options, env = process.env) {
       operation = updatePending(options.repoRoot, lane.laneId, operation, {
         state: 'dispatched',
         details: {
-          ...operation.details, dispatchFinishedAt: Date.now(),
+          ...operation.details, dispatchFinishedAt: nowMs(options),
           stdoutSha256: sha256(dispatched.stdout || ''), stderrSha256: sha256(dispatched.stderr || ''),
         },
       }, env);
@@ -2107,7 +2107,7 @@ async function awaitSpawnReceipts(options, surface, runtime, lane, jobId, candid
   if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || !Number.isInteger(delayMs) || delayMs < 0) {
     throw new ClaudeTransmogrifyError('USAGE_ERROR', 'spawn verification window must be non-negative integers');
   }
-  const windowEnd = Date.now() + timeoutMs;
+  const windowEnd = nowMs(options) + timeoutMs;
   const expectation = {
     spawnNonce: lane.ownership.spawnIntent.spawnNonce,
     promptSha256: lane.ownership.spawnIntent.promptSha256,
@@ -2125,7 +2125,7 @@ async function awaitSpawnReceipts(options, surface, runtime, lane, jobId, candid
       return { transcript, discovery };
     } catch (error) {
       const retryable = RETRYABLE_SPAWN_RECEIPT_CODES.has(error?.code);
-      const remaining = Math.min(windowEnd - Date.now(), deadline === null ? Infinity : deadline - Date.now() - 100);
+      const remaining = Math.min(windowEnd - nowMs(options), deadline === null ? Infinity : deadline - Date.now() - 100);
       if (!retryable || remaining <= 0) throw error;
       await sleep(Math.min(delayMs, Math.max(0, remaining)));
     }
@@ -2141,7 +2141,7 @@ async function observeSpawnJobAbsence(options, surface, runtime, lane, operation
   if (!Number.isInteger(graceMs) || graceMs < 0) {
     throw new ClaudeTransmogrifyError('USAGE_ERROR', 'spawnAbsenceGraceMs must be a non-negative integer');
   }
-  if (!Number.isFinite(finishedAt) || Date.now() - finishedAt < graceMs) return null;
+  if (!Number.isFinite(finishedAt) || nowMs(options) - finishedAt < graceMs) return null;
   const attempts = Math.max(1, options.discoveryAttempts ?? 3);
   const delayMs = options.discoveryDelayMs ?? 1000;
   let seat = null;

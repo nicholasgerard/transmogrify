@@ -33,6 +33,12 @@ function requireOwnedBackendLane(repoRoot, laneId, backend, env) {
   return lane;
 }
 
+// The wall clock an operation reads for its dispatch windows and grace
+// periods. options.clock lets a test move time instead of waiting for it.
+function nowMs(options) {
+  return typeof options?.clock === 'function' ? options.clock() : Date.now();
+}
+
 // The managed worktrees root: explicit option, then WORKTREES, then the
 // repository's own .worktrees directory.
 function worktreesRoot(options, env = process.env) {
@@ -82,6 +88,7 @@ module.exports = {
   AdapterError,
   executionRequest,
   laneResult,
+  nowMs,
   profileFailure,
   requireOwnedBackendLane,
   worktreesRoot,

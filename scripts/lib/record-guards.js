@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('node:fs');
+
 // Field-level guards shared by every durable record schema. They carry no
 // dependencies so identity schemas and the state store can both use them.
 
@@ -20,4 +22,29 @@ function assertTimestamp(value, label) {
   }
 }
 
-module.exports = { SHA256_PATTERN, UUID_PATTERN, assertExactKeys, assertTimestamp };
+// Read a JSON file that must be a bounded regular file owned by the current
+// user, through an O_NOFOLLOW descriptor that is stat'ed after opening so a
+// symlink swapped in between check and read cannot redirect it. modeMask names
+// the permission bits that must be clear (0o077 for owner-only, 0o022 for
+// not group- or world-writable). The outcome is data; callers map it to their
+// own error classes.
+function readOwnedJson(file, { maxBytes, modeMask }) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > maxBytes ||
+        (typeof process.getuid === 'function' && stat.uid !== process.getuid()) ||
+        (stat.mode & modeMask) !== 0) {
+      return { status: 'unsafe' };
+    }
+    return { status: 'ok', value: JSON.parse(fs.readFileSync(descriptor, 'utf8')) };
+  } catch (error) {
+    if (error.code === 'ENOENT') return { status: 'missing', cause: error.message };
+    return { status: 'invalid', cause: error.message };
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+module.exports = { SHA256_PATTERN, UUID_PATTERN, assertExactKeys, assertTimestamp, readOwnedJson };

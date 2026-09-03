@@ -417,7 +417,7 @@ function localEventForLane(dispatch, lane, env) {
     ['deliveryUnknown', ['delivery-unknown', 'child.delivery-unknown']],
     ['archiveUnknown', ['delivery-unknown', 'child.delivery-unknown']],
   ]).get(lane.state);
-  if (!terminal && !pending && ['archivedVerified', 'logicallyRetired', 'worktreeRemoved']
+  if (!terminal && !pending && ['archivedVerified', 'worktreeRemoved']
     .includes(lane.state)) {
     return recordObservation({
       dispatchId: dispatch.dispatchId,
@@ -533,7 +533,7 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
   }
   if (['deliveryUnknown', 'archiveUnknown'].includes(lane.state) ||
       (!pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env) &&
-       ['archivedVerified', 'logicallyRetired', 'worktreeRemoved'].includes(lane.state))) {
+       ['archivedVerified', 'worktreeRemoved'].includes(lane.state))) {
     return { lane, event: localEvent };
   }
   const remainingMs = deadline - Date.now();

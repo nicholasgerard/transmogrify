@@ -23,7 +23,6 @@ const ACTIVE_LANE_STATES = new Set([
   'planned',
   'created',
   'materialized',
-  'named',
   'active',
   'idle',
   'retireRequested',
@@ -37,7 +36,6 @@ const ACTIVE_LANE_STATES = new Set([
 ]);
 const RETIRED_LANE_STATES = new Set([
   'archivedVerified',
-  'logicallyRetired',
   'cleanupEligible',
   'worktreeRemoved',
 ]);
@@ -91,7 +89,6 @@ const LANE_TRANSITIONS = new Map([
   ['planned', new Set(['created', 'failed', 'deliveryUnknown'])],
   ['created', new Set(['materialized', 'active', 'idle', 'failed', 'deliveryUnknown', 'retireRequested', 'stopRequested'])],
   ['materialized', new Set(['active', 'idle', 'failed', 'deliveryUnknown', 'retireRequested', 'stopRequested'])],
-  ['named', new Set(['active', 'idle', 'deliveryUnknown', 'retireRequested', 'stopRequested'])],
   ['active', new Set(['idle', 'failed', 'interruptRequested', 'retireRequested', 'deliveryUnknown', 'stopRequested'])],
   ['idle', new Set(['active', 'failed', 'retireRequested', 'interruptRequested', 'deliveryUnknown', 'stopRequested'])],
   ['interruptRequested', new Set(['idle', 'failed', 'retireRequested', 'deliveryUnknown'])],
@@ -105,7 +102,6 @@ const LANE_TRANSITIONS = new Map([
   ['failed', new Set(['retireRequested', 'cleanupEligible', 'worktreeRemoved'])],
   ['archivedVerified', new Set(['cleanupEligible', 'worktreeRemoved'])],
   ['cleanupEligible', new Set(['worktreeRemoved'])],
-  ['logicallyRetired', new Set(['cleanupEligible', 'worktreeRemoved'])],
   ['worktreeRemoved', new Set()],
 ]);
 
@@ -1979,7 +1975,7 @@ function observeLaneStopped(repoRoot, laneId, observation, env = process.env) {
       throw new Error('lane is already stopped without this observation receipt');
     }
     const allowed = new Set([
-      'created', 'materialized', 'named', 'active', 'idle', 'interruptRequested',
+      'created', 'materialized', 'active', 'idle', 'interruptRequested',
       'stopRequested', 'recoverRequested', 'deliveryUnknown',
     ]);
     if (!allowed.has(current.state)) {

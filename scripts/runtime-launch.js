@@ -18,6 +18,7 @@ const { exitCodeForError } = require('./lib/public-error');
 const {
   ListenerError, execFileResult, inspectListeners, normalizeListenUrl, parseLsofListeners,
 } = require('./lib/listeners');
+const { sleep: delay } = require('./lib/async');
 
 // Launch polling bounds and the allowlisted environment a detached runtime
 // inherits. Nothing outside that set crosses into the child.
@@ -73,9 +74,6 @@ function processMatches(record, birth = processBirth) {
   return birth(record.pid) === record.processBirth;
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
 
 // The only environment a detached runtime inherits: allowlisted variables with
 // NUL-bearing values dropped.

@@ -10,6 +10,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { readOwnedJson } = require('./record-guards');
 const {
   acquireLock,
   atomicWriteJson,
@@ -161,25 +162,11 @@ function pathsFor(env = process.env) {
 // descriptor, so a symlink swapped in between check and read cannot redirect it.
 // Absence is NOT_OWNED; a loose mode or foreign owner is UNSAFE_LOCAL_STATE.
 function readPrivateJson(file, label) {
-  let descriptor;
-  try {
-    descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.size > MAX_STATE_BYTES ||
-        (typeof process.getuid === 'function' && stat.uid !== process.getuid()) ||
-        (stat.mode & 0o077) !== 0) {
-      throw new DispatchError('UNSAFE_LOCAL_STATE', `${label} is not an owner-only regular file`);
-    }
-    return JSON.parse(fs.readFileSync(descriptor, 'utf8'));
-  } catch (error) {
-    if (error instanceof DispatchError) throw error;
-    if (error.code === 'ENOENT') {
-      throw new DispatchError('NOT_OWNED', `${label} does not exist`);
-    }
-    throw new DispatchError('INVALID_LOCAL_STATE', `${label} is not valid private JSON`);
-  } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
-  }
+  const read = readOwnedJson(file, { maxBytes: MAX_STATE_BYTES, modeMask: 0o077 });
+  if (read.status === 'ok') return read.value;
+  if (read.status === 'unsafe') throw new DispatchError('UNSAFE_LOCAL_STATE', `${label} is not an owner-only regular file`);
+  if (read.status === 'missing') throw new DispatchError('NOT_OWNED', `${label} does not exist`);
+  throw new DispatchError('INVALID_LOCAL_STATE', `${label} is not valid private JSON`);
 }
 
 // Directories holding dispatch state must be owner-only real directories.

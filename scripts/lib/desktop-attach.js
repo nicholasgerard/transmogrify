@@ -19,6 +19,7 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { validateUrl } = require('./app-server');
 const { inspectListeners } = require('./listeners');
+const { sleep: delay } = require('./async');
 
 const ATTACH_ENV = 'CODEX_APP_SERVER_WS_URL';
 const DISABLE_ENV = 'TRANSMOGRIFY_DESKTOP_ATTACH';
@@ -83,9 +84,6 @@ function execFileResult(executable, args, options = {}) {
   });
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
 
 // The runtime this check is about: explicit option, then TRANSMOGRIFY_URL, then
 // the default loopback port, always through the loopback URL validator.

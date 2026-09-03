@@ -34,6 +34,7 @@ const {
   AdapterError, executionRequest, laneResult, profileFailure, worktreesRoot,
 } = require('./adapter-kit');
 const { phaseFields } = require('./output-schema');
+const { sleep } = require('./async');
 const { check: desktopAttachCheck } = require('./desktop-attach');
 const { VERSION } = require('./version');
 const {
@@ -99,7 +100,7 @@ const SOURCE_KINDS = [
   'unknown',
 ];
 const RETIRED_STATES = new Set([
-  'archivedVerified', 'logicallyRetired', 'cleanupEligible', 'worktreeRemoved',
+  'archivedVerified', 'cleanupEligible', 'worktreeRemoved',
 ]);
 // Spawn journal states in which the provider thread is bound but the first
 // turn's outcome was never receipted. Only exact retirement may close them,
@@ -936,7 +937,7 @@ async function verifiedUserMessageTurnReceipt(
       return 'threadItemsList';
     }
     if (attempt + 1 < attempts && delayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await sleep(delayMs);
     }
   }
   throw new TransmogrifyError('PROTOCOL_ERROR', 'turn receipt did not contain one exact client message id');
@@ -1590,7 +1591,7 @@ async function verifyArchived(client, lane, options) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     if (await listArchived(client, lane)) return true;
     if (attempt < attempts && delayMs) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await sleep(delayMs);
     }
   }
   return false;

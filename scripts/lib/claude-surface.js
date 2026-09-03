@@ -14,6 +14,8 @@ const path = require('node:path');
 const { execFile, execFileSync, spawn } = require('node:child_process');
 const { processBirth } = require('./state');
 const { ownedLaneNameError } = require('./validation');
+const { sleep } = require('./async');
+const { readOwnedJson } = require('./record-guards');
 
 // The CLI builds this adapter has been measured against, by version and SHA-256.
 // A build outside this map cannot host a managed lane.
@@ -199,24 +201,12 @@ function assertSafeDirectory(directory, label) {
 // stat that descriptor, so a symlink swapped in between check and read cannot
 // redirect it.
 function readSafeJson(file, label) {
-  let descriptor;
-  try {
-    descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.size > MAX_CAPTURE_BYTES ||
-        (typeof process.getuid === 'function' && stat.uid !== process.getuid()) ||
-        (stat.mode & 0o022) !== 0) {
-      throw new ClaudeSurfaceError('UNSAFE_LOCAL_STATE', `${label} is not a safe bounded regular file`);
-    }
-    return JSON.parse(fs.readFileSync(descriptor, 'utf8'));
-  } catch (error) {
-    if (error instanceof ClaudeSurfaceError) throw error;
-    throw new ClaudeSurfaceError('INVALID_LOCAL_STATE', `${label} is not valid JSON`, {
-      cause: error.message,
-    });
-  } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
+  const read = readOwnedJson(file, { maxBytes: MAX_CAPTURE_BYTES, modeMask: 0o022 });
+  if (read.status === 'ok') return read.value;
+  if (read.status === 'unsafe') {
+    throw new ClaudeSurfaceError('UNSAFE_LOCAL_STATE', `${label} is not a safe bounded regular file`);
   }
+  throw new ClaudeSurfaceError('INVALID_LOCAL_STATE', `${label} is not valid JSON`, { cause: read.cause });
 }
 
 function parseVersion(raw) {
@@ -1027,7 +1017,7 @@ function createClaudeSurface(dependencies = {}) {
       } finally {
         fs.closeSync(descriptor);
       }
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await sleep(50);
     }
     throw new ClaudeSurfaceError('DELIVERY_UNCERTAIN', 'queued Claude input was not observed in the owned transcript');
   }
