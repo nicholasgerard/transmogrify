@@ -276,7 +276,7 @@ run (`wait --timeout-ms 0`, then `ack`). Treat that message as the signal to
 run them; it never carries child output. When `wake.channel` is `none`, or
 as a fallback at any time, run the wait above: on a Claude Code host as a
 background command so its return re-invokes you, on a Codex host in the
-foreground. Every call observes every child first and returns all
+foreground. Every call with a positive timeout observes every child first and returns all
 unacknowledged events, so an old event can never hide a new completion;
 each event carries `kind` (`progress`, `complete`, `attention`, `terminal`)
 and `terminal`. Repeat on a normal timeout. On an event, bind it to the exact `dispatchId` and

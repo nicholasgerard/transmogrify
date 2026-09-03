@@ -22,7 +22,8 @@ from "still going".
    every five otherwise), records the same durable events, and exits after
    six idle hours once every child is settled and acknowledged. A single
    instance per parent is enforced by a pid-and-birth record; a stale
-   record is replaced. Subscribing to the app-server's own
+   record is replaced. A watcher started after a stop wakes the parent once
+   more for every event still unacknowledged, never for acknowledged ones. Subscribing to the app-server's own
    `thread/status/changed` notifications instead of polling is a later
    optimization, not a semantic change.
 3. **The wake** (per host). When the watcher records an event worth the
@@ -47,9 +48,10 @@ from "still going".
      command line being run (plus `--self-nonce` when supplied). A Codex host
      whose thread is not on the shared runtime (Desktop unattached) has no
      wake channel and falls back to layer 4.
-4. **Foreground or background wait** (exists, improved). `wait` observes
-   every child on every call, returns pending and new events together, and
-   blocks up to thirty minutes. A Claude Code host runs it as a background
+4. **Foreground or background wait** (exists, improved). `wait` with a positive timeout observes
+   every child first, returns pending and new events together, and blocks
+   up to thirty minutes; `--timeout-ms 0` returns the durable queue without
+   observing (the fast path after a wake). A Claude Code host runs it as a background
    command so the harness re-invokes the model when it returns; a Codex host
    runs it in the foreground with a long timeout. This is the path when no
    wake channel could be recorded, and the recovery path when a wake was
