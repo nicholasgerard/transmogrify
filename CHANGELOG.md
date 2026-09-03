@@ -17,6 +17,13 @@
   with the mechanism prose living in the docs it links. `parent-init` accepts
   only the enumerated host applications (`codex-desktop`, `codex-cli`,
   `codex-web`, `claude-code`, `claude-desktop`, `claude-web`).
+- Cleanup. One sleep helper (`scripts/lib/async.js`) and one owner-only JSON
+  reader (`record-guards.readOwnedJson`) replace per-module copies; the
+  unused `named` and `logicallyRetired` lane states are gone; the Claude
+  adapter reads its dispatch windows and absence grace through
+  `options.clock` so tests can move time; the installer's swap rollback is
+  covered by a test; the troubleshooting index gains ownership/identity and
+  uncertain-steer sections.
 
 ## 0.2.8
 

@@ -310,3 +310,40 @@ test('dependency resolution refuses a symlinked local ws package', (t) => {
     /locked dependency path is not a safe directory/,
   );
 });
+
+test('a failure during the swap restores the previous install and leaves no stage or failed tree', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-rollback-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { process.env.HOME = previousHome; });
+  const quiet = t.mock.method(console, 'log', () => {});
+  t.after(() => quiet.mock.restore());
+
+  install({ target: 'claude' });
+  const target = path.join(home, '.claude', 'skills', 'transmogrify');
+  fs.writeFileSync(path.join(target, 'MARKER'), 'previous install');
+
+  const originalRename = fs.renameSync;
+  let failed = false;
+  fs.renameSync = (from, to) => {
+    const sameTarget = path.basename(to) === path.basename(target) &&
+      fs.realpathSync(path.dirname(to)) === fs.realpathSync(path.dirname(target));
+    if (!failed && sameTarget && path.basename(from) !== path.basename(target)) {
+      failed = true;
+      throw new Error('simulated swap failure');
+    }
+    return originalRename(from, to);
+  };
+  t.after(() => { fs.renameSync = originalRename; });
+  assert.throws(() => install({ target: 'claude' }), /simulated swap failure/);
+  fs.renameSync = originalRename;
+
+  assert.equal(fs.readFileSync(path.join(target, 'MARKER'), 'utf8'), 'previous install');
+  assert.deepEqual(fs.readdirSync(path.join(home, '.claude', 'skills')), ['transmogrify']);
+  const backups = fs.existsSync(path.join(home, '.claude', 'transmogrify-backups'))
+    ? fs.readdirSync(path.join(home, '.claude', 'transmogrify-backups')) : [];
+  assert.deepEqual(backups, []);
+});

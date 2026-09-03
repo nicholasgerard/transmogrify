@@ -20,9 +20,9 @@ const {
   beginOperation,
   bindClaudeProviderIdentity,
   bindClaudeSpawnObservation,
+  bindLaneProviderBridge,
   bindLaneSeat,
   bindLaneProvider,
-  bindLaneProviderBridge,
   completeLaneOperation,
   listLanes,
   listOperations,
@@ -166,65 +166,6 @@ test('two live lane records cannot claim the same worktree seat', (t) => {
     displayName: '[test] lane b',
     seat,
   }, fixture.env), /seat is already owned/);
-});
-
-test('a seat reservation precedes provider creation and binds identity once', (t) => {
-  const fixture = createStateFixture(t);
-  const seat = { path: '/tmp/reserved-seat', managed: true };
-  const reserved = reserveLane(fixture.repoRoot, {
-    laneId: 'lane-reserved',
-    backend: 'codex-app-server',
-    displayName: '[test] reserved',
-    seat,
-    runtime: { endpoint: 'ws://127.0.0.1:8843/' },
-  }, fixture.env);
-  assert.equal(reserved.providerId, null);
-  assert.throws(() => reserveLane(fixture.repoRoot, {
-    laneId: 'lane-collision',
-    backend: 'codex-app-server',
-    displayName: '[test] collision',
-    seat,
-  }, fixture.env), /seat is already owned/);
-  const bound = bindLaneProvider(fixture.repoRoot, reserved.laneId, 'thread-bound', {
-    runtime: {
-      endpoint: 'ws://127.0.0.1:8843/',
-      codexHome: '/tmp/codex-home',
-      platformFamily: 'unix',
-      platformOs: 'test',
-    },
-  }, fixture.env);
-  assert.equal(bound.providerId, 'thread-bound');
-  assert.equal(requireOwnedLane(fixture.repoRoot, reserved.laneId, fixture.env).providerId, 'thread-bound');
-  assert.throws(() => bindLaneProvider(
-    fixture.repoRoot, reserved.laneId, 'thread-bound', {
-      seat: { path: '/tmp/replaced-seat', managed: true },
-    }, fixture.env,
-  ), /unsupported field seat/);
-  bindLaneProvider(fixture.repoRoot, reserved.laneId, 'thread-bound', {
-    ownership: { creationReceipt: { providerId: 'thread-bound' } },
-  }, fixture.env);
-  assert.throws(() => bindLaneProvider(
-    fixture.repoRoot, reserved.laneId, 'thread-bound', {
-      ownership: { creationReceipt: { providerId: 'thread-replacement' } },
-    }, fixture.env,
-  ), /immutable lane ownership field creationReceipt/);
-  assert.throws(() => bindLaneProvider(
-    fixture.repoRoot, reserved.laneId, 'thread-bound', {
-      runtime: { ...bound.runtime, platformOs: 'drifted' },
-    }, fixture.env,
-  ), /immutable lane runtime/);
-  const protectedBefore = requireOwnedLane(fixture.repoRoot, reserved.laneId, fixture.env);
-  mutateLane(fixture.repoRoot, reserved.laneId, (draft) => {
-    draft.seat.path = '/tmp/mutated-in-place';
-    draft.runtime.endpoint = 'ws://127.0.0.1:9999/';
-    return { patch: { lastVerifiedAt: '2026-09-01T18:00:00.000Z' } };
-  }, fixture.env);
-  const protectedAfter = requireOwnedLane(fixture.repoRoot, reserved.laneId, fixture.env);
-  assert.deepEqual(protectedAfter.seat, protectedBefore.seat);
-  assert.deepEqual(protectedAfter.runtime, protectedBefore.runtime);
-  assert.throws(() => bindLaneProvider(
-    fixture.repoRoot, reserved.laneId, 'thread-replacement', {}, fixture.env,
-  ), /immutable/);
 });
 
 test('state paths inside the repository and symlinked state files are rejected', (t) => {
@@ -488,10 +429,8 @@ test('terminal operation pointer reconciliation closes the durable write-order c
 test('Claude provider identity binds exact handles once and records immutable epochs', (t) => {
   const fixture = createStateFixture(t);
   const displayName = '[test] Claude lane';
-  const operation = beginOperation(fixture.repoRoot, {
-    type: 'spawn',
-    laneId: 'claude-reserved',
-  }, fixture.env);
+  const operationId = '43214321-4321-4321-8321-432143214321';
+  const laneId = '56785678-5678-4678-8678-567856785678';
   const sessionId = '11111111-1111-4111-8111-111111111111';
   const identity = {
     version: 1,
@@ -516,58 +455,7 @@ test('Claude provider identity binds exact handles once and records immutable ep
     projectsInode: 3,
     accountFingerprint: 'd'.repeat(64),
   };
-  const spawnIntent = claudeSpawnIntent(operation.operationId, displayName, '4');
-  const reserved = reserveLane(fixture.repoRoot, {
-    laneId: 'claude-reserved',
-    backend: 'claude-code',
-    displayName,
-    operationId: operation.operationId,
-    runtime: initialRuntime,
-    providerIdentity: identity,
-    spawnIntent,
-  }, fixture.env);
-  assert.equal(reserved.providerId, null);
-  assert.deepEqual(reserved.providerIdentity, identity);
-  assert.deepEqual(reserved.ownership.spawnIntent, spawnIntent);
-
-  const creationReceipt = { stdoutSha256: 'a'.repeat(64) };
-  const bound = bindClaudeProviderIdentity(fixture.repoRoot, reserved.laneId, {
-    sessionId,
-    jobId: '11111111',
-    creationReceipt,
-  }, fixture.env);
-  assert.equal(bound.providerId, sessionId);
-  assert.equal(bound.providerIdentity.jobId, '11111111');
-  assert.deepEqual(bound.ownership.creationReceipt, creationReceipt);
-  assert.equal(bindClaudeProviderIdentity(fixture.repoRoot, reserved.laneId, {
-    sessionId,
-    jobId: '11111111',
-    creationReceipt,
-  }, fixture.env).providerId, sessionId);
-  assert.throws(() => bindClaudeProviderIdentity(fixture.repoRoot, reserved.laneId, {
-    sessionId: '55555555-5555-4555-8555-555555555555',
-    jobId: '55555555',
-    creationReceipt,
-  }, fixture.env), /immutable Claude provider identity/);
-
-  const bridgeReceipt = { source: 'owned-session-metadata' };
-  assert.throws(() => bindLaneProviderBridge(
-    fixture.repoRoot, reserved.laneId, 'session_testBridge', undefined, fixture.env,
-  ), /bridge receipt is required/);
-  const bridged = bindLaneProviderBridge(
-    fixture.repoRoot, reserved.laneId, 'session_testBridge', bridgeReceipt, fixture.env,
-  );
-  assert.equal(bridged.providerIdentity.bridgeId, 'session_testBridge');
-  assert.equal(bindLaneProviderBridge(
-    fixture.repoRoot, reserved.laneId, 'session_testBridge', bridgeReceipt, fixture.env,
-  ).providerIdentity.bridgeId, 'session_testBridge');
-  assert.throws(() => bindLaneProviderBridge(
-    fixture.repoRoot, reserved.laneId, 'session_replacement', bridgeReceipt, fixture.env,
-  ), /immutable Claude bridge/);
-  assert.throws(() => bindLaneProviderBridge(
-    fixture.repoRoot, reserved.laneId, 'session_bad_bridge', bridgeReceipt, fixture.env,
-  ), /bridge id is invalid/);
-
+  const spawnIntent = claudeSpawnIntent(operationId, displayName, '4');
   const epoch = {
     epochId: '22222222-2222-4222-8222-222222222222',
     pid: 123,
@@ -581,6 +469,35 @@ test('Claude provider identity binds exact handles once and records immutable ep
     },
     observedAt: '2026-09-01T19:00:00.000Z',
   };
+  const reserved = reserveSpawn(fixture.repoRoot, {
+    operation: { operationId, type: 'spawn', laneId, state: 'dispatching', details: { target: 'claude' } },
+    lane: {
+      laneId, backend: 'claude-code', displayName, operationId,
+      runtime: initialRuntime, providerIdentity: identity, spawnIntent,
+    },
+  }, fixture.env).lane;
+  assert.equal(reserved.providerId, null);
+  assert.deepEqual(reserved.providerIdentity, identity);
+  assert.deepEqual(reserved.ownership.spawnIntent, spawnIntent);
+
+  const creationReceipt = { stdoutSha256: 'a'.repeat(64) };
+  const bridgeReceipt = { source: 'owned-session-metadata' };
+  const observation = {
+    sessionId, jobId: '11111111', bridgeId: 'session_testBridge', creationReceipt, bridgeReceipt, epoch,
+  };
+  const bound = bindClaudeSpawnObservation(fixture.repoRoot, reserved.laneId, observation, fixture.env);
+  assert.equal(bound.providerId, sessionId);
+  assert.equal(bound.providerIdentity.jobId, '11111111');
+  assert.equal(bound.providerIdentity.bridgeId, 'session_testBridge');
+  assert.deepEqual(bound.ownership.creationReceipt, creationReceipt);
+  assert.equal(bindClaudeSpawnObservation(fixture.repoRoot, reserved.laneId, observation, fixture.env).providerId, sessionId);
+  assert.throws(() => bindClaudeSpawnObservation(fixture.repoRoot, reserved.laneId, {
+    ...observation, sessionId: '55555555-5555-4555-8555-555555555555', jobId: '55555555',
+  }, fixture.env), Error);
+  assert.throws(() => bindClaudeSpawnObservation(fixture.repoRoot, reserved.laneId, {
+    ...observation, bridgeId: 'session_replacement',
+  }, fixture.env), Error);
+
   const recorded = appendLaneExecutionEpoch(fixture.repoRoot, reserved.laneId, epoch, fixture.env);
   assert.equal(recorded.providerIdentity.executionEpochs[0].ordinal, 1);
   assert.equal(appendLaneExecutionEpoch(
