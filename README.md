@@ -369,7 +369,7 @@ a complete packet, handback, digest, and retirement walkthrough in
 | `scripts/runtime-up.sh` | Reuse or explicitly launch a detached Codex app-server |
 | `scripts/desktop-attach.js` | Measure, launch, or (with owner authorization) relaunch Codex Desktop as a client of the shared runtime |
 | `scripts/lane-status-listen.js` | Listen for state transitions on exact owned Codex lanes |
-| `scripts/watch.js` | Per-parent watcher, started by `spawn`: observes every child continuously, records the durable events, and wakes the parent through its recorded channel ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)) |
+| `scripts/watch.js` | Per-parent watcher, started by `spawn`: reads a working child every few seconds and an idle one only when nudged (by the parent's own commands, a Claude child's session hook, or a Codex runtime notification), records the durable events, and wakes the parent once per round through its recorded channel ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)) |
 | `scripts/rpc.js` | Default-deny, read-only Codex diagnostics |
 
 Every command exits 0 for a confirmed result, 2 for a usage error or a safe

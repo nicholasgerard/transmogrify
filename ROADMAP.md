@@ -224,38 +224,19 @@ individually), and the two owner-present rows below.
 
 ## Priority 2: autonomous maintenance without overreach
 
-- Add a bounded maintenance runner around doctor and exact-owned reconcile.
-  It may close interrupted journals and eligible cleanup, but it may not infer
-  completion or harvest output on its own.
 - Add configurable maintenance cadence and stale-journal alerts for hosts that
-  expose scheduling.
-- Report aggregate owned-active, owned-stopped, pending-retirement, and
-  cleanup-blocked counts without provider IDs or private paths.
+  expose scheduling (`maintain.js` is the bounded runner; nothing schedules
+  it yet).
 - Add an explicit review queue for dirty or post-harvest-changed managed
   worktrees. Never auto-delete these seats.
 - Replace direct eligible-seat deletion with a recoverable quarantine where the
   platform permits it. Preserve the current final census, and close the
   same-user write window between that census and irreversible removal.
-- Add retention policy for completed operation receipts, acknowledged parent
-  events, and superseded installer backups, with dry-run output and
-  recoverable deletion. Parent event stores are bounded today; a long-lived
-  parent that reaches the bound must start a new context.
-- Widen or decouple the Claude steer verification window: the transcript
-  marker regularly lands after the public command returns, so `steer`
-  reports `DELIVERY_UNCERTAIN` and only the next reconcile observes
-  delivery. Verify asynchronously, or wait for the transcript up to the
-  command deadline before reporting.
-- Give Codex a spawn-absence settlement like Claude's `spawnJobAbsent`: a
-  Codex spawn whose input receipt never appears stays pending forever and
-  only raises repeated attention events.
-- Make a Codex steer reconcilable. Codex has no steer receipt to observe, so a
-  crashed steer journal can only be abandoned; record the `turn/steer`
-  response or the resulting turn item so recovery can settle it.
-- Retire the test-only state primitives (`reserveLane`,
-  `bindClaudeProviderIdentity`, `bindLaneProviderBridge`) by seeding the
-  remaining state tests through the atomic spawn observation, then split the
-  400-line adapter spawn and retire functions along the phases the journal
-  already names.
+- Reap acknowledged parent events once the dispatch store offers a pruning
+  primitive that keeps duplicate detection intact (`maintain --retention`
+  moves aged journals and superseded backups today, never events). Parent
+  event stores are bounded; a long-lived parent that reaches the bound must
+  start a new context.
 
 ## Priority 3: reduce private and version-specific surface
 
