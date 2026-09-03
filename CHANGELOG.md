@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+- Output contract. Success output is now an allowlist per operation
+  (`scripts/lib/output-schema.js`, printed by `lane.js schema`, documented in
+  `docs/OUTPUT.md`): a key that is not declared public never prints, where
+  0.2 dropped a denylist of private keys. Golden tests pin every shape. Any
+  consumer that read undeclared keys must move to the declared ones.
+- `status` reports one `phase` vocabulary for both providers (`executing`,
+  `waiting`, `idle`, `stopped`, `failed`, `retired`, `unknown`) and keeps the
+  provider's own word in `providerPhase`; parent events and observations keep
+  the 0.2 vocabulary. Codex `interrupted` and `notLoaded` read as `idle`.
+
 ## 0.2.8
 
 - One adapter seam. Each provider adapter publishes a descriptor (its

@@ -4,7 +4,7 @@ description: Operate exact-owned, worktree-seated Codex and Claude Code lanes wi
 license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
-  version: "0.2.8"
+  version: "0.3.0"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server 0.151.x"
@@ -570,8 +570,10 @@ first. Failures print one JSON envelope on stderr whose `code` and fixed
 
 Every code named in this file has a symptom row and a repair in
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#symptom-index); read that
-index before improvising. Status `phase` values differ per provider and are
-listed in [docs/DISPATCH.md](docs/DISPATCH.md#status-phases).
+index before improvising. Status `phase` is one vocabulary for both providers
+(`executing`, `waiting`, `idle`, `stopped`, `failed`, `retired`, `unknown`) with
+the provider word in `providerPhase`; see [docs/DISPATCH.md](docs/DISPATCH.md#status-phases)
+and the full output contract in [docs/OUTPUT.md](docs/OUTPUT.md).
 
 Report the lane ID, provider, lifecycle state, durable harvest location,
 verification results, and any blocked cleanup. Do not report credentials,

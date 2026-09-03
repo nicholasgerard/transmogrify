@@ -33,6 +33,7 @@ const { AppServerClient, validateUrl } = require('./app-server');
 const {
   AdapterError, executionRequest, laneResult, profileFailure, worktreesRoot,
 } = require('./adapter-kit');
+const { phaseFields } = require('./output-schema');
 const { check: desktopAttachCheck } = require('./desktop-attach');
 const { VERSION } = require('./version');
 const {
@@ -1111,7 +1112,7 @@ async function status(options, env = process.env) {
       lastVerifiedAt: new Date().toISOString(),
     }, env);
     return laneResult('status', updated, {
-      phase,
+      ...phaseFields('codex', phase),
       turn: turn ? { id: turn.id, status: turn.status } : null,
       rawState: thread.status,
       receipt: { userAgent: initialized.userAgent },
@@ -2286,7 +2287,7 @@ async function recover(options, env = process.env) {
                 laneId: lane.laneId,
                 providerId: lane.providerId,
                 state: lane.state,
-                phase: pendingInspection.phase,
+                ...phaseFields('codex', pendingInspection.phase),
                 delivery: 'confirmed',
                 repaired: ['interruptPostcondition'],
               };
@@ -2312,7 +2313,7 @@ async function recover(options, env = process.env) {
                 laneId: lane.laneId,
                 providerId: lane.providerId,
                 state: lane.state,
-                phase: pendingInspection.phase,
+                ...phaseFields('codex', pendingInspection.phase),
                 delivery: 'confirmed',
                 repaired: ['resumeInputReceipt'],
               };
@@ -2385,7 +2386,7 @@ async function recover(options, env = process.env) {
             laneId: lane.laneId,
             providerId: lane.providerId,
             state: lane.state,
-            phase: inspected.phase,
+            ...phaseFields('codex', inspected.phase),
             delivery: spawnPending
               ? recoveredSpawnTurnId ? 'confirmed' : 'unknown'
               : inspected.turn ? 'confirmed' : 'unknown',

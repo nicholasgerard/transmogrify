@@ -167,20 +167,20 @@ child output, prompts, provider IDs, paths, transcripts, or credentials.
 
 ## Status phases
 
-`lane.js status` reports a provider-specific `phase` beside the lane
-`state`. The vocabularies differ, so branch on the provider before the phase:
+`lane.js status` reports one `phase` vocabulary for every provider beside
+the lane `state`, and keeps the provider's own word in `providerPhase`:
 
-| Provider | Phases | Meaning |
-| --- | --- | --- |
-| Codex | `executing` | the newest turn is in progress; `steer` and `interrupt` apply |
-| Codex | `idle`, `interrupted`, `failed` | no turn is active; `recover` with input starts a new turn at the boundary |
-| Codex | `notLoaded` | the thread persists on the runtime but is not loaded; normal between turns |
-| Codex | `unknown` | the runtime answered without a recognizable turn status |
-| Claude | `working` | the session is executing; `steer` queues to its next safe point |
-| Claude | `waiting` | the session is blocked on user input or approval; `steer` still queues |
-| Claude | `idle` | the session finished its turn and is listening |
-| Claude | `stopped` | the whole session was stopped; it is retired or replaced, not resumed in place |
-| Claude | `unknown` | the CLI row carried no recognizable status |
+| `phase` | Codex `providerPhase` | Claude `providerPhase` | Meaning |
+| --- | --- | --- | --- |
+| `executing` | `executing` | `working` | a turn is in progress; Codex `steer` and `interrupt` apply, Claude `steer` queues to the next safe point |
+| `waiting` | (none) | `waiting` | the session is blocked on user input or approval; `steer` still queues |
+| `idle` | `idle`, `interrupted`, `notLoaded` | `idle` | no turn is active; Codex `recover` with input starts a turn at the boundary |
+| `stopped` | (none) | `stopped`, `retiring` | the whole session was stopped; it is retired or replaced, not resumed in place |
+| `failed` | `failed` | (none) | the newest turn or the thread failed |
+| `retired` | (none) | `retired` | the lane is archived and its seat released |
+| `unknown` | `unknown` | `unknown` | the provider answered without a recognizable status |
+
+The full output contract per operation is in [docs/OUTPUT.md](OUTPUT.md).
 
 ## Required parent listen loop
 

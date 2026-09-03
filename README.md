@@ -373,8 +373,10 @@ a complete packet, handback, digest, and retirement walkthrough in
 Every command exits 0 for a confirmed result, 2 for a usage error or a safe
 refusal that attempted nothing, 3 for a failure or an uncertain outcome after
 an attempt, and 1 only for an unexpected internal error. Failures print one
-JSON envelope on stderr with a fixed message per code. Provider-touching lane
-operations accept `--timeout-ms` to bound each request.
+JSON envelope on stderr with a fixed message per code. Success output is an
+allowlist per operation ([docs/OUTPUT.md](docs/OUTPUT.md)): a key that is not
+declared public never prints. Provider-touching lane operations accept
+`--timeout-ms` to bound each request.
 
 `lane.js` accepts these operations:
 
@@ -393,6 +395,7 @@ operations accept `--timeout-ms` to bound each request.
 | `retire` | Codex, Claude | Requires a harvest digest; Claude also requires `--private-archive` and defers local removal unless a managed seat is safely removed first; a manually removed blocked seat requires exact-lane `--accept-manual-seat-removal` |
 | `reconcile` | Codex, Claude | Repairs exact-owned pending state and eligible cleanup; never name-adopts or replays an unknown mutation |
 | `abandon` | Codex, Claude | Closes a stranded pending spawn, steer, stop, recover, resume, or interrupt as failed on the owner's authority with an unknown provider outcome; never a retirement |
+| `schema` | Host | Prints the public output contract (operations, keys, phases) as JSON; the same contract is in [docs/OUTPUT.md](docs/OUTPUT.md) |
 
 Every advertised tool accepts `--help`; use
 `"$SKILL_ROOT/scripts/runtime-up.sh" --help` for the shell launcher and

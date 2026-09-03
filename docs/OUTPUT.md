@@ -1,0 +1,154 @@
+# Output contract
+
+Every Transmogrify command prints one JSON document. A success goes to stdout
+and carries `version`, `ok: true`, and `operation`; a failure goes to stderr
+with `ok: false`, a stable `code`, a fixed `message`, and, for lane
+operations, a `delivery` projection (`confirmed`, `notDelivered`, `unknown`,
+`notAttempted`) with an `effect` breakdown. Exit codes are shared by every
+command: 0 confirmed, 2 usage error or safe refusal, 3 failure or uncertain
+outcome, 1 unexpected internal error.
+
+Success output is an allowlist. The keys below are the only keys a result may
+carry; a value the schema does not name is dropped before printing, so a
+provider handle, a path, or a transcript fragment can never reach output by
+being added to an internal result. Surviving strings are redacted of bearer
+tokens, provider session ids, and credential-shaped pairs. The same contract
+is available as data from `lane.js schema`, and a test keeps this page and
+that command in agreement.
+
+Subtrees that carry provider-advertised metadata keep every key:
+`catalog`, `guidance`, `intents`, `selectionGuide`, `executionProfile`,
+`requestedProfile`, `resolvedProfile`, `observedProfile`.
+
+## Phases
+
+`status` reports one `phase` vocabulary for every provider and keeps the
+provider's own word in `providerPhase`.
+
+| `phase` | Codex `providerPhase` | Claude `providerPhase` | Meaning |
+| --- | --- | --- | --- |
+| `executing` | `executing` | `working` | a turn is in progress |
+| `waiting` | | `waiting` | blocked on user input or approval |
+| `idle` | `idle`, `interrupted`, `notLoaded` | `idle` | no turn is active |
+| `stopped` | | `stopped`, `retiring` | the whole session was stopped |
+| `failed` | `failed` | | the newest turn or the thread failed |
+| `retired` | | `retired` | archived and its seat released |
+| `unknown` | `unknown` | `unknown` | no recognizable status |
+
+Parent events and durable observations keep the 0.2 vocabulary
+(`working`, `waiting`, `idle`, `stopped`, `failed`).
+
+## Lane envelope
+
+Every lane-bound operation (`spawn`, `status`, `steer`, `interrupt`, `stop`,
+`recover`, `retire`) shares: `version`, `ok`, `operation`, `operationId`,
+`laneId`, `adapter`, `state`, `phase`, `providerPhase`, `capabilities`,
+`visibility`, `receipt`, `delivery`.
+
+- `capabilities`: `midTurnSteer`, `interrupt`, `retirement`, `recovery`,
+  `approvalRelay` (Codex); `steering`, `stop`, `cancelTurnOnly`,
+  `recovery`, `retirement`, `nativePresentation`, `approvalRelay` (Claude).
+- `visibility` (Codex): `surface`, `state`, `attachment`, and a `receipt`
+  with `runtimeUrl`, `evidence`, `connection`, `observedAt`, `bundleId`,
+  `desktopVersion`, `desktopBuild`, `buildTested`, `clientPid`.
+
+## Operations
+
+### `spawn`
+
+Lane envelope. `receipt`: `acknowledgedBy`, `inputReceiptSource`,
+`completedStatus`, `presentation`, `requestedModelSelector`,
+`bridgeIdSha256`, `executionProfile`.
+
+### `status`
+
+Lane envelope plus `turn` (`status`), `rawState` (`type`, `activeFlags`),
+`waiting`. `receipt`: `exactSession`, `executionEpoch`, `durableLifecycle`,
+`providerInspectionDeferred`.
+
+### `steer`
+
+Lane envelope. `receipt`: `mode`, `observation`, `observedAtOffset`,
+`deliveryTokenSha256`.
+
+### `interrupt`
+
+Lane envelope. `receipt`: `reconciled`.
+
+### `stop`
+
+Lane envelope. `receipt`: `mode`, `alreadyStopped`.
+
+### `recover`
+
+Lane envelope. `receipt`: `acknowledgedBy`, `inputReceiptSource` (Codex
+boundary resume); `sameSessionId`, `sameJobId`, `sameBridgeId`,
+`executionEpoch`, `presentation` (Claude).
+
+### `retire`
+
+Lane envelope. `receipt`: `archived`, `alreadyRetired`, `worktreeRemoved`,
+`reconciled`, `retired`, `harvestedOutputSha256`, `remoteArchived`,
+`localJobRemoved`, `localRemovalDeferred`, `provider` (`unbound`, `stop`,
+`archive`, `localRemoval`), `worktree` (`attempted`, `removed`, `deferred`,
+`blocked`).
+
+### `reconcile`
+
+`adapter`, `results` (Claude) or `recovered` (Codex), `receipt`
+(`providerConnection`). Each entry: `laneId`, `state`, `phase`,
+`providerPhase`, `outcome`, `delivery`, `repaired`, `skipped`,
+`pendingOperation`, `code`, `causeCode`, `ownerAction`, `error` (`code`).
+
+### `abandon`
+
+`laneId`, `providerOutcome`, `lane` (`laneId`, `state`, `backend`),
+`abandoned` (`operationId`, `type`, `fromState`, `reason`, `at`),
+`delivery` (`providerMutation`).
+
+### `capabilities`
+
+`target`, `intents`, `selectionGuide`, `availability` (`kind`, `observed`,
+`note`), `guidance`, `catalog`.
+
+### `parent-init`
+
+`parentRef`, `contextFile`, `hostProvider`, `hostApp`, `displayName`.
+
+### `parent-list`
+
+`parents`: `parentRef`, `contextFile`, `hostProvider`, `hostApp`,
+`displayName`, `createdAt`, `children`, `unacknowledgedEvents`.
+
+### `children`
+
+`parentRef`, `unacknowledgedEvents`, `children`: `dispatchId`, `laneId`,
+`target`, `displayName`, `state`, `laneObservation`, `createdAt`,
+`requestedProfile`, `resolvedProfile`, `observedProfile`.
+
+### `wait`
+
+`events`: `schemaVersion`, `sequence`, `parentRef`, `dispatchId`, `type`,
+`observationFingerprint`, `occurredAt`, `eventId`, `child` (`provider`,
+`laneId`, `projectKey`), `data` (`state`, `status`). `observerErrors`:
+`dispatchId`, `code`.
+
+### `ack`
+
+`eventId`, `acknowledgedAt`.
+
+### `schema`
+
+`operations`, `phases`, `providerPhases`, `schemas`: this contract as data.
+
+## Failure envelope
+
+`version`, `ok: false`, `code`, `message`, and optional `details` limited to:
+`alreadyStopped`, `archive`, `attempted`, `causeCode`, `causeMessage`,
+`cleanup`, `code`, `copiesStopped`, `correlatedCopies`, `delivery`,
+`dispatchId`, `exactSession`, `executionEpoch`, `failures`, `httpStatus`,
+`laneId`, `localRemoval`, `operationId`, `outcome`, `ownerAction`,
+`pendingState`, `pendingType`, `phase`, `presentation`, `providerMutation`,
+`providerRetired`, `queued`, `removed`, `state`, `stop`. Lane operations add
+`delivery` and `effect`. Usage errors keep their own text; every other code
+prints the fixed message from `scripts/lib/public-error.js`.

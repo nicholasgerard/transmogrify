@@ -104,8 +104,9 @@ test('public capability output retains catalog ids, names, and provider-neutral 
   });
   assert.equal(projected.catalog.executionSettings[0].id, 'ultracode');
   assert.equal(projected.catalog.source.userAgent, 'codex_cli_rs/0.151.0');
-  assert.deepEqual(projected.receipt, {});
+  assert.equal(projected.receipt, undefined);
   const children = publicSuccess({
+    operation: 'children',
     children: [{
       resolvedProfile: { resolved: { setting: { id: 'ultracode', selection: 'explicit' } } },
       providerId: 'thread-private',
@@ -546,7 +547,7 @@ test('lane CLI recursively redacts credential-like failure details', () => {
   assert.equal(publicErrorMessage('UNKNOWN_CODE_WITH_secret-value'), 'operator operation failed');
 });
 
-test('lane CLI success projection retains lane receipts but removes provider control handles and paths', () => {
+test('lane CLI success projection keeps only the declared public keys of a result', () => {
   const projected = publicSuccess({
     version: 1,
     ok: true,
@@ -561,14 +562,10 @@ test('lane CLI success projection retains lane receipts but removes provider con
       jobId: '11111111',
       bridgeIdSha256: 'a'.repeat(64),
       cwd: '/Users/private/repository',
-      mode: 'queuedSafePointPublicCli',
+      presentation: 'deepLinkDispatched',
+      executionProfile: { provider: 'claude', resolved: { model: { selector: 'sonnet' } } },
     },
-    results: [{
-      laneId: 'lane-public',
-      providerId: 'thread-private',
-      outcome: 'verified',
-      error: 'private provider failure',
-    }],
+    results: [{ laneId: 'lane-public', providerId: 'thread-private', outcome: 'verified' }],
   });
   assert.deepEqual(projected, {
     version: 1,
@@ -577,18 +574,15 @@ test('lane CLI success projection retains lane receipts but removes provider con
     laneId: 'lane-public',
     operationId: 'operation-public',
     state: 'active',
-    turn: { status: 'inProgress' },
     receipt: {
       bridgeIdSha256: 'a'.repeat(64),
-      mode: 'queuedSafePointPublicCli',
+      presentation: 'deepLinkDispatched',
+      executionProfile: { provider: 'claude', resolved: { model: { selector: 'sonnet' } } },
     },
-    results: [{
-      laneId: 'lane-public',
-      outcome: 'verified',
-    }],
   });
-  assert.equal(JSON.stringify(projected).includes('thread-private'), false);
-  assert.equal(JSON.stringify(projected).includes('/Users/private'), false);
+  assert.equal(JSON.stringify(projected).includes('private'), false);
+  const unknown = publicSuccess({ version: 1, ok: true, operation: 'made-up', secret: 'x' });
+  assert.deepEqual(unknown, { version: 1, ok: true, operation: 'made-up' });
 });
 
 test('lane CLI input files are no-follow, owner-safe, and bounded', (t) => {

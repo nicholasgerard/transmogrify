@@ -25,6 +25,7 @@ const { markDispatchJournaled, recordEvent, reserveDispatch } = require('./dispa
 const {
   AdapterError, executionRequest, laneResult, profileFailure, worktreesRoot,
 } = require('./adapter-kit');
+const { phaseFields } = require('./output-schema');
 const {
   ExecutionProfileError,
   createClaudeCliCatalog,
@@ -857,7 +858,7 @@ async function status(options, env = process.env) {
   if (RETIRED_STATES.has(lane.state) || RETIRING_STATES.has(lane.state)) {
     const phase = RETIRED_STATES.has(lane.state) ? 'retired' : 'retiring';
     return laneResult('status', lane, {
-      phase,
+      ...phaseFields('claude', phase),
       receipt: { durableLifecycle: true, providerInspectionDeferred: true },
     });
   }
@@ -891,7 +892,7 @@ async function status(options, env = process.env) {
     lastVerifiedAt: new Date().toISOString(),
   }, env);
   return laneResult('status', updated, {
-    phase,
+    ...phaseFields('claude', phase),
     receipt: {
       exactSession: true,
       executionEpoch: execution ? updated.providerIdentity.executionEpochs.length : null,

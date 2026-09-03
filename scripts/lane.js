@@ -28,6 +28,7 @@ const {
 const {
   SAFE_REFUSALS, exitCodeForError, failureBody, publicErrorMessage, safeDetails, safeString,
 } = require('./lib/public-error');
+const { describeSchema, publicResult } = require('./lib/output-schema');
 const {
   ABANDONABLE_OPERATION_TYPES, abandonPendingLaneOperation,
   listOperations, pendingOperationForLane, requireOwnedLane, resolveProject,
@@ -71,6 +72,7 @@ operations:
   parent-init --host-provider <slug> --host-app <slug> --name <parent task>
               [--native-task-ref <private-ref>]
   parent-list
+  schema                                             print the public output contract
   capabilities --target codex|claude
   spawn      --target codex|claude --name <summary> (--input <text> | --input-file <absolute|->)
              --parent-context-file <absolute>
@@ -128,12 +130,14 @@ const OPERATIONS = new Set([
   'retire',
   'reconcile',
   'abandon',
+  'schema',
 ]);
 const OPERATION_OPTIONS = {
   'parent-init': new Set([
     'host-provider', 'host-app', 'name', 'native-task-ref',
   ]),
   'parent-list': new Set(),
+  schema: new Set(),
   capabilities: new Set(['target', 'url', 'claude-bin']),
   spawn: new Set([
     'repo-root', 'target', 'name', 'input', 'input-file', 'cwd', 'worktrees',
@@ -251,54 +255,6 @@ function providerForLane(repoRoot, laneId, env) {
   throw error;
 }
 
-// Provider-advertised catalogs, selection guides, and immutable execution
-// profiles are public metadata: their `id`, `name`, and source fields are not
-// provider control handles, so key stripping stops at these subtrees while
-// string redaction still applies.
-const PROJECTION_EXEMPT_KEYS = new Set([
-  'catalog',
-  'executionProfile',
-  'guidance',
-  'intents',
-  'observedProfile',
-  'requestedProfile',
-  'resolvedProfile',
-  'selectionGuide',
-]);
-const PRIVATE_RESULT_KEYS = new Set([
-  'agent',
-  'bridgeId',
-  'completedTurnId',
-  'codexHome',
-  'cwd',
-  'endpoint',
-  'error',
-  'expectedTurnId',
-  'file',
-  'id',
-  'jobId',
-  'log',
-  'message',
-  'name',
-  'observedTurnId',
-  'path',
-  'pid',
-  'pids',
-  'providerId',
-  'providerIdentity',
-  'repoRoot',
-  'gitCommonDir',
-  'recoveredTurnId',
-  'runtime',
-  'sessionId',
-  'socket',
-  'stderr',
-  'stdout',
-  'transcript',
-  'turnId',
-  'url',
-  'userAgent',
-]);
 
 // Parse an integer option inside explicit bounds. Anything else is a usage error
 // rather than a clamped value.
@@ -595,14 +551,15 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
   const provider = providerForBackend(lane.backend);
   const result = await provider.adapter.status(options, env);
   lane = requireOwnedLane(dispatch.child.repoRoot, lane.laneId, env);
-  let phase = result.phase;
+  // Observations and parent events keep the pre-0.3 vocabulary: working,
+  // waiting, idle, stopped, failed.
+  let phase = result.phase === 'executing' ? 'working' : result.phase;
   let eventType = null;
   let providerFingerprint;
   const data = { state: lane.state };
   if (provider.target === 'codex') {
     const turn = result.turn;
     providerFingerprint = `turn:${turn?.id || 'none'}:${turn?.status || phase}`;
-    phase = phase === 'executing' ? 'working' : phase;
     if (turn && ['completed', 'interrupted', 'failed'].includes(turn.status)) {
       eventType = turn.status === 'failed' ? 'child.failed' : 'child.turn-completed';
       phase = turn.status === 'failed' ? 'failed' : 'idle';
@@ -698,18 +655,9 @@ async function waitForParentEvent(context, values, env) {
 // Project a successful result for public output: strip provider control handles
 // and redact every string, stopping key stripping inside the exempt metadata
 // subtrees while still redacting their strings.
-function publicSuccess(value, exempt = false) {
-  if (value === null || value === undefined) return value;
-  if (Array.isArray(value)) return value.map((entry) => publicSuccess(entry, exempt));
-  if (typeof value === 'string') return safeString(value);
-  if (typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => exempt || !PRIVATE_RESULT_KEYS.has(key))
-    .map(([key, nested]) => [
-      key,
-      publicSuccess(nested, exempt || PROJECTION_EXEMPT_KEYS.has(key)),
-    ]));
-}
+// The public view of a command result: the allowlist projection in
+// lib/output-schema.js, kept under the name the tests and callers use.
+const publicSuccess = publicResult;
 
 // Owner-authorized closure of a stranded pending operation. The journal is
 // settled as failed with an abandonment receipt; nothing is claimed about the
@@ -890,6 +838,7 @@ async function main(argv, env = process.env) {
       displayName: created.parent.displayName,
     };
   }
+  if (operation === 'schema') return describeSchema();
   if (operation === 'parent-list') {
     const parents = listParentContexts(env).map((context) => ({
       parentRef: context.parent.parentRef,
