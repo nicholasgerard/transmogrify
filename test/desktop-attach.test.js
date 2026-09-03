@@ -29,6 +29,7 @@ function scenario(overrides = {}) {
     hostedByDesktop: false,
     quitRequested: false,
     quitIgnoredPolls: 0,
+    launchFailures: 0,
     launches: [],
     ...overrides,
   };
@@ -63,6 +64,12 @@ function scenario(overrides = {}) {
     }
     if (executable === 'open') {
       state.launches.push(args);
+      // LaunchServices can refuse a relaunch while the quit application is still
+      // being torn down, then accept the identical request moments later.
+      if (state.launchFailures > 0) {
+        state.launchFailures -= 1;
+        return fail('Unable to find application', 1);
+      }
       state.running = true;
       state.quitRequested = false;
       state.attached = state.attachOnLaunch;
@@ -311,4 +318,35 @@ test('the CLI parses operations strictly and reports the disabled state with exi
   });
   assert.equal(usage.code, 2);
   assert.equal(JSON.parse(usage.stdout).code, 'USAGE_ERROR');
+});
+
+test('a relaunch retries a transient LaunchServices refusal instead of leaving the app quit', async () => {
+  const { state, dependencies } = scenario({ launchFailures: 2 });
+  const result = await ensure({ relaunch: true }, ENV, dependencies);
+  assert.equal(result.ok, true);
+  assert.equal(result.action, 'relaunched');
+  // The refusals are retried with the same attach environment, so the app the
+  // tool quit is running again.
+  assert.equal(state.launches.length, 3);
+  assert.equal(state.running, true);
+  for (const launchArgs of state.launches) {
+    assert.ok(launchArgs.some((value) => String(value).startsWith('CODEX_APP_SERVER_WS_URL=')));
+  }
+});
+
+test('a relaunch that cannot start the app reports that Desktop is not running', async () => {
+  const { state, dependencies } = scenario({ launchFailures: Number.MAX_SAFE_INTEGER });
+  await assert.rejects(
+    () => ensure({ relaunch: true }, ENV, dependencies),
+    (error) => {
+      assert.ok(error instanceof DesktopAttachError);
+      assert.equal(error.code, 'DESKTOP_LAUNCH_FAILED');
+      // The owner is told the app is down, because this tool quit it.
+      assert.match(error.message, /is not running/);
+      return true;
+    },
+  );
+  // The bundle id is retried, then the exact bundle path is tried once.
+  assert.ok(state.launches.length > 1);
+  assert.ok(state.launches.some((launchArgs) => launchArgs.includes(APP)));
 });

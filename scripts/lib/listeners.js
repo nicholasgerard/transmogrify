@@ -86,11 +86,19 @@ function execFileResult(executable, args, options = {}) {
       killSignal: 'SIGKILL',
       env: options.env,
     }, (error, stdout, stderr) => {
-      if (error && error.code !== 1) {
+      // A numeric `error.code` is a clean exit status, and therefore data: lsof
+      // uses 1 for an empty result, and a caller that opts in with
+      // `tolerateExitCodes` reports its own verdict through a non-zero exit
+      // table. A non-numeric code (ENOENT, or null after a timeout kill) means
+      // the tool never produced a result at all, which stays an inspection
+      // failure.
+      const exited = typeof error?.code === 'number';
+      const tolerated = exited && (options.tolerateExitCodes === true || error.code === 1);
+      if (error && !tolerated) {
         reject(new ListenerError(`${path.basename(executable)} failed while inspecting the runtime`));
         return;
       }
-      resolve({ code: error?.code || 0, stdout: String(stdout || ''), stderr: String(stderr || '') });
+      resolve({ code: exited ? error.code : 0, stdout: String(stdout || ''), stderr: String(stderr || '') });
     });
   });
 }

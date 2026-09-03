@@ -5,6 +5,11 @@
 // It completes the initialize handshake, prints the returned user-agent, and
 // exits 3 when the handshake or the verified 0.151.x line check fails, 2 on a
 // usage error, matching the exit table every Transmogrify command shares. It sends no other request and never mutates provider state.
+// A failure names this installation's own reason code
+// (TRANSPORT_ERROR, TRANSPORT_UNKNOWN, RUNTIME_MISMATCH,
+// UNSUPPORTED_VERSION_LINE) so the operator can tell an absent listener from an
+// unrecognizable one from a supported runtime on an unsupported version line.
+// No remote message text is ever echoed.
 
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
 const { VERSION } = require('./lib/version');
@@ -59,14 +64,25 @@ try {
   try {
     const initialized = await client.connect();
     if (!client.verifiedRuntime) {
-      throw new Error(`unsupported Codex app-server ${initialized.userAgent}; verified line is 0.151.x`);
+      // `initialized.userAgent` is the canonicalized value: it already matched a
+      // bounded, control-free pattern, so printing it echoes no untrusted text.
+      console.error(`runtime probe failed: UNSUPPORTED_VERSION_LINE (${initialized.userAgent}); verified line is 0.151.x`);
+      process.exitCode = 3;
+      return;
     }
     console.log(`Codex app-server protocol verified: ${initialized.userAgent}`);
   } catch (error) {
-    // The caught error is discarded and the message is fixed, so an untrusted
-    // listener cannot echo remote text into operator output.
-    void error;
-    console.error('runtime probe failed: app-server handshake or compatibility verification failed');
+    // Only this installation's own error code reaches the operator; remote
+    // message text is never echoed. The code distinguishes a listener that is
+    // absent or unreachable from one that answered with something that is not a
+    // recognizable Codex app-server, which are different repairs.
+    const code = typeof error?.code === 'string' && /^[A-Z][A-Z_]{1,39}$/.test(error.code)
+      ? error.code
+      : 'PROBE_FAILED';
+    console.error(`runtime probe failed: ${code}`);
+    if (code === 'RUNTIME_MISMATCH') {
+      console.error('the listener did not return a recognizable Codex app-server initialize response');
+    }
     process.exitCode = 3;
   } finally {
     client.close();
