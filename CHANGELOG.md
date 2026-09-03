@@ -11,6 +11,12 @@
   `waiting`, `idle`, `stopped`, `failed`, `retired`, `unknown`) and keeps the
   provider's own word in `providerPhase`; parent events and observations keep
   the 0.2 vocabulary. Codex `interrupted` and `notLoaded` read as `idle`.
+- SKILL.md is rewritten around the happy path: a numbered eight-step
+  overview, a doctor decision table, per-host attach rules, one phase table,
+  the listen loop, recovery, harvest and retire, and a "when it fails" table,
+  with the mechanism prose living in the docs it links. `parent-init` accepts
+  only the enumerated host applications (`codex-desktop`, `codex-cli`,
+  `codex-web`, `claude-code`, `claude-desktop`, `claude-web`).
 
 ## 0.2.8
 

@@ -353,7 +353,7 @@ background session and its worktree, the Claude adapter runs it only after its
 own guarded seat removal has made the path absent. A transient local failure
 after verified provider retirement returns `CLEANUP_RETRYABLE` (exit 2);
 `CLEANUP_BLOCKED` marks an unsafe invariant. The full ordering is in
-[SKILL.md](SKILL.md#8-harvest-retirement-and-cleanup), the Claude receipts in
+[SKILL.md](SKILL.md#7-harvest-and-retire), the Claude receipts in
 [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#retirement-and-archive-boundary), and
 a complete packet, handback, digest, and retirement walkthrough in
 [Examples](examples/README.md).

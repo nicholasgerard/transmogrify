@@ -279,9 +279,23 @@ function validateParent(record, installation) {
 // Register or re-adopt a parent context under the installation lock. A native
 // task reference is a stable key: an exact match returns the existing context,
 // and the same reference with a different host or name is INVALID_STATE.
+// The host applications a parent context may name, per provider. A
+// misspelled or invented slug is refused so provenance blocks and events never
+// carry a host nobody can recognize.
+const HOST_APPS = Object.freeze({
+  codex: Object.freeze(['codex-desktop', 'codex-cli', 'codex-web']),
+  claude: Object.freeze(['claude-code', 'claude-desktop', 'claude-web']),
+});
+
 function createParentContext(options, env = process.env) {
   if (!SLUG_PATTERN.test(options?.hostProvider || '') || !SLUG_PATTERN.test(options?.hostApp || '')) {
     throw new DispatchError('USAGE_ERROR', 'parent host provider and app must be lowercase slugs');
+  }
+  if (!HOST_APPS[options.hostProvider]) {
+    throw new DispatchError('USAGE_ERROR', `parent host provider must be one of ${Object.keys(HOST_APPS).join(', ')}`);
+  }
+  if (!HOST_APPS[options.hostProvider].includes(options.hostApp)) {
+    throw new DispatchError('USAGE_ERROR', `parent host app for ${options.hostProvider} must be one of ${HOST_APPS[options.hostProvider].join(', ')}`);
   }
   assertSafeMetadataLabel(options.displayName, 'parent display name');
   if (options.nativeTaskRef !== undefined) {
@@ -1118,6 +1132,7 @@ function acknowledgeEvent(parentContext, eventId, env = process.env) {
 }
 
 module.exports = {
+  HOST_APPS,
   DispatchError,
   EVENT_TYPES,
   VERSION,

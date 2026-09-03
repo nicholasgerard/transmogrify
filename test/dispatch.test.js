@@ -489,3 +489,19 @@ test('visible provenance rejects path and credential-shaped parent metadata', (t
     }, fixture.env), /must not contain a path or credential-like value/);
   }
 });
+
+test('parent contexts accept only the enumerated host applications', (t) => {
+  const fixture = createStateFixture(t);
+  const { HOST_APPS, createParentContext } = require('../scripts/lib/dispatch');
+  assert.deepEqual(Object.keys(HOST_APPS), ['codex', 'claude']);
+  for (const [provider, apps] of Object.entries(HOST_APPS)) {
+    for (const app of apps) {
+      const created = createParentContext({ hostProvider: provider, hostApp: app, displayName: `Host ${app}` }, fixture.env);
+      assert.equal(created.parent.hostApp, app);
+    }
+  }
+  assert.throws(() => createParentContext({ hostProvider: 'codex', hostApp: 'claude-code', displayName: 'x' }, fixture.env),
+    (error) => error.code === 'USAGE_ERROR' && /host app for codex must be one of/.test(error.message));
+  assert.throws(() => createParentContext({ hostProvider: 'gemini', hostApp: 'gemini-cli', displayName: 'x' }, fixture.env),
+    (error) => error.code === 'USAGE_ERROR' && /host provider must be one of/.test(error.message));
+});
