@@ -365,8 +365,12 @@ test('observation leaves an in-flight spawn journal alone until its spawner is g
     },
   }, fixture.env);
   const pending = pendingOperationForLane(fixture.repoRoot, laneId, fixture.env);
-  assert.equal(spawnInFlight(pending), true, 'a fresh journal without a spawner record is in flight');
-  assert.equal(spawnInFlight({ ...pending, createdAt: new Date(Date.now() - 6 * 60_000).toISOString() }), false);
+  assert.equal(pending.details.spawner.pid, process.pid, 'the reservation records its launcher');
+  assert.equal(spawnInFlight(pending), true, 'a live launcher keeps the journal in flight');
+  const { spawner: _spawner, ...unrecorded } = pending.details;
+  const withoutLauncher = { ...pending, details: unrecorded };
+  assert.equal(spawnInFlight(withoutLauncher), true, 'a fresh journal without a launcher record is in flight');
+  assert.equal(spawnInFlight({ ...withoutLauncher, createdAt: new Date(Date.now() - 6 * 60_000).toISOString() }), false);
   const alive = { ...pending, details: { ...pending.details, spawner: { pid: process.pid, processBirth: 'x' } } };
   assert.equal(spawnInFlight(alive, { processBirth: () => 'x' }), true, 'a live spawner keeps it in flight regardless of age');
   const dead = { ...pending, details: { ...pending.details, spawner: { pid: 999999, processBirth: 'x' } } };

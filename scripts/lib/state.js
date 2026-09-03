@@ -1138,7 +1138,16 @@ function reserveSpawn(repoRoot, reservation, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
     const registry = validateRegistry(readJson(paths.registry), paths.project);
-    const operationInput = reservation?.operation;
+    const supplied = reservation?.operation;
+    // The launching process is recorded on the journal so a later observer
+    // can tell a spawn still being driven from one whose launcher died.
+    const operationInput = supplied && typeof supplied === 'object' ? {
+      ...supplied,
+      details: {
+        ...(supplied.details || {}),
+        spawner: supplied.details?.spawner ?? { pid: process.pid, processBirth: processBirth(process.pid) },
+      },
+    } : supplied;
     const laneInput = reservation?.lane;
     if (!operationInput || operationInput.type !== 'spawn' ||
         !UUID_PATTERN.test(operationInput.operationId || '') ||
@@ -1347,11 +1356,16 @@ function completeLaneOperation(repoRoot, laneId, operationId, patch = {}, env = 
 // terminal spawn journal is failed; a pointer left on a terminal journal is
 // cleared. Nothing here contacts a provider. Returns what changed, or null when
 // the lane needs provider observation instead.
-function repairUnstartedSpawn(repoRoot, laneId, recordedOperation, env = process.env) {
+function repairUnstartedSpawn(repoRoot, laneId, recordedOperation, env = process.env, dependencies = {}) {
   let lane = requireOwnedLane(repoRoot, laneId, env);
   const pending = pendingOperationForLane(repoRoot, lane.laneId, env);
   const recorded = pending || recordedOperation || null;
   const repaired = [];
+  // A launcher that is still alive may be about to dispatch: its journal is
+  // not a crash to repair. Only a dead (or unrecorded) launcher's journal is.
+  const launcherAlive = pending?.type === 'spawn' && pending.details?.spawner &&
+    Number.isInteger(pending.details.spawner.pid) && processMatches(pending.details.spawner, dependencies);
+  if (launcherAlive && ['planned', 'seatReady'].includes(pending.state)) return null;
   if (pending?.type === 'spawn' && ['planned', 'seatReady'].includes(pending.state) &&
       ['planned', 'failed'].includes(lane.state) && !lane.providerId) {
     // No provider request precedes the later dispatching state. Make the lane

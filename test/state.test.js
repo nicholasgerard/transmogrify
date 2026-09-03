@@ -1292,3 +1292,33 @@ test('every operation state literal handed to a journal writer belongs to an enu
   assert.deepEqual(unknown, []);
   assert.ok(LANE_TRANSITIONS.get('planned').has('failed'), 'an unbound abandoned spawn lane must be able to fail');
 });
+
+test('a spawn reservation records its launcher and the crash repair spares a live one', (t) => {
+  const fixture = createStateFixture(t);
+  const laneId = '77887788-7788-4788-8788-778877887788';
+  const operationId = '88998899-8899-4899-8899-889988998899';
+  const seatIntent = {
+    version: 1, laneId, path: '/tmp/transmogrify-worktrees/launcher', worktreesRoot: '/tmp/transmogrify-worktrees',
+    gitCommonDir: '/tmp/repository/.git', branchRef: 'refs/heads/transmogrify/launcher', baseCommit: 'a'.repeat(40), managed: true,
+  };
+  const reserved = reserveSpawn(fixture.repoRoot, {
+    operation: { operationId, type: 'spawn', laneId, details: { target: 'codex', name: '[test] launcher' } },
+    lane: { laneId, backend: 'codex-app-server', displayName: '[test] launcher', operationId, seatIntent },
+  }, fixture.env);
+  assert.equal(reserved.operation.details.spawner.pid, process.pid);
+  assert.equal(typeof reserved.operation.details.spawner.processBirth, 'string');
+  const { repairUnstartedSpawn } = require('../scripts/lib/state');
+  assert.equal(repairUnstartedSpawn(fixture.repoRoot, laneId, null, fixture.env), null, 'this process is the launcher and is alive');
+  const dead = { kill: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); } };
+  const repaired = repairUnstartedSpawn(fixture.repoRoot, laneId, null, fixture.env, dead);
+  assert.deepEqual(repaired.repaired, ['unstartedSpawnState', 'unstartedSpawnOperation']);
+  assert.equal(repaired.lane.state, 'failed');
+  // An explicit launcher on the reservation is kept as supplied.
+  const explicitLane = '99aa99aa-99aa-499a-899a-99aa99aa99aa';
+  const explicitOp = 'aabbaabb-aabb-4abb-8abb-aabbaabbaabb';
+  const explicit = reserveSpawn(fixture.repoRoot, {
+    operation: { operationId: explicitOp, type: 'spawn', laneId: explicitLane, details: { target: 'codex', spawner: { pid: 4242, processBirth: 'x' } } },
+    lane: { laneId: explicitLane, backend: 'codex-app-server', displayName: '[test] explicit launcher', operationId: explicitOp, seatIntent: { ...seatIntent, laneId: explicitLane, path: '/tmp/transmogrify-worktrees/explicit', branchRef: 'refs/heads/transmogrify/explicit' } },
+  }, fixture.env);
+  assert.deepEqual(explicit.operation.details.spawner, { pid: 4242, processBirth: 'x' });
+});
