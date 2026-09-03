@@ -359,7 +359,7 @@ test('lane CLI labels Codex target-wide observation as reconcile', async (t) => 
   ], fixture.env);
   assert.equal(result.ok, true);
   assert.equal(result.operation, 'reconcile');
-  assert.deepEqual(result.recovered, []);
+  assert.deepEqual(result.results, []);
 });
 
 test('lane CLI maps exact unowned-lane refusal to exit 2', async (t) => {
@@ -528,20 +528,31 @@ test('lane CLI recursively redacts credential-like failure details', () => {
   assert.equal(exitCodeForError('DELIVERY_UNCERTAIN'), 3);
   assert.equal(resultExitCode({
     ok: false,
-    results: [{ outcome: 'retirementPending' }, { outcome: 'verified' }],
+    results: [
+      { outcome: 'retirementPending', delivery: 'unknown' },
+      { outcome: 'verified', delivery: 'confirmed' },
+    ],
   }), 2);
   assert.equal(resultExitCode({
     ok: false,
-    recovered: [{ skipped: 'differentRuntime' }],
+    results: [{ outcome: 'differentRuntime', delivery: 'unknown' }],
   }), 2);
   assert.equal(resultExitCode({
     ok: false,
-    results: [{ outcome: 'cleanupRetryable', code: 'CLEANUP_RETRYABLE' }],
+    results: [{ outcome: 'cleanupRetryable', code: 'CLEANUP_RETRYABLE', delivery: 'unknown' }],
   }), 2);
   assert.equal(resultExitCode({
     ok: false,
-    results: [{ outcome: 'steerUnknown' }],
+    results: [{ outcome: 'steerUnknown', delivery: 'unknown' }],
   }), 3);
+  assert.equal(resultExitCode({
+    ok: false,
+    results: [
+      { outcome: 'retirementPending', delivery: 'unknown' },
+      { outcome: 'uncertain', code: 'RECONCILIATION_UNCERTAIN', delivery: 'unknown' },
+    ],
+  }), 3);
+  assert.equal(resultExitCode({ ok: true, results: [{ outcome: 'uncertain' }] }), 0);
   assert.equal(publicErrorMessage('SPAWN_UNCERTAIN'), 'provider spawn outcome is unknown');
   assert.match(publicErrorMessage('NATIVE_VISIBILITY_REQUIRED'), /native-visibility receipt/);
   assert.equal(publicErrorMessage('UNKNOWN_CODE_WITH_secret-value'), 'operator operation failed');

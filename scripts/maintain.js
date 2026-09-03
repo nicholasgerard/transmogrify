@@ -153,14 +153,14 @@ function parseMaintainArgs(argv, env = process.env) {
   };
 }
 
-// An entry counts against a provider's `notOk` when its own reconcile
-// reported it was not cleanly settled: a hard error, a soft code such as
-// cleanupRetryable, or an explicitly unknown delivery outcome. Codex and
-// Claude are not unified on one entry shape (see ROADMAP.md priority 2), so
-// this is deliberately a permissive union of both adapters' fields rather
-// than a strict per-adapter contract.
+// An entry counts against a provider's `notOk` under the same rule both
+// adapters' own reconcile uses for their aggregate `ok`: a hard error or
+// other surfaced code, a still-open journal (`delivery: 'unknown'`), a lane
+// skipped rather than observed (`differentRuntime`), or an outcome that could
+// not be classified further (`uncertain`).
 function isNotOk(entry) {
-  return Boolean(entry?.error) || Boolean(entry?.code) || entry?.delivery === 'unknown';
+  return Boolean(entry?.error) || Boolean(entry?.code) || entry?.delivery === 'unknown' ||
+    entry?.outcome === 'differentRuntime' || entry?.outcome === 'uncertain';
 }
 
 // Run one provider's exact-owned reconcile, or explain why it did not run.

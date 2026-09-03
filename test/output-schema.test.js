@@ -65,11 +65,17 @@ test('retire, reconcile, abandon, and wait results keep their declared keys only
   });
   assert.deepEqual(publicResult({
     version: 1, ok: false, operation: 'reconcile', adapter: 'codex-app-server',
-    recovered: [{ laneId: 'lane', providerId: 'thread-private', state: 'idle', delivery: 'unknown', pendingOperation: 'steer', repaired: [], ...phaseFields('codex', 'notLoaded') }],
+    results: [{
+      laneId: 'lane', providerId: 'thread-private', state: 'idle', outcome: 'steerUnknown',
+      delivery: 'unknown', pendingOperation: 'steer', repaired: [], ...phaseFields('codex', 'notLoaded'),
+    }],
     receipt: { providerConnection: 'notRequired', endpoint: 'ws://private' },
   }), {
     version: 1, ok: false, operation: 'reconcile', adapter: 'codex-app-server',
-    recovered: [{ laneId: 'lane', state: 'idle', delivery: 'unknown', pendingOperation: 'steer', repaired: [], phase: 'idle', providerPhase: 'notLoaded' }],
+    results: [{
+      laneId: 'lane', state: 'idle', outcome: 'steerUnknown', delivery: 'unknown',
+      pendingOperation: 'steer', repaired: [], phase: 'idle', providerPhase: 'notLoaded',
+    }],
     receipt: { providerConnection: 'notRequired' },
   });
   assert.deepEqual(publicResult({

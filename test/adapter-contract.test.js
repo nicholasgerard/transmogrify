@@ -65,46 +65,87 @@ test('lane results share one envelope regardless of adapter', () => {
 // The shared crash-repair row: a spawn reservation that never reached its
 // provider request settles as notDelivered with the lane failed, through
 // either adapter, without any provider contact.
+const UNSTARTED_LANE_ID = '12121212-1212-4121-8121-121212121212';
+const UNSTARTED_OPERATION_ID = '34343434-3434-4343-8343-343434343434';
+function reserveUnstartedSpawn(fixture, adapter) {
+  reserveSpawn(fixture.repoRoot, {
+    operation: {
+      operationId: UNSTARTED_OPERATION_ID, type: 'spawn', laneId: UNSTARTED_LANE_ID,
+      details: {
+        target: adapter.descriptor.target, name: '[test] unstarted',
+        spawner: { pid: 999999, processBirth: 'gone' },
+      },
+    },
+    lane: {
+      laneId: UNSTARTED_LANE_ID,
+      backend: adapter.descriptor.backend,
+      displayName: '[test] unstarted',
+      operationId: UNSTARTED_OPERATION_ID,
+      seatIntent: {
+        version: 1,
+        laneId: UNSTARTED_LANE_ID,
+        path: '/tmp/transmogrify-worktrees/unstarted',
+        worktreesRoot: '/tmp/transmogrify-worktrees',
+        gitCommonDir: '/tmp/repository/.git',
+        branchRef: 'refs/heads/transmogrify/unstarted',
+        baseCommit: 'a'.repeat(40),
+        managed: true,
+      },
+    },
+  }, fixture.env);
+}
+function reconcileUnstartedSpawn(fixture, adapter) {
+  return adapter.reconcile({
+    repoRoot: fixture.repoRoot, laneId: UNSTARTED_LANE_ID,
+    url: 'ws://127.0.0.1:1', claudeBin: '/nonexistent/claude',
+  }, { ...fixture.env, TRANSMOGRIFY_URL: 'ws://127.0.0.1:1' });
+}
 for (const adapter of ADAPTERS) {
   test(`${adapter.descriptor.target} reconcile settles an unstarted spawn locally`, async (t) => {
     const fixture = createStateFixture(t);
-    const laneId = '12121212-1212-4121-8121-121212121212';
-    const operationId = '34343434-3434-4343-8343-343434343434';
-    reserveSpawn(fixture.repoRoot, {
-      operation: {
-        operationId, type: 'spawn', laneId,
-        details: { target: adapter.descriptor.target, name: '[test] unstarted', spawner: { pid: 999999, processBirth: 'gone' } },
-      },
-      lane: {
-        laneId,
-        backend: adapter.descriptor.backend,
-        displayName: '[test] unstarted',
-        operationId,
-        seatIntent: {
-          version: 1,
-          laneId,
-          path: '/tmp/transmogrify-worktrees/unstarted',
-          worktreesRoot: '/tmp/transmogrify-worktrees',
-          gitCommonDir: '/tmp/repository/.git',
-          branchRef: 'refs/heads/transmogrify/unstarted',
-          baseCommit: 'a'.repeat(40),
-          managed: true,
-        },
-      },
-    }, fixture.env);
-    assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env).state, 'planned');
-    const result = await adapter.reconcile({
-      repoRoot: fixture.repoRoot, laneId, url: 'ws://127.0.0.1:1', claudeBin: '/nonexistent/claude',
-    }, { ...fixture.env, TRANSMOGRIFY_URL: 'ws://127.0.0.1:1' });
-    const entry = (result.results || result.recovered || [])[0];
+    reserveUnstartedSpawn(fixture, adapter);
+    assert.equal(pendingOperationForLane(fixture.repoRoot, UNSTARTED_LANE_ID, fixture.env).state, 'planned');
+    const result = await reconcileUnstartedSpawn(fixture, adapter);
+    const entry = result.results[0];
     assert.ok(entry, JSON.stringify(result));
-    assert.equal(entry.laneId, laneId);
+    assert.equal(entry.laneId, UNSTARTED_LANE_ID);
     assert.equal(entry.state, 'failed');
     assert.equal(entry.delivery, 'notDelivered');
     assert.deepEqual(entry.repaired, ['unstartedSpawnState', 'unstartedSpawnOperation']);
-    assert.equal(requireOwnedLane(fixture.repoRoot, laneId, fixture.env).state, 'failed');
-    assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env), null);
-    const journal = listOperations(fixture.repoRoot, fixture.env).find((op) => op.operationId === operationId);
+    assert.equal(entry.pendingOperation, null);
+    assert.equal(requireOwnedLane(fixture.repoRoot, UNSTARTED_LANE_ID, fixture.env).state, 'failed');
+    assert.equal(pendingOperationForLane(fixture.repoRoot, UNSTARTED_LANE_ID, fixture.env), null);
+    const journal = listOperations(fixture.repoRoot, fixture.env)
+      .find((op) => op.operationId === UNSTARTED_OPERATION_ID);
     assert.equal(journal.state, 'notDelivered');
   });
 }
+
+// One reconcile result shape for both adapters (ROADMAP.md priority 2): the
+// same unstarted-spawn crash row, settled by each adapter on its own fixture,
+// must carry the same top-level and entry keys even though the two adapters
+// give that row different outcome labels (Codex: unstartedSpawnSettled,
+// Claude: spawnNotDelivered) and a different adapter/backend identity.
+test('codex and claude reconcile results share one top-level and entry key shape', async (t) => {
+  const results = {};
+  for (const adapter of ADAPTERS) {
+    const fixture = createStateFixture(t);
+    reserveUnstartedSpawn(fixture, adapter);
+    results[adapter.descriptor.target] = await reconcileUnstartedSpawn(fixture, adapter);
+  }
+  const { codex: codexResult, claude: claudeResult } = results;
+  assert.deepEqual(Object.keys(codexResult).sort(), Object.keys(claudeResult).sort());
+  for (const key of ['version', 'ok', 'operation']) {
+    assert.equal(codexResult[key], claudeResult[key], key);
+  }
+  assert.deepEqual(codexResult.receipt, claudeResult.receipt);
+  const codexEntry = codexResult.results[0];
+  const claudeEntry = claudeResult.results[0];
+  assert.deepEqual(Object.keys(codexEntry).sort(), Object.keys(claudeEntry).sort());
+  for (const key of ['state', 'delivery', 'pendingOperation']) {
+    assert.equal(codexEntry[key], claudeEntry[key], key);
+  }
+  assert.notEqual(codexEntry.outcome, claudeEntry.outcome);
+  assert.equal(codexEntry.outcome, 'unstartedSpawnSettled');
+  assert.equal(claudeEntry.outcome, 'spawnNotDelivered');
+});

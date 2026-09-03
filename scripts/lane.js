@@ -459,31 +459,20 @@ function errorEffect(code, details = {}) {
   return { providerMutation: 'unknown' };
 }
 
-// Exit status for a fleet result carrying per-lane outcomes: 0 when all are
-// confirmed, 2 when the only incomplete entries are safe refusals or deferrals,
-// and 3 as soon as one entry is uncertain.
+// Exit status for a fleet reconcile result carrying one unified per-lane
+// outcome shape from either adapter (ROADMAP.md priority 2): 0 when every
+// lane is confirmed, 2 when every entry still keeping ok false is a safe
+// deferral a later reconcile can finish on its own, 3 as soon as one is
+// unknown or uncertain and needs attention before anything else touches it.
 function resultExitCode(result) {
   if (result?.ok !== false) return 0;
-  const entries = [
-    ...(Array.isArray(result.results) ? result.results : []),
-    ...(Array.isArray(result.recovered) ? result.recovered : []),
-  ];
-  const safeIncompleteOutcomes = new Set([
-    'cleanupRetryable', 'differentRuntime', 'retirementPending',
-  ]);
-  let foundIncomplete = false;
-  for (const entry of entries) {
-    if (entry?.skipped === 'differentRuntime' || safeIncompleteOutcomes.has(entry?.outcome)) {
-      foundIncomplete = true;
-      continue;
-    }
-    if (entry?.error || entry?.delivery === 'unknown' ||
-        /Unknown$|Pending$|uncertain/i.test(entry?.outcome || '')) {
-      foundIncomplete = true;
-      if (!SAFE_REFUSALS.has(entry?.code)) return 3;
-    }
-  }
-  return foundIncomplete ? 2 : 3;
+  const entries = Array.isArray(result.results) ? result.results : [];
+  const safeDeferralOutcomes = new Set(['cleanupRetryable', 'differentRuntime', 'retirementPending']);
+  const incomplete = entries.filter((entry) =>
+    entry?.delivery === 'unknown' || entry?.outcome === 'uncertain' || entry?.code !== undefined
+  );
+  return incomplete.length > 0 && incomplete.every((entry) => safeDeferralOutcomes.has(entry?.outcome))
+    ? 2 : 3;
 }
 
 // Parse and dispatch one operation. Every path returns a projected result, and

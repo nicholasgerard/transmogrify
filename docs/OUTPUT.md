@@ -97,10 +97,12 @@ Lane envelope. `receipt`: `archived`, `alreadyRetired`, `worktreeRemoved`,
 
 ### `reconcile`
 
-`adapter`, `results` (Claude) or `recovered` (Codex), `receipt`
-(`providerConnection`). Each entry: `laneId`, `state`, `phase`,
-`providerPhase`, `outcome`, `delivery`, `repaired`, `skipped`,
-`pendingOperation`, `code`, `causeCode`, `ownerAction`, `error` (`code`).
+One shape for both adapters: `adapter`, `results`, `receipt`
+(`providerConnection`: `notRequired` or `verified`). Each entry: `laneId`,
+`state`, `phase`, `providerPhase`, `outcome`, `delivery` (`confirmed`,
+`notDelivered`, or `unknown`), `repaired`, `pendingOperation` (the open
+journal's type, or `null`), `code`, `causeCode`, `ownerAction`, `error`
+(`code`).
 
 ### `abandon`
 

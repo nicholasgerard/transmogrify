@@ -2004,8 +2004,10 @@ async function repairLocalRecoveryState(options, initial, operations, env) {
         laneId: repair.lane.laneId,
         providerId: repair.lane.providerId || null,
         state: repair.lane.state,
+        outcome: repair.unstartedSpawn ? 'unstartedSpawnSettled' : 'terminalPointerCleared',
         delivery: repair.delivery,
         repaired: repair.repaired,
+        pendingOperation: null,
       };
     }
     const lane = requireOwnedLane(options.repoRoot, initial.laneId, env);
@@ -2014,8 +2016,10 @@ async function repairLocalRecoveryState(options, initial, operations, env) {
         laneId: lane.laneId,
         providerId: lane.providerId,
         state: lane.state,
+        outcome: 'retirementFinished',
         delivery: 'confirmed',
         repaired: [],
+        pendingOperation: null,
       };
     }
     return null;
@@ -2032,10 +2036,23 @@ function remainingRecoveryMs(deadline) {
   return remaining;
 }
 
+// The one reconcile ok rule shared with Claude (ROADMAP.md priority 2): an
+// entry counts against ok when its journal is still open (delivery unknown),
+// when it was skipped rather than observed (differentRuntime), when its own
+// error could not be classified further (uncertain), or when it carries a
+// surfaced provider or local code at all -- a settled receipt never does.
+function reconcileOk(entries) {
+  return entries.every((entry) =>
+    entry.delivery !== 'unknown' && entry.outcome !== 'differentRuntime' &&
+    entry.outcome !== 'uncertain' && entry.code === undefined
+  );
+}
+
 // Reconcile one lane or the whole Codex fleet against the runtime. It repairs
 // what local state alone proves, then observes the provider for the rest,
 // never replaying an unknown mutation and never inferring creation from a title.
-// Each lane is reported as confirmed, notDelivered, or unknown.
+// Each entry names one outcome and carries the shape claude-adapter.reconcile
+// shares: state, outcome, delivery, repaired[], and the pending journal type.
 async function recover(options, env = process.env) {
   const recoveryDeadline = Number.isInteger(options.timeoutMs)
     ? Date.now() + options.timeoutMs : null;
@@ -2070,10 +2087,21 @@ async function recover(options, env = process.env) {
   const providerLanes = [];
   for (const initial of lanes) {
     if (initial.runtime?.endpoint && initial.runtime.endpoint !== endpoint) {
+      // Claude repairs an identity-matching runtime transition here instead of
+      // skipping (rebindClaudeRuntime in state.js). Lane.runtime is an
+      // immutable field for every backend once bound (state.js updateLane and
+      // bindLaneProvider both refuse a runtime patch that differs from the
+      // recorded one), and there is no Codex-side primitive analogous to
+      // rebindClaudeRuntime to permit an endpoint-only change, so this stays a
+      // skip pending that state.js addition (ROADMAP.md priority 2).
       localResults.push({
         laneId: initial.laneId,
         providerId: initial.providerId,
-        skipped: 'differentRuntime',
+        state: initial.state,
+        outcome: 'differentRuntime',
+        delivery: 'unknown',
+        repaired: [],
+        pendingOperation: pendingOperationForLane(options.repoRoot, initial.laneId, env)?.type ?? null,
       });
       continue;
     }
@@ -2084,11 +2112,10 @@ async function recover(options, env = process.env) {
   if (providerLanes.length === 0) {
     return {
       version: 1,
-      ok: localResults.every((entry) => !entry.error && !entry.skipped &&
-        entry.delivery !== 'unknown'),
+      ok: reconcileOk(localResults),
       operation: 'recover',
       adapter: 'codex-app-server',
-      recovered: localResults,
+      results: localResults,
       receipt: { providerConnection: 'notRequired' },
     };
   }
@@ -2131,8 +2158,10 @@ async function recover(options, env = process.env) {
                 laneId: lane.laneId,
                 providerId: null,
                 state: lane.state,
+                outcome: 'spawnUnknown',
                 delivery: 'unknown',
                 repaired: [],
+                pendingOperation: 'spawn',
               };
             }
             const candidate = { ...lane, providerId: operation.providerId };
@@ -2184,8 +2213,10 @@ async function recover(options, env = process.env) {
               laneId: lane.laneId,
               providerId: lane.providerId,
               state: lane.state,
+              outcome: 'retirementFinished',
               delivery: 'confirmed',
               repaired,
+              pendingOperation: null,
             };
           }
           if (lane.state === 'retireRequested' || lane.state === 'archiveUnknown') {
@@ -2201,8 +2232,10 @@ async function recover(options, env = process.env) {
                 laneId: lane.laneId,
                 providerId: lane.providerId,
                 state: lane.state,
+                outcome: 'retirementPending',
                 delivery: 'unknown',
                 repaired: [],
+                pendingOperation: 'retire',
               };
             }
             lane = updateLane(options.repoRoot, lane.laneId, {
@@ -2235,8 +2268,10 @@ async function recover(options, env = process.env) {
               laneId: lane.laneId,
               providerId: lane.providerId,
               state: lane.state,
+              outcome: 'archiveVerified',
               delivery: 'confirmed',
               repaired,
+              pendingOperation: null,
             };
           }
           if (operation?.type === 'retire') {
@@ -2244,6 +2279,7 @@ async function recover(options, env = process.env) {
               laneId: lane.laneId,
               providerId: lane.providerId,
               state: lane.state,
+              outcome: 'retirementPending',
               delivery: 'unknown',
               pendingOperation: 'retire',
               repaired: [],
@@ -2271,8 +2307,10 @@ async function recover(options, env = process.env) {
                 laneId: lane.laneId,
                 providerId: lane.providerId,
                 state: lane.state,
+                outcome: `${pending.type}NotDelivered`,
                 delivery: 'notDelivered',
                 repaired: [`clearedUndispatched${pending.type[0].toUpperCase()}${pending.type.slice(1)}`],
+                pendingOperation: null,
               };
             }
             const pendingInspection = await inspectThread(client, lane);
@@ -2309,8 +2347,10 @@ async function recover(options, env = process.env) {
                   providerId: lane.providerId,
                   state: lane.state,
                   ...phaseFields('codex', pendingInspection.phase),
+                  outcome: 'steerInputReceipt',
                   delivery: 'confirmed',
                   repaired: ['steerInputReceipt'],
+                  pendingOperation: null,
                 };
               }
               const targetIsActive = pendingInspection.turn?.id === pending.details.expectedTurnId &&
@@ -2320,6 +2360,7 @@ async function recover(options, env = process.env) {
                   laneId: lane.laneId,
                   providerId: lane.providerId,
                   state: lane.state,
+                  outcome: 'steerUnknown',
                   delivery: 'unknown',
                   pendingOperation: 'steer',
                   repaired: [],
@@ -2338,8 +2379,10 @@ async function recover(options, env = process.env) {
                 providerId: lane.providerId,
                 state: lane.state,
                 ...phaseFields('codex', pendingInspection.phase),
+                outcome: 'steerInputAbsent',
                 delivery: 'notDelivered',
                 repaired: ['steerInputAbsent'],
+                pendingOperation: null,
               };
             }
             if (pending.type === 'interrupt') {
@@ -2350,6 +2393,7 @@ async function recover(options, env = process.env) {
                   laneId: lane.laneId,
                   providerId: lane.providerId,
                   state: lane.state,
+                  outcome: 'interruptUnknown',
                   delivery: 'unknown',
                   pendingOperation: 'interrupt',
                   repaired: [],
@@ -2370,8 +2414,10 @@ async function recover(options, env = process.env) {
                 providerId: lane.providerId,
                 state: lane.state,
                 ...phaseFields('codex', pendingInspection.phase),
+                outcome: 'interruptSettled',
                 delivery: 'confirmed',
                 repaired: ['interruptPostcondition'],
+                pendingOperation: null,
               };
             }
 
@@ -2396,14 +2442,17 @@ async function recover(options, env = process.env) {
                 providerId: lane.providerId,
                 state: lane.state,
                 ...phaseFields('codex', pendingInspection.phase),
+                outcome: 'resumeInputReceipt',
                 delivery: 'confirmed',
                 repaired: ['resumeInputReceipt'],
+                pendingOperation: null,
               };
             }
             return {
               laneId: lane.laneId,
               providerId: lane.providerId,
               state: lane.state,
+              outcome: 'resumeUnknown',
               delivery: 'unknown',
               pendingOperation: 'resume',
               repaired: [],
@@ -2454,8 +2503,10 @@ async function recover(options, env = process.env) {
                 laneId: lane.laneId,
                 providerId: lane.providerId,
                 state: lane.state,
+                outcome: 'spawnInputAbsent',
                 delivery: 'notDelivered',
                 repaired: ['spawnInputAbsent'],
+                pendingOperation: null,
               };
             }
           }
@@ -2501,15 +2552,24 @@ async function recover(options, env = process.env) {
               updateOperation(options.repoRoot, operation.operationId, patch, env);
             }
           }
+          // A turn found for a still-pending spawn is that spawn's own input
+          // receipt; found with nothing pending, it is just this call's normal
+          // re-observation of an already-materialized lane.
+          const outcome = spawnPending
+            ? (recoveredSpawnTurnId ? 'spawnInputReceipt' : 'spawnUnknown')
+            : inspected.turn
+              ? (repaired.includes('turnReceipt') ? 'turnObserved' : 'verified')
+              : 'spawnUnknown';
           return {
             laneId: lane.laneId,
             providerId: lane.providerId,
             state: lane.state,
             ...phaseFields('codex', inspected.phase),
+            outcome,
             delivery: spawnPending
               ? recoveredSpawnTurnId ? 'confirmed' : 'unknown'
               : inspected.turn ? 'confirmed' : 'unknown',
-            ...(spawnPending && !recoveredSpawnTurnId ? { pendingOperation: 'spawn' } : {}),
+            pendingOperation: spawnPending && !recoveredSpawnTurnId ? 'spawn' : null,
             repaired,
           };
         }, env);
@@ -2523,27 +2583,35 @@ async function recover(options, env = process.env) {
             code: error.code,
             providerRetired: true,
             cleanup: 'retryable',
+            delivery: 'unknown',
+            repaired: [],
+            pendingOperation: 'retire',
           });
           continue;
         }
+        const causeCode = error.details?.causeCode;
         recovered.push({
           laneId: initial.laneId,
           providerId: initial.providerId,
+          state: initial.state,
+          outcome: 'uncertain',
           error: error.message,
           code: error.code || 'RECOVERY_ERROR',
+          delivery: 'unknown',
+          repaired: [],
+          pendingOperation: null,
+          ...(causeCode ? { causeCode } : {}),
+          ...(error.details?.ownerAction ? { ownerAction: error.details.ownerAction } : {}),
         });
       }
     }
     return {
       version: 1,
-      ok: recovered.every((entry) =>
-        !entry.error && !entry.skipped && entry.delivery !== 'unknown' &&
-        entry.outcome !== 'cleanupRetryable'
-      ),
+      ok: reconcileOk(recovered),
       operation: 'recover',
       adapter: 'codex-app-server',
-      recovered,
-      receipt: { userAgent: initialized.userAgent },
+      results: recovered,
+      receipt: { providerConnection: 'verified' },
     };
   }, env);
 }
@@ -2558,12 +2626,21 @@ async function recoverLane(options, env = process.env) {
   return recover(options, env);
 }
 
+// Fleet reconciliation as the lane CLI's `reconcile` operation names it: the
+// same observation recover() performs, labeled and schema-projected for
+// `reconcile` rather than for the owner-facing no-input `recover` command
+// that also calls recover() directly through recoverLane above.
+async function reconcile(options, env = process.env) {
+  const result = await recover(options, env);
+  return { ...result, operation: 'reconcile' };
+}
+
 module.exports = {
   TransmogrifyError,
   descriptor,
   executionCapabilities,
   interrupt,
-  reconcile: recover,
+  reconcile,
   recover: recoverLane,
   resume,
   retire,

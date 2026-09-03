@@ -1171,7 +1171,7 @@ test('Codex recovery observes an unknown interrupt postcondition without replayi
     url: server.url,
   }, fixture.env);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.recovered[0].repaired, ['interruptPostcondition']);
+  assert.deepEqual(result.results[0].repaired, ['interruptPostcondition']);
   assert.equal(interruptCalls, 1);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
 });
@@ -1363,7 +1363,7 @@ test('Codex resume retry refuses replay until recovery observes the new turn', a
     url: server.url,
   }, fixture.env);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.recovered[0].repaired, ['resumeInputReceipt']);
+  assert.deepEqual(result.results[0].repaired, ['resumeInputReceipt']);
   assert.equal(turnStarts, 1);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
 });
@@ -1431,8 +1431,8 @@ test('Codex recovery closes a resume that never reached turn/start as input not 
 
   const result = await recover({ repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url }, fixture.env);
   assert.equal(result.ok, true);
-  assert.equal(result.recovered[0].delivery, 'notDelivered');
-  assert.deepEqual(result.recovered[0].repaired, ['clearedUndispatchedResume']);
+  assert.equal(result.results[0].delivery, 'notDelivered');
+  assert.deepEqual(result.results[0].repaired, ['clearedUndispatchedResume']);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
   assert.equal(listOperations(fixture.repoRoot, fixture.env)
     .find((entry) => entry.operationId === operation.operationId).state, 'notDelivered');
@@ -1461,8 +1461,8 @@ test('Codex recovery clears a terminal operation pointer without provider replay
     laneId: lane.laneId,
     url: server.url,
   }, fixture.env);
-  assert.deepEqual(result.recovered[0].repaired, ['terminalOperationPointer']);
-  assert.equal(result.recovered[0].delivery, 'confirmed');
+  assert.deepEqual(result.results[0].repaired, ['terminalOperationPointer']);
+  assert.equal(result.results[0].delivery, 'confirmed');
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
   assert.deepEqual(server.requests.map((request) => request.method), []);
 });
@@ -1501,9 +1501,9 @@ test('Codex recovery normalizes a providerless spawn whose failure became termin
     laneId,
     url: server.url,
   }, fixture.env);
-  assert.equal(result.recovered[0].state, 'failed');
-  assert.equal(result.recovered[0].delivery, 'notDelivered');
-  assert.deepEqual(result.recovered[0].repaired, [
+  assert.equal(result.results[0].state, 'failed');
+  assert.equal(result.results[0].delivery, 'notDelivered');
+  assert.deepEqual(result.results[0].repaired, [
     'failedSpawnState',
     'terminalOperationPointer',
   ]);
@@ -1564,7 +1564,7 @@ test('Codex recovery preserves the complete cwd receipt when binding a provider-
     laneId,
     url: server.url,
   }, fixture.env);
-  assert.equal(result.recovered[0].delivery, 'unknown');
+  assert.equal(result.results[0].delivery, 'unknown');
   const lane = listLanes(fixture.repoRoot, fixture.env)[0];
   assert.equal(lane.providerId, providerId);
   assert.equal(lane.ownership.creationReceipt.providerId, providerId);
@@ -1608,9 +1608,9 @@ test('Codex recovery normalizes a failed spawn after its terminal pointer was al
     laneId,
     url: server.url,
   }, fixture.env);
-  assert.equal(result.recovered[0].state, 'failed');
-  assert.equal(result.recovered[0].delivery, 'notDelivered');
-  assert.deepEqual(result.recovered[0].repaired, ['failedSpawnState']);
+  assert.equal(result.results[0].state, 'failed');
+  assert.equal(result.results[0].delivery, 'notDelivered');
+  assert.deepEqual(result.results[0].repaired, ['failedSpawnState']);
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'failed');
   assert.equal(pendingOperationForLane(fixture.repoRoot, laneId, fixture.env), null);
 
@@ -1619,9 +1619,9 @@ test('Codex recovery normalizes a failed spawn after its terminal pointer was al
     laneId,
     url: server.url,
   }, fixture.env);
-  assert.equal(steady.recovered[0].state, 'failed');
-  assert.equal(steady.recovered[0].delivery, 'notDelivered');
-  assert.deepEqual(steady.recovered[0].repaired, []);
+  assert.equal(steady.results[0].state, 'failed');
+  assert.equal(steady.results[0].delivery, 'notDelivered');
+  assert.deepEqual(steady.results[0].repaired, []);
   assert.deepEqual(
     server.requests.filter((request) => request.id !== undefined).map((request) => request.method),
     [],
@@ -1875,7 +1875,7 @@ test('Codex recovery refuses a wrong-seat archived row without cleanup', async (
   }, fixture.env);
 
   assert.equal(result.ok, false);
-  assert.equal(result.recovered[0].code, 'OWNERSHIP_MISMATCH');
+  assert.equal(result.results[0].code, 'OWNERSHIP_MISMATCH');
   assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'archiveUnknown');
   assert.equal(fs.existsSync(fixture.seat), true);
   assert.equal(
@@ -1941,8 +1941,8 @@ test('Codex archive uncertainty preserves its managed worktree and branch withou
     archiveVerifyAttempts: 1,
   }, fixture.env);
   assert.equal(recovered.ok, false);
-  assert.equal(recovered.recovered[0].state, 'archiveUnknown');
-  assert.equal(recovered.recovered[0].delivery, 'unknown');
+  assert.equal(recovered.results[0].state, 'archiveUnknown');
+  assert.equal(recovered.results[0].delivery, 'unknown');
   assert.equal(archiveCalls, 1);
   assert.equal(fs.existsSync(seat.path), true);
   assert.doesNotThrow(() => execFileSync(
@@ -2158,10 +2158,10 @@ test('Codex retire leaves a transient local cleanup failure retryable without re
     url: server.url,
   }, fixture.env);
   assert.equal(reconciled.ok, false, JSON.stringify(reconciled));
-  assert.equal(reconciled.recovered[0].outcome, 'cleanupRetryable');
-  assert.equal(reconciled.recovered[0].code, 'CLEANUP_RETRYABLE');
-  assert.equal(reconciled.recovered[0].providerRetired, true);
-  assert.equal(reconciled.recovered[0].cleanup, 'retryable');
+  assert.equal(reconciled.results[0].outcome, 'cleanupRetryable');
+  assert.equal(reconciled.results[0].code, 'CLEANUP_RETRYABLE');
+  assert.equal(reconciled.results[0].providerRetired, true);
+  assert.equal(reconciled.results[0].cleanup, 'retryable');
   assert.equal(archiveCalls, 1);
   const requestsBeforeRetry = server.requests.length;
   execFileSync('git', ['-C', fixture.repoRoot, 'worktree', 'unlock', '--', seat.path]);
@@ -2486,8 +2486,9 @@ test('Codex aggregate recovery reports failure when an owned lane belongs to ano
 
   const result = await recover({ repoRoot: fixture.repoRoot, url: server.url }, fixture.env);
   assert.equal(result.ok, false);
-  assert.equal(result.recovered.length, 1);
-  assert.equal(result.recovered[0].skipped, 'differentRuntime');
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].outcome, 'differentRuntime');
+  assert.equal(result.results[0].delivery, 'unknown');
   assert.equal(server.requests.length, 0);
 });
 
@@ -2515,7 +2516,7 @@ test('Codex recovery does not complete or dispatch an unstarted pending retireme
     url: server.url,
   }, fixture.env);
   assert.equal(recovered.ok, false);
-  assert.equal(recovered.recovered[0].pendingOperation, 'retire');
+  assert.equal(recovered.results[0].pendingOperation, 'retire');
   assert.deepEqual(server.requests.map((request) => request.method), ['initialize']);
   assert.equal(
     pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).operationId,
@@ -2583,7 +2584,7 @@ test('Codex recovery repairs a transport-unknown first turn without replaying in
   mode = 'recover';
   const result = await recover({ repoRoot: fixture.repoRoot, url: server.url }, fixture.env);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.recovered[0].repaired.sort(), ['name', 'spawnInputReceipt']);
+  assert.deepEqual(result.results[0].repaired.sort(), ['name', 'spawnInputReceipt']);
   assert.equal(turnStarts, 1);
   assert.equal(nameSets, 1);
   const lane = listLanes(fixture.repoRoot, fixture.env)[0];
@@ -2633,9 +2634,9 @@ test('Codex recovery keeps a spawn absence pending before its grace period elaps
     clock: () => Date.parse(turnDispatchStartedAt) + 59_000,
   }, fixture.env);
   assert.equal(result.ok, false);
-  assert.equal(result.recovered[0].delivery, 'unknown');
-  assert.equal(result.recovered[0].pendingOperation, 'spawn');
-  assert.deepEqual(result.recovered[0].repaired, []);
+  assert.equal(result.results[0].delivery, 'unknown');
+  assert.equal(result.results[0].pendingOperation, 'spawn');
+  assert.deepEqual(result.results[0].repaired, []);
   const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
   assert.equal(pending.operationId, operation.operationId);
   assert.equal(pending.state, 'turnRequestDispatched');
@@ -2665,9 +2666,9 @@ test('Codex recovery settles an elapsed spawn absence as not delivered without d
         clock: () => Date.parse(turnDispatchStartedAt) + 61_000,
       }, fixture.env);
       assert.equal(result.ok, true);
-      assert.equal(result.recovered[0].delivery, 'notDelivered');
-      assert.deepEqual(result.recovered[0].repaired, ['spawnInputAbsent']);
-      assert.equal(result.recovered[0].state, 'failed');
+      assert.equal(result.results[0].delivery, 'notDelivered');
+      assert.deepEqual(result.results[0].repaired, ['spawnInputAbsent']);
+      assert.equal(result.results[0].state, 'failed');
       assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].state, 'failed');
       assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
       const settled = listOperations(fixture.repoRoot, fixture.env)
@@ -2703,9 +2704,9 @@ test('Codex recovery keeps a spawn absence pending while a turn is in progress',
     clock: () => Date.parse(turnDispatchStartedAt) + 3_600_000,
   }, fixture.env);
   assert.equal(result.ok, false);
-  assert.equal(result.recovered[0].delivery, 'unknown');
-  assert.equal(result.recovered[0].pendingOperation, 'spawn');
-  assert.deepEqual(result.recovered[0].repaired, []);
+  assert.equal(result.results[0].delivery, 'unknown');
+  assert.equal(result.results[0].pendingOperation, 'spawn');
+  assert.deepEqual(result.results[0].repaired, []);
   const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
   assert.equal(pending.operationId, operation.operationId);
   assert.equal(pending.state, 'unknown');
@@ -2756,8 +2757,8 @@ test('Codex recovery settles a pending steer as complete when its persisted rece
     url: server.url,
   }, fixture.env);
   assert.equal(result.ok, true);
-  assert.equal(result.recovered[0].delivery, 'confirmed');
-  assert.deepEqual(result.recovered[0].repaired, ['steerInputReceipt']);
+  assert.equal(result.results[0].delivery, 'confirmed');
+  assert.deepEqual(result.results[0].repaired, ['steerInputReceipt']);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
   const settled = listOperations(fixture.repoRoot, fixture.env)
     .find((entry) => entry.operationId === operation.operationId);
@@ -2798,8 +2799,8 @@ test('Codex recovery settles a pending steer as not delivered once its target tu
     url: server.url,
   }, fixture.env);
   assert.equal(result.ok, true);
-  assert.equal(result.recovered[0].delivery, 'notDelivered');
-  assert.deepEqual(result.recovered[0].repaired, ['steerInputAbsent']);
+  assert.equal(result.results[0].delivery, 'notDelivered');
+  assert.deepEqual(result.results[0].repaired, ['steerInputAbsent']);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
   const settled = listOperations(fixture.repoRoot, fixture.env)
     .find((entry) => entry.operationId === operation.operationId);
@@ -2841,9 +2842,9 @@ test('Codex recovery keeps a pending steer unknown while its target turn is stil
     url: server.url,
   }, fixture.env);
   assert.equal(result.ok, false);
-  assert.equal(result.recovered[0].delivery, 'unknown');
-  assert.equal(result.recovered[0].pendingOperation, 'steer');
-  assert.deepEqual(result.recovered[0].repaired, []);
+  assert.equal(result.results[0].delivery, 'unknown');
+  assert.equal(result.results[0].pendingOperation, 'steer');
+  assert.deepEqual(result.results[0].repaired, []);
   const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
   assert.equal(pending.operationId, operation.operationId);
   assert.equal(pending.state, 'unknown');
@@ -2894,8 +2895,8 @@ test('Codex recovery fails closed when a persisted steer receipt names a differe
     url: server.url,
   }, fixture.env);
   assert.equal(result.ok, false);
-  assert.equal(result.recovered[0].code, 'PROTOCOL_ERROR');
-  assert.match(result.recovered[0].error, /different turn/);
+  assert.equal(result.results[0].code, 'PROTOCOL_ERROR');
+  assert.match(result.results[0].error, /different turn/);
   const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
   assert.equal(pending.operationId, operation.operationId);
   assert.equal(pending.state, 'unknown');

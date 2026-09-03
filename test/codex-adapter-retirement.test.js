@@ -66,7 +66,7 @@ test('Codex retire closes an unresolved first-turn spawn journal without replayi
   assert.equal(lane.state, 'deliveryUnknown');
   const recovered = await recover({ repoRoot: fixture.repoRoot, url: server.url }, fixture.env);
   assert.equal(recovered.ok, false);
-  assert.equal(recovered.recovered[0].pendingOperation, 'spawn');
+  assert.equal(recovered.results[0].pendingOperation, 'spawn');
   await assert.rejects(() => retire({
     repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url,
   }, fixture.env), (error) => error.code === 'USAGE_ERROR');

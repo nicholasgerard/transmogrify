@@ -70,7 +70,7 @@ const VISIBILITY = {
 };
 const RECONCILE_ENTRY = {
   laneId: true, state: true, phase: true, providerPhase: true, outcome: true, delivery: true,
-  repaired: true, skipped: true, pendingOperation: true, code: true, causeCode: true, ownerAction: true,
+  repaired: true, pendingOperation: true, code: true, causeCode: true, ownerAction: true,
   error: { code: true },
 };
 const PROFILE_FIELDS = { requestedProfile: true, resolvedProfile: true, observedProfile: true };
@@ -111,7 +111,7 @@ const SCHEMAS = Object.freeze({
   }),
   reconcile: {
     version: true, ok: true, operation: true, adapter: true, results: RECONCILE_ENTRY,
-    recovered: RECONCILE_ENTRY, receipt: { providerConnection: true },
+    receipt: { providerConnection: true },
   },
   abandon: {
     version: true, ok: true, operation: true, laneId: true, providerOutcome: true,
