@@ -18,17 +18,22 @@ from "still going".
 2. **The watcher** (`transmogrify.js watch`, one process per parent context).
    Started detached by `spawn` when it is not already running, it observes
    every outstanding child of that parent through the same seat-verified
-   provider reads `wait` uses (every two seconds while a child is working,
-   every five otherwise), records the same durable events, and exits after
-   six idle hours once every child is settled and acknowledged. A single
+   provider reads `wait` uses, records the same durable events, and exits
+   fifteen minutes after the last child settled and was acknowledged. It
+   reads a working child every three seconds, an idle child every thirty,
+   and a parent with nothing outstanding once a minute; a parent command
+   that changes a child (spawn, steer, recover, interrupt, stop, retire)
+   nudges it to read that child at once, so an idle child is never polled
+   for a change only its parent can cause. A single
    instance per parent is enforced by a pid-and-birth record; a stale
    record is replaced. A watcher started after a stop wakes the parent once
    more for every event still unacknowledged, never for acknowledged ones. Subscribing to the app-server's own
    `thread/status/changed` notifications instead of polling is a later
    optimization, not a semantic change.
-3. **The wake** (per host). When the watcher records an event worth the
-   parent's attention it delivers a short fixed message into the parent's
-   own session, so the parent's model is re-invoked without polling:
+3. **The wake** (per host). When a round records events worth the
+   parent's attention it delivers one short fixed message naming all of
+   them into the parent's own session, so the parent's model is re-invoked
+   once per round, never once per event, and without polling:
    - Claude Code parent: a peer follow-up to the parent session's own
      Remote Control bridge, the same public command the adapter uses to
      steer a Claude child. The session sees "Another Claude session sent a
@@ -60,6 +65,14 @@ from "still going".
 Every layer is observation-based: the watcher and the wake never trust a
 child's own claim of completion. A child that says "done" is still observed
 through the provider before any event exists.
+
+An observation that only confirms the parent's own completed command (the
+lane's newest journal is a `retire`, `stop`, or `interrupt` finished within
+the last two minutes) is recorded already acknowledged: the command's own
+result was the parent's receipt, and waking it again for the same fact
+would cost a model turn for nothing. Every other event waits for the
+parent's `ack`, one at a time or `--through` the highest sequence a wake
+named.
 
 Two guards keep a continuous observer from racing the parent's own commands.
 A spawn journal still in a pre-dispatch state (`planned`, `seatReady`,
@@ -117,6 +130,33 @@ carries the lane id, the dispatch id, and the exact command to run next
   parent as `unattendedChildren`.
 - The watcher writes only to the parent's own recorded session or thread,
   never to any other, and every message is the fixed template above.
+- A wake the channel refused is retried on the next rounds up to three
+  times; a wake that may have landed is never resent. The durable event
+  remains either way.
+
+## Cost model
+
+What consumes model usage: only the parent's turns. Each wake re-invokes the
+parent's model once (a Claude Code parent through a peer message, a Codex
+parent through a turn on its own thread), and each `wait` that returns does
+the same. The watcher, the observation reads, and the wake delivery consume
+no model tokens on either side: they are a Node process, provider reads
+(`thread/read`, `thread/turns/list`, the Claude census and transcript), and
+one message write. A child is never made to do more work by being observed.
+
+What consumes machine time, measured on 2026-09-03 with the pinned CLIs: a
+Claude runtime measurement (two digests of the 199 MB CLI plus two CLI
+calls) about 0.5 s; one Claude census (`claude agents --json --all`) about
+0.3 s; one Codex read (a fresh loopback connection plus two calls) well
+under 0.1 s; one registry or journal read about 20 ms. The levers, all in
+place: one wake per round instead of one per event; the parent's own
+completed commands acknowledged at observation; polling only while a child
+is working, with idle children read on the parent's nudge; settled children
+skipped; a short idle exit. Still open, in order of payoff: reuse the
+runtime measurement and census across a round instead of per child;
+subscribe to the app-server's own notifications for Codex children instead
+of polling; let a Claude child signal its turn end through a session hook
+(`--settings` on spawn) so the watcher reads it only then.
 
 ## Receipts and open experiments
 

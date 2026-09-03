@@ -266,14 +266,18 @@ node "$SKILL_ROOT/scripts/lane.js" wait \
   --parent-context-file "$PARENT_CONTEXT" --repo-root "$REPO_ROOT" \
   --until complete --timeout-ms 1800000
 node "$SKILL_ROOT/scripts/lane.js" ack \
-  --parent-context-file "$PARENT_CONTEXT" --event "$EVENT_ID"
+  --parent-context-file "$PARENT_CONTEXT" --through "$SEQUENCE"   # or --event "$EVENT_ID"
 ```
 
-Spawn started a watcher for this parent. It observes every child every few
-seconds and, when the parent has a wake channel, delivers a short message
-into this session naming the lane, the event kind, and the two commands to
-run (`wait --timeout-ms 0`, then `ack`). Treat that message as the signal to
-run them; it never carries child output. When `wake.channel` is `none`, or
+Spawn started a watcher for this parent. It reads a working child every few
+seconds, an idle child rarely (your own steer or recover nudges it), and,
+when the parent has a wake channel, delivers one short message per round
+into this session naming every child event of that round, its kind, and the
+two commands to run (`wait --timeout-ms 0`, then `ack --through` the highest
+sequence named). Treat that message as the signal to run them; it never
+carries child output. An observation that only confirms your own completed
+retire, stop, or interrupt is recorded already acknowledged and never wakes
+you. When `wake.channel` is `none`, or
 as a fallback at any time, run the wait above: on a Claude Code host as a
 background command so its return re-invokes you, on a Codex host in the
 foreground. Every call with a positive timeout observes every child first and returns all

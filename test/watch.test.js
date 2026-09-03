@@ -176,3 +176,61 @@ test('--stop signals only a watcher whose recorded birth still matches and clear
   const again = await main(['--parent-context-file', context.file, '--stop'], fixture.env, deps);
   assert.equal(again.outcome, 'notRunning');
 });
+
+test('watchOnce sends one wake for every fresh event of a round and names them all', async (t) => {
+  const { fixture, context, dispatch } = parentWithChild(t);
+  const delivered = [];
+  const deliver = async (wake, text, options) => {
+    delivered.push({ text, clientUserMessageId: options.clientUserMessageId });
+    return { channel: 'claude-bridge', delivered: true };
+  };
+  const observe = async () => {
+    recordEvent({ dispatchId: dispatch.dispatchId, type: 'child.turn-completed', fingerprint: 'turn:1', data: { state: 'idle' } }, fixture.env);
+    recordEvent({ dispatchId: dispatch.dispatchId, type: 'child.needs-attention', fingerprint: 'attention:1', data: { state: 'needs-attention' } }, fixture.env);
+    return { dispatches: [dispatch], errors: [], observed: [] };
+  };
+  const state = { wakedEventIds: [] };
+  const pass = await watchOnce(context, {}, fixture.env, state, { observe, deliver });
+  assert.equal(delivered.length, 1, 'one wake per round');
+  assert.equal(pass.wakes.length, 2);
+  assert.deepEqual(pass.wakes.map((wake) => [wake.delivered, wake.batch]), [[true, 2], [true, 2]]);
+  assert.match(delivered[0].text, /^\[transmogrify\] 2 child events: /);
+  assert.match(delivered[0].text, /ack --parent-context-file "[^"]+" --through 2$/m);
+  assert.equal(delivered[0].clientUserMessageId, pass.wakes[1].eventId);
+  assert.equal(state.wakedEventIds.length, 2);
+});
+
+test('a refused wake is retried on later rounds a bounded number of times; an uncertain one never is', async (t) => {
+  const { fixture, context, dispatch } = parentWithChild(t);
+  let attempts = 0;
+  const refusing = async () => { attempts += 1; throw Object.assign(new Error('bridge refused'), { code: 'WAKE_UNDELIVERED' }); };
+  const observe = async () => {
+    recordEvent({ dispatchId: dispatch.dispatchId, type: 'child.turn-completed', fingerprint: 'turn:1', data: { state: 'idle' } }, fixture.env);
+    return { dispatches: [dispatch], errors: [], observed: [] };
+  };
+  const state = { wakedEventIds: [] };
+  for (let round = 1; round <= 4; round += 1) {
+    const pass = await watchOnce(context, {}, fixture.env, state, { observe, deliver: refusing });
+    if (round < 3) {
+      assert.deepEqual(pass.wakes.map((wake) => [wake.delivered, wake.code, wake.attempts]), [[false, 'WAKE_UNDELIVERED', round]]);
+      assert.equal(state.wakedEventIds.length, 0, 'still owed a wake');
+    } else if (round === 3) {
+      assert.equal(pass.wakes[0].attempts, 3);
+      assert.equal(state.wakedEventIds.length, 1, 'given up after the last attempt');
+    } else {
+      assert.equal(pass.wakes.length, 0, 'never retried once given up');
+    }
+  }
+  assert.equal(attempts, 3);
+
+  const uncertainChild = parentWithChild(t);
+  const uncertain = async () => { throw Object.assign(new Error('maybe landed'), { code: 'WAKE_UNCERTAIN' }); };
+  const observeOther = async () => {
+    recordEvent({ dispatchId: uncertainChild.dispatch.dispatchId, type: 'child.turn-completed', fingerprint: 'turn:1', data: { state: 'idle' } }, uncertainChild.fixture.env);
+    return { dispatches: [uncertainChild.dispatch], errors: [], observed: [] };
+  };
+  const otherState = { wakedEventIds: [] };
+  const first = await watchOnce(uncertainChild.context, {}, uncertainChild.fixture.env, otherState, { observe: observeOther, deliver: uncertain });
+  assert.deepEqual(first.wakes.map((wake) => wake.code), ['WAKE_UNCERTAIN']);
+  assert.equal(otherState.wakedEventIds.length, 1, 'a wake that may have landed is never resent');
+});

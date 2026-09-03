@@ -7,7 +7,8 @@
 // with the same fingerprints.
 
 const {
-  EVENT_KINDS, failDispatch, kindForEvent, kindSatisfies, listDispatches, recordEvent, recordObservation,
+  EVENT_KINDS, acknowledgeEvent, failDispatch, kindForEvent, kindSatisfies, listDispatches, listEvents,
+  recordEvent, recordObservation,
 } = require('./dispatch');
 const {
   listOperations, pendingOperationForLane, processMatches, requireOwnedLane, settleTerminalLaneOperationPointer,
@@ -36,6 +37,41 @@ const RETIRE_IN_FLIGHT_GRACE_MS = 2 * 60 * 1000;
 // by a spawn that died before reserving one (the same bound spawnInFlight
 // gives an unrecorded launcher).
 const UNREGISTERED_SPAWN_GRACE_MS = SPAWN_IN_FLIGHT_GRACE_MS;
+// Lane states after which a child produces no further observation of its own.
+const SETTLED_LANE_STATES = new Set(['archivedVerified', 'cleanupEligible', 'worktreeRemoved', 'failed', 'stopped']);
+// An observation that only confirms what the parent's own completed command
+// did (a retire, stop, or interrupt finished this recently) is recorded
+// already acknowledged: the command's own result was the parent's receipt,
+// and waking it again for the same fact costs a model turn for nothing.
+const OWN_COMMAND_WINDOW_MS = 2 * 60 * 1000;
+const OWN_COMMAND_TYPES = new Set(['retire', 'stop', 'interrupt']);
+const OWN_COMMAND_EVENTS = new Set(['child.retired', 'child.stopped', 'child.turn-completed', 'child.idle-observed']);
+
+// The lane's newest journal when it is a completed retire, stop, or interrupt
+// younger than the own-command window; null otherwise.
+function recentOwnCommand(repoRoot, laneId, env, now = Date.now()) {
+  const newest = listOperations(repoRoot, env)
+    .filter((operation) => operation.laneId === laneId)
+    .sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0))[0];
+  if (!newest || !OWN_COMMAND_TYPES.has(newest.type) || newest.state !== 'complete') return null;
+  const ageMs = now - Date.parse(newest.updatedAt || 0);
+  return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= OWN_COMMAND_WINDOW_MS ? newest : null;
+}
+
+// Children that still need the parent: any dispatch with an unacknowledged
+// event, or whose lane is neither retired nor ended (a lane that cannot be
+// resolved counts, so a broken record is never silently dropped). A failed
+// dispatch, or a settled lane whose events are acknowledged, no longer counts.
+function outstandingDispatches(context, env, dispatches = listDispatches(context, env)) {
+  const pending = listEvents(context, {}, env);
+  return dispatches.filter((dispatch) => {
+    if (pending.some((event) => event.dispatchId === dispatch.dispatchId)) return true;
+    let lane = null;
+    try { lane = resolveDispatchLane(dispatch, env).lane; } catch { return true; }
+    if (!lane) return dispatch.state !== 'failed';
+    return !SETTLED_LANE_STATES.has(lane.state);
+  });
+}
 
 function retireInFlight(pending) {
   if (!pending || pending.type !== 'retire' || !TRANSIENT_RETIRE_STATES.has(pending.state)) return false;
@@ -305,7 +341,7 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
     lane = laneForDispatch(dispatch, env);
   }
   let localEvent = localEventForLane(dispatch, lane, env);
-  if (localEvent) return { lane, event: localEvent, phase: localEvent.data?.state ?? null };
+  if (localEvent) return ownCommandResult(dispatch, lane, localEvent, localEvent.data?.state ?? null, env);
   let pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
   if (pending?.type === 'spawn' && spawnInFlight(pending, values.processDependencies)) {
     // The launching command is still writing this journal; report nothing
@@ -322,7 +358,7 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
     );
     lane = await reconcilePendingSpawnDispatch(dispatch, lane, values, env, spawnBudget);
     localEvent = localEventForLane(dispatch, lane, env);
-    if (localEvent) return { lane, event: localEvent, phase: localEvent.data?.state ?? null };
+    if (localEvent) return ownCommandResult(dispatch, lane, localEvent, localEvent.data?.state ?? null, env);
     pending = pendingOperationForLane(dispatch.child.repoRoot, lane.laneId, env);
     if (pending?.type === 'spawn') {
       // The spawn journal is still open after non-replaying reconciliation:
@@ -353,6 +389,10 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
     claudeBin: values['claude-bin'],
     timeoutMs: requestBudget,
     commandTimeoutMs: requestBudget,
+    // A long-running observer supplies a surface and client factory that
+    // cache the runtime measurement and the census across children.
+    ...(values.surface ? { surface: values.surface } : {}),
+    ...(values.clientFactory ? { clientFactory: values.clientFactory } : {}),
   };
   const provider = providerForBackend(lane.backend);
   const result = await provider.adapter.status(options, env);
@@ -369,7 +409,16 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
       ...(classified.status ? { status: classified.status } : {}),
     } : {},
   }, env);
-  return { lane, event: observation.event, phase: classified.phase };
+  return ownCommandResult(dispatch, lane, observation.event, classified.phase, env);
+}
+
+// Tag an observation result with the parent's own completed command when the
+// event only confirms it; observeParentChildren acknowledges such events.
+function ownCommandResult(dispatch, lane, event, phase, env) {
+  const result = { lane, event, phase };
+  if (!event || !OWN_COMMAND_EVENTS.has(event.type)) return result;
+  const own = recentOwnCommand(dispatch.child.repoRoot, lane.laneId, env);
+  return own ? { ...result, ownCommand: { type: own.type, operationId: own.operationId } } : result;
 }
 
 // One observation round over every outstanding child, collecting per-child
@@ -377,7 +426,7 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
 // the durable event store is read afterwards, so one busy child cannot starve
 // a later child's event.
 async function observeParentChildren(context, values, env, deadline) {
-  const dispatches = listDispatches(context, env)
+  const dispatches = (values.dispatches || listDispatches(context, env))
     .filter((dispatch) => !values['repo-root'] || dispatch.child.repoRoot === values['repo-root']);
   const errors = [];
   const observed = [];
@@ -386,11 +435,17 @@ async function observeParentChildren(context, values, env, deadline) {
     const dispatch = dispatches[index];
     try {
       const result = await observeDispatch(dispatch, values, env, deadline, dispatches.length - index);
+      let acknowledged = false;
+      if (result.event && result.ownCommand) {
+        acknowledgeEvent(context, result.event.eventId, env);
+        acknowledged = true;
+      }
       observed.push({
         dispatchId: dispatch.dispatchId,
         laneId: dispatch.child.laneId,
         phase: result.phase,
         eventType: result.event?.type ?? null,
+        ...(acknowledged ? { acknowledged: true, ownCommand: result.ownCommand.type } : {}),
       });
     } catch (error) {
       errors.push({ dispatchId: dispatch.dispatchId, code: error.code || 'OBSERVATION_FAILED' });
@@ -401,8 +456,12 @@ async function observeParentChildren(context, values, env, deadline) {
 
 module.exports = {
   EVENT_KINDS,
+  OWN_COMMAND_WINDOW_MS,
   RETIRE_IN_FLIGHT_GRACE_MS,
+  SETTLED_LANE_STATES,
   SPAWN_IN_FLIGHT_GRACE_MS,
+  outstandingDispatches,
+  recentOwnCommand,
   classifyObservation,
   retireInFlight,
   spawnInFlight,

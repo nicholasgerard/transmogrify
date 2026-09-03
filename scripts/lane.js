@@ -16,7 +16,7 @@ const {
 } = require('./lib/providers');
 const { observeParentChildren, resolveDispatchLane } = require('./lib/observe');
 const { discoverClaudeWake, discoverCodexWake } = require('./lib/wake');
-const { ensureWatcher, runningWatcher } = require('./watch');
+const { ensureWatcher, runningWatcher, nudgeWatcher } = require('./watch');
 const { sleep } = require('./lib/async');
 const {
   WAIT_THRESHOLDS,
@@ -71,7 +71,7 @@ operations:
   wait       --parent-context-file <absolute> [--after <sequence>] [--timeout-ms <0..1800000>]
              [--until any|complete|terminal]
              [--url <loopback-ws-url>] [--claude-bin <absolute-path>]
-  ack        --parent-context-file <absolute> --event <event-id>
+  ack        --parent-context-file <absolute> (--event <event-id> | --through <sequence>)
   steer      --lane <lane-id> (--input <text> | --input-file <absolute|->)
   status     --lane <lane-id>
   interrupt  --lane <lane-id>                         Codex only
@@ -137,7 +137,7 @@ const OPERATION_OPTIONS = {
   wait: new Set([
     'repo-root', 'parent-context-file', 'after', 'timeout-ms', 'until', 'url', 'claude-bin',
   ]),
-  ack: new Set(['parent-context-file', 'event']),
+  ack: new Set(['parent-context-file', 'event', 'through']),
   steer: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin', 'timeout-ms']),
   status: new Set(['repo-root', 'lane', 'url', 'claude-bin', 'timeout-ms']),
   abandon: new Set(['repo-root', 'lane', 'reason']),
@@ -498,6 +498,7 @@ async function main(argv, env = process.env) {
       'self-nonce': { type: 'string' },
       'parent-context-file': { type: 'string' },
       event: { type: 'string' },
+    through: { type: 'string' },
       after: { type: 'string' },
       until: { type: 'string' },
       observe: { type: 'boolean' },
@@ -654,7 +655,24 @@ async function main(argv, env = process.env) {
   }
   if (operation === 'wait') return waitForParentEvent(parentContext, values, env);
   if (operation === 'ack') {
-    if (!values.event) usage('ack requires --event');
+    if (values.through !== undefined) {
+      // Acknowledge every pending event the parent has seen, by the highest
+      // sequence a wait or wake named; events recorded after it stay pending.
+      if (values.event !== undefined) usage('ack takes --event or --through, not both');
+      if (!/^[1-9][0-9]*$/.test(values.through)) usage('--through must be a positive integer sequence');
+      const through = Number(values.through);
+      const seen = listEvents(parentContext, {}, env).filter((event) => event.sequence <= through);
+      const acknowledged = seen.map((event) => acknowledgeEvent(parentContext, event.eventId, env));
+      return {
+        version: 1,
+        ok: true,
+        operation: 'ack',
+        through,
+        acknowledged: acknowledged.map((entry) => entry.eventId),
+        count: acknowledged.length,
+      };
+    }
+    if (!values.event) usage('ack requires --event or --through');
     const acknowledgement = acknowledgeEvent(parentContext, values.event, env);
     return {
       version: 1,
@@ -662,6 +680,8 @@ async function main(argv, env = process.env) {
       operation: 'ack',
       eventId: acknowledgement.eventId,
       acknowledgedAt: acknowledgement.acknowledgedAt,
+      acknowledged: [acknowledgement.eventId],
+      count: 1,
     };
   }
   const repoRoot = values['repo-root'] || env.REPO_ROOT;
@@ -700,10 +720,11 @@ async function main(argv, env = process.env) {
     const watcher = values['no-watch'] === true || env.TRANSMOGRIFY_WATCH === 'off'
       ? { running: false, started: false }
       : ensureWatcher(values['parent-context-file'], { repoRoot, url: values.url, claudeBin: values['claude-bin'] }, env);
+    nudgeWatcher(parentContext.parent.parentRef, env);
     const wakeChannel = parentContext.parent.wake?.channel ?? 'none';
     const nextAction = wakeChannel === 'none'
       ? `no wake channel is recorded for this parent: keep \`lane.js wait --parent-context-file "${values['parent-context-file']}" --until complete --timeout-ms 1800000\` running (in the background on a Claude Code host) and acknowledge each event`
-      : `the watcher will wake this session through its ${wakeChannel} when the child completes, needs attention, or ends; on each wake run \`lane.js wait --parent-context-file "${values['parent-context-file']}" --timeout-ms 0\` and acknowledge the event`;
+      : `the watcher will wake this session through its ${wakeChannel} when the child completes, needs attention, or ends; on each wake run \`lane.js wait --parent-context-file "${values['parent-context-file']}" --timeout-ms 0\` and acknowledge the events it names with \`ack --through <sequence>\``;
     return { ...spawned, watcher, nextAction };
   }
   if (operation === 'reconcile') {
@@ -721,7 +742,21 @@ async function main(argv, env = process.env) {
   if (operation === 'recover' && input !== undefined && !provider.recoverAcceptsInput) {
     usage(`--input is not accepted by ${provider.target} recovery`);
   }
-  return provider.adapter[operation](options, env);
+  const result = await provider.adapter[operation](options, env);
+  // A command that changed a child tells the parent's watcher to look now,
+  // so an idle child is not polled while it sits and is read promptly once
+  // the parent has sent it something.
+  if (operation !== 'status') nudgeParentWatcher(repoRoot, values.lane, env);
+  return result;
+}
+
+function nudgeParentWatcher(repoRoot, laneId, env) {
+  try {
+    const parentRef = requireOwnedLane(repoRoot, laneId, env).lineage?.parentRef;
+    if (parentRef) nudgeWatcher(parentRef, env);
+  } catch {
+    // A lane without lineage, or already removed, has no watcher to nudge.
+  }
 }
 
 if (require.main === module) {

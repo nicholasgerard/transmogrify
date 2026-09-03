@@ -189,22 +189,34 @@ async function discoverCodexWake(options, env = process.env) {
   }
 }
 
-// The fixed wake template. It names the child, the kind of event, and the
-// exact next command; it never carries child output, prompts, or paths.
-function wakeMessage(event, options = {}) {
-  const kindText = {
+// The fixed wake template for one event or a batch. It names each child and
+// the kind of its event, and the exact next commands; it never carries child
+// output, prompts, or paths. A batch is acknowledged in one command by the
+// highest sequence it names.
+function wakeMessage(events, options = {}) {
+  const batch = Array.isArray(events) ? events : [events];
+  const kindText = (event) => ({
     complete: 'completed its task and is idle (harvest now, steer again, or retire)',
     attention: 'needs your attention',
     terminal: `reached a terminal state (${String(event.type || '').replace(/^child\./, '')})`,
     progress: 'reported progress',
-  }[event.kind] || 'changed state';
+  }[event.kind] || 'changed state');
   const contextFile = options.parentContextFile ? ` --parent-context-file "${options.parentContextFile}"` : '';
-  return [
-    `[transmogrify] child lane ${event.child?.laneId || 'unknown'} ${kindText}.`,
-    `Event ${event.type} (kind ${event.kind}), dispatch ${event.dispatchId}, sequence ${event.sequence}.`,
-    `Handle it, then acknowledge: node "$SKILL_ROOT/scripts/lane.js" wait${contextFile} --timeout-ms 0` +
-      ` && node "$SKILL_ROOT/scripts/lane.js" ack${contextFile} --event ${event.eventId}`,
-  ].join('\n');
+  const sequences = batch.map((event) => event.sequence).filter(Number.isFinite);
+  const through = sequences.length > 0 ? Math.max(...sequences) : null;
+  const lines = batch.length === 1
+    ? [`[transmogrify] child lane ${batch[0].child?.laneId || 'unknown'} ${kindText(batch[0])}.`]
+    : [`[transmogrify] ${batch.length} child events: ` + batch.map((event) =>
+      `lane ${event.child?.laneId || 'unknown'} ${kindText(event)}`).join('; ') + '.'];
+  for (const event of batch) {
+    lines.push(`Event ${event.type} (kind ${event.kind}), dispatch ${event.dispatchId}, sequence ${event.sequence}.`);
+  }
+  const ack = through === null
+    ? `ack${contextFile} --event ${batch[batch.length - 1].eventId}`
+    : `ack${contextFile} --through ${through}`;
+  lines.push(`Handle ${batch.length === 1 ? 'it' : 'them'}, then acknowledge: node "$SKILL_ROOT/scripts/lane.js" wait${contextFile} --timeout-ms 0` +
+    ` && node "$SKILL_ROOT/scripts/lane.js" ${ack}`);
+  return lines.join('\n');
 }
 
 // Deliver one wake into the parent's recorded channel. Claude: the public
@@ -245,7 +257,9 @@ async function deliverWake(wake, text, options = {}, env = process.env) {
       const read = await client.call('thread/read', { threadId: wake.threadId, includeTurns: false });
       const thread = read?.thread || read;
       if (thread?.cwd !== wake.cwd) throw new WakeError('WAKE_UNDELIVERED', 'parent thread cwd changed', { cause: 'cwd-mismatch' });
-      const turns = await client.call('thread/turns/list', { threadId: wake.threadId, limit: 1 }).catch(() => null);
+      const turns = await client.call('thread/turns/list', {
+        threadId: wake.threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded',
+      }).catch(() => null);
       const newest = turns?.data?.[0];
       const input = [{ type: 'text', text }];
       if (newest?.status === 'inProgress') {

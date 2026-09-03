@@ -155,7 +155,7 @@ const SCHEMAS = Object.freeze({
     observed: { dispatchId: true, laneId: true, phase: true, eventType: true },
     observerErrors: { dispatchId: true, code: true },
   },
-  ack: { version: true, ok: true, operation: true, eventId: true, acknowledgedAt: true },
+  ack: { version: true, ok: true, operation: true, eventId: true, acknowledgedAt: true, through: true, acknowledged: true, count: true },
   schema: { version: true, ok: true, operation: true, operations: true, phases: true, providerPhases: true, schemas: true },
   watch: { version: true, ok: true, operation: true, outcome: true, pid: true, rounds: true, wakes: true },
   // The bounded maintenance runner and its `--retention` mode share one

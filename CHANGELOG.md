@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+- Wake economy ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md#cost-model)):
+  the watcher delivers one wake per observation round naming every event
+  of that round, retries a refused wake at most three times, and never
+  resends one that may have landed; an observation that only confirms the
+  parent's own completed retire, stop, or interrupt is recorded already
+  acknowledged. `ack --through <sequence>` acknowledges every pending
+  event up to the highest sequence a wake or wait named.
+- Cheaper polling: a working child is read every three seconds, an idle
+  child every thirty, and a parent's own spawn, steer, recover, interrupt,
+  stop, and retire nudge the watcher to read that child at once; settled
+  children are skipped; the watcher exits fifteen minutes after the last
+  child settled. A Codex wake now reads the newest turn (the oldest was
+  being consulted) before choosing between steer and start.
+
 ## 0.3.1
 
 - Turnkey child notifications ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)).

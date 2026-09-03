@@ -14,21 +14,29 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { parseArgs } = require('node:util');
-const {
-  countEvents, kindForEvent, listDispatches, listEvents, loadParentContext, pathsFor,
-} = require('./lib/dispatch');
-const { observeParentChildren, resolveDispatchLane } = require('./lib/observe');
+const { countEvents, listEvents, loadParentContext, pathsFor } = require('./lib/dispatch');
+const { observeParentChildren, outstandingDispatches } = require('./lib/observe');
 const { processBirth, processMatches } = require('./lib/state');
 const { deliverWake, wakeMessage } = require('./lib/wake');
 const { sleep } = require('./lib/async');
 const { EXIT, exitCodeForError, failureBody, usageError } = require('./lib/public-error');
 const { publicResult } = require('./lib/output-schema');
 
-const ACTIVE_POLL_MS = 2_000;
-const QUIET_POLL_MS = 5_000;
+// Polling is cheap only when it is rare: a child that is working is read
+// every few seconds; an idle child changes only when the parent sends it
+// something, and the parent's own commands nudge the watcher, so idle
+// children are read rarely; a parent with nothing outstanding is checked
+// rarely and the watcher exits after a short idle. spawn restarts it.
+const ACTIVE_POLL_MS = 3_000;
+const QUIET_POLL_MS = 30_000;
+const SETTLED_POLL_MS = 60_000;
+const NUDGE_CHECK_MS = 1_000;
 const OBSERVATION_ROUND_MS = 30_000;
-const DEFAULT_IDLE_EXIT_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_IDLE_EXIT_MS = 15 * 60 * 1000;
 const WAKE_KINDS = new Set(['complete', 'attention', 'terminal']);
+// A wake that could not be sent (the channel refused it) is retried on later
+// rounds this many times; a wake that may have landed is never resent.
+const MAX_WAKE_ATTEMPTS = 3;
 const MAX_LOG_BYTES = 1024 * 1024;
 
 const HELP = `usage: watch.js --parent-context-file <absolute> [options]
@@ -37,15 +45,16 @@ options:
   --repo-root <absolute>        observe only children of this repository
   --url <loopback-ws-url>       Codex app-server endpoint (or TRANSMOGRIFY_URL)
   --claude-bin <absolute>       exact Claude CLI executable
-  --idle-exit-ms <ms>           exit after this long with no outstanding child (default ${DEFAULT_IDLE_EXIT_MS})
+  --idle-exit-ms <ms>           exit after this long with no outstanding child (default ${DEFAULT_IDLE_EXIT_MS}, 15 minutes)
   --detach                      start a detached watcher for this parent and return
   --status                      report whether a watcher is running for this parent
   --stop                        stop the watcher recorded for this parent (owner action)
 
 The watcher observes every outstanding child of the parent, records the same
-durable events wait records, and wakes the parent through its recorded wake
-channel when a child completes, needs attention, or ends. It never spawns,
-steers, stops, harvests, or acknowledges anything.
+durable events wait records, and wakes the parent once per round through its
+recorded wake channel when children complete, need attention, or end. It never
+spawns, steers, stops, or harvests; the only events it acknowledges are those
+that merely confirm the parent's own completed retire, stop, or interrupt.
 
 exit codes (shared by every Transmogrify command):
   0  the watcher ran to its idle exit, was already running, or was started
@@ -55,7 +64,42 @@ exit codes (shared by every Transmogrify command):
 
 function watcherPaths(parentRef, env) {
   const root = path.join(pathsFor(env).root, 'watchers');
-  return { root, record: path.join(root, `${parentRef}.json`), log: path.join(root, `${parentRef}.log`) };
+  return {
+    root,
+    record: path.join(root, `${parentRef}.json`),
+    log: path.join(root, `${parentRef}.log`),
+    nudge: path.join(root, `${parentRef}.nudge`),
+  };
+}
+
+// Ask a running watcher to observe now instead of at its next poll. Called by
+// the parent's own commands after they change a child, so an idle child that
+// was just steered is read promptly without polling it while it sat idle.
+function nudgeWatcher(parentRef, env = process.env) {
+  const paths = watcherPaths(parentRef, env);
+  try {
+    fs.mkdirSync(paths.root, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(paths.nudge, `${Date.now()}\n`, { mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function nudgeStamp(paths) {
+  try { return fs.statSync(paths.nudge).mtimeMs; } catch { return null; }
+}
+
+// Sleep for the poll interval, returning early when the nudge file changes.
+async function sleepUntilNudged(ms, paths, dependencies) {
+  const wait = dependencies.sleep || sleep;
+  const before = nudgeStamp(paths);
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    await wait(Math.min(NUDGE_CHECK_MS, Math.max(0, end - Date.now())));
+    if (nudgeStamp(paths) !== before) return true;
+  }
+  return false;
 }
 
 function readRecord(file) {
@@ -111,8 +155,6 @@ function ensureWatcher(parentContextFile, options = {}, env = process.env, depen
   return { running: true, started: true, pid };
 }
 
-const SETTLED_LANE_STATES = new Set(['archivedVerified', 'cleanupEligible', 'worktreeRemoved', 'failed', 'stopped']);
-
 // Stop the watcher recorded for a parent. The pid is signalled only when its
 // recorded process birth still matches, so a recycled pid is never touched.
 async function stopWatcher(parentContextFile, env = process.env, dependencies = {}) {
@@ -135,55 +177,68 @@ async function stopWatcher(parentContextFile, env = process.env, dependencies = 
   return { running: false, stopped: true, pid: running.pid };
 }
 
-// Children that still need the parent: any dispatch with an unacknowledged
-// event, or whose lane is neither retired nor ended. A retired, failed, or
-// stopped child whose events the parent has acknowledged no longer counts.
+// Children that still need the parent (observe.outstandingDispatches).
 function outstandingChildren(context, env) {
-  const dispatches = listDispatches(context, env);
-  const pending = listEvents(context, {}, env);
-  return dispatches.filter((dispatch) => {
-    if (pending.some((event) => event.dispatchId === dispatch.dispatchId)) return true;
-    let lane = null;
-    try { lane = resolveDispatchLane(dispatch, env).lane; } catch { return true; }
-    if (!lane) return dispatch.state !== 'failed';
-    return !SETTLED_LANE_STATES.has(lane.state);
-  });
+  return outstandingDispatches(context, env);
 }
 
-// One observation pass followed by at most one wake per new event of a kind
-// the parent must act on. Returns what changed for the record and the log.
+// One observation pass over the outstanding children, then at most one wake
+// carrying every new event of a kind the parent must act on. Events for the
+// same child are all named; the parent acknowledges them together with
+// `ack --through`. Returns what changed for the record and the log.
 async function watchOnce(context, values, env, state, dependencies = {}) {
   const observe = dependencies.observe || observeParentChildren;
   const deliver = dependencies.deliver || deliverWake;
-  const round = await observe(context, values, env, Date.now() + OBSERVATION_ROUND_MS);
+  state.wakeAttempts = state.wakeAttempts || {};
+  const outstanding = outstandingDispatches(context, env)
+    .filter((dispatch) => !values['repo-root'] || dispatch.child.repoRoot === values['repo-root']);
+  const round = await observe(context, { ...values, dispatches: outstanding }, env, Date.now() + OBSERVATION_ROUND_MS);
   const events = listEvents(context, {}, env);
   const fresh = events.filter((event) => WAKE_KINDS.has(event.kind) && !state.wakedEventIds.includes(event.eventId));
   const results = [];
-  for (const event of fresh) {
-    state.wakedEventIds.push(event.eventId);
+  const markWaked = (event) => { state.wakedEventIds.push(event.eventId); delete state.wakeAttempts[event.eventId]; };
+  if (fresh.length > 0) {
     if (context.parent.wake?.channel && context.parent.wake.channel !== 'none') {
       try {
-        const receipt = await deliver(context.parent.wake === undefined ? null : {
+        const receipt = await deliver({
           channel: context.parent.wake.channel,
           bridgeId: context.parent.wake.id,
           threadId: context.parent.wake.id,
           cwd: context.parent.wake.cwd,
-        }, wakeMessage(event, { parentContextFile: context.file }), {
-          claudeBin: values['claude-bin'], url: values.url, clientUserMessageId: event.eventId,
+        }, wakeMessage(fresh, { parentContextFile: context.file }), {
+          claudeBin: values['claude-bin'], url: values.url, clientUserMessageId: fresh[fresh.length - 1].eventId,
         }, env);
-        results.push({
-          eventId: event.eventId, kind: event.kind, delivered: true,
-          method: receipt.method || receipt.channel, certainty: receipt.certainty || 'acknowledged',
-        });
+        for (const event of fresh) {
+          markWaked(event);
+          results.push({
+            eventId: event.eventId, kind: event.kind, delivered: true, batch: fresh.length,
+            method: receipt.method || receipt.channel, certainty: receipt.certainty || 'acknowledged',
+          });
+        }
       } catch (error) {
-        results.push({ eventId: event.eventId, kind: event.kind, delivered: false, code: error.code || 'WAKE_UNDELIVERED' });
+        const code = error.code || 'WAKE_UNDELIVERED';
+        for (const event of fresh) {
+          // A wake that may have landed is never resent; one the channel
+          // refused is retried on later rounds a bounded number of times.
+          const attempts = (state.wakeAttempts[event.eventId] || 0) + 1;
+          if (code !== 'WAKE_UNDELIVERED' || attempts >= MAX_WAKE_ATTEMPTS) markWaked(event);
+          else state.wakeAttempts[event.eventId] = attempts;
+          results.push({ eventId: event.eventId, kind: event.kind, delivered: false, code, attempts, batch: fresh.length });
+        }
       }
     } else {
-      results.push({ eventId: event.eventId, kind: event.kind, delivered: false, code: 'WAKE_UNAVAILABLE' });
+      for (const event of fresh) {
+        markWaked(event);
+        results.push({ eventId: event.eventId, kind: event.kind, delivered: false, code: 'WAKE_UNAVAILABLE' });
+      }
     }
   }
   const working = round.observed.some((entry) => entry.phase === 'working');
-  return { observed: round.observed.length, errors: round.errors, wakes: results, working };
+  const acknowledged = round.observed.filter((entry) => entry.acknowledged).length;
+  return {
+    observed: round.observed.length, errors: round.errors, wakes: results, working,
+    outstanding: outstanding.length, acknowledged,
+  };
 }
 
 async function runWatcher(options, env = process.env, dependencies = {}) {
@@ -200,6 +255,7 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
     parentRef: context.parent.parentRef,
     startedAt: new Date().toISOString(),
     wakedEventIds: Array.isArray(previous?.wakedEventIds) ? previous.wakedEventIds.slice(-500) : [],
+    wakeAttempts: previous?.wakeAttempts && typeof previous.wakeAttempts === 'object' ? previous.wakeAttempts : {},
     wakes: 0,
     rounds: 0,
   };
@@ -229,23 +285,24 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
       pass = await watchOnce(context, values, env, state, dependencies);
     } catch (error) {
       appendLog(paths, `observation failed ${error.code || error.message}`);
-      pass = { observed: 0, errors: [{ code: error.code || 'OBSERVATION_FAILED' }], wakes: [], working: false };
+      pass = { observed: 0, errors: [{ code: error.code || 'OBSERVATION_FAILED' }], wakes: [], working: false, outstanding: 1, acknowledged: 0 };
     }
     state.rounds += 1;
     state.wakes += pass.wakes.filter((wake) => wake.delivered).length;
     for (const wake of pass.wakes) {
-      appendLog(paths, `wake ${wake.kind} event=${wake.eventId} ${wake.delivered ? `sent via ${wake.method} (${wake.certainty})` : wake.code}`);
+      appendLog(paths, `wake ${wake.kind} event=${wake.eventId} ${wake.delivered ? `sent via ${wake.method} (${wake.certainty}, batch ${wake.batch})` : `${wake.code}${wake.attempts ? ` attempt ${wake.attempts}` : ''}`}`);
     }
+    if (pass.acknowledged) appendLog(paths, `acknowledged ${pass.acknowledged} own-command event(s)`);
     for (const failure of pass.errors) appendLog(paths, `observer error ${failure.code} dispatch=${failure.dispatchId || '-'}`);
     writeRecord(paths, { ...state, lastRoundAt: new Date().toISOString(), unacknowledged: countEvents(context, {}, env) });
-    const outstanding = outstandingChildren(context, env).length;
-    if (outstanding === 0) {
+    if (pass.outstanding === 0) {
       idleSince = idleSince ?? Date.now();
       if (Date.now() - idleSince >= idleExitMs) break;
     } else {
       idleSince = null;
     }
-    await (dependencies.sleep || sleep)(pass.working ? ACTIVE_POLL_MS : QUIET_POLL_MS);
+    const interval = pass.working ? ACTIVE_POLL_MS : pass.outstanding > 0 ? QUIET_POLL_MS : SETTLED_POLL_MS;
+    await sleepUntilNudged(interval, paths, dependencies);
   }
   if (stopping) outcome = 'signalled';
   else if (state.rounds >= maxRounds) outcome = 'roundsExhausted';
@@ -333,9 +390,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+  ACTIVE_POLL_MS,
   HELP,
+  QUIET_POLL_MS,
+  SETTLED_POLL_MS,
   ensureWatcher,
   main,
+  nudgeWatcher,
   outstandingChildren,
   parseWatchArgs,
   runWatcher,

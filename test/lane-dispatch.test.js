@@ -9,7 +9,7 @@ const test = require('node:test');
 const { main } = require('../scripts/lane');
 const { retire: retireCodex, spawn: spawnCodex } = require('../scripts/lib/codex-adapter');
 const {
-  countEvents, createParentContext, pathsFor, reserveDispatch, listDispatches,
+  countEvents, createParentContext, pathsFor, reserveDispatch, listDispatches, recordEvent,
 } = require('../scripts/lib/dispatch');
 const {
   completeLaneOperation, ensureRegistry, listLanes, listOperations, pendingOperationForLane,
@@ -208,8 +208,14 @@ test('an unresolved first-turn spawn wakes the parent once and can be retired wi
   assert.equal(operations.find((operation) => operation.type === 'retire').state, 'complete');
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
 
-  const third = await main(waitArgs, fixture.env);
-  assert.deepEqual(third.events.map((event) => event.type), ['child.retired']);
+  // The retirement was the parent's own command: its observation is recorded
+  // already acknowledged, so nothing wakes the parent for what it just did.
+  const third = await main(['wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '3000'], fixture.env)
+    .catch((error) => error);
+  assert.equal(third.code, 'NO_EVENT');
+  const children = await main(['children', '--parent-context-file', parentContext.file], fixture.env);
+  assert.equal(children.children[0].state, 'archivedVerified');
+  assert.equal(children.children[0].unacknowledgedEvents, 0);
 });
 
 test('a verified spawn whose parent event cannot be recorded reports the provider effect as verified', async (t) => {
@@ -431,5 +437,38 @@ test('a reserved dispatch whose lane never appeared fails after the launcher gra
   await assert.rejects(() => main([
     'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '2000',
   ], fixture.env), (error) => error.code === 'NO_EVENT');
+  assert.equal(countEvents(parentContext, {}, fixture.env), 0);
+});
+
+test('ack --through acknowledges every pending event up to a sequence and nothing after it', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'claude', hostApp: 'claude-code', displayName: 'Batch ack parent',
+  }, fixture.env);
+  const reserved = reserveDispatch({
+    parentContext, repoRoot: fixture.repoRoot, laneId: crypto.randomUUID(), targetProvider: 'codex',
+    backend: 'codex-app-server', displayName: '::: batch child', prompt: 'Do the work.',
+  }, fixture.env);
+  const record = (type, fingerprint, state) => recordEvent({
+    dispatchId: reserved.dispatch.dispatchId, type, fingerprint, data: { state },
+  }, fixture.env);
+  const first = record('child.spawned', 'spawn:1', 'spawned');
+  const second = record('child.turn-completed', 'turn:1', 'idle');
+  const third = record('child.needs-attention', 'attention:1', 'needs-attention');
+  assert.deepEqual([first.sequence, second.sequence, third.sequence], [1, 2, 3]);
+
+  await assert.rejects(() => main(['ack', '--parent-context-file', parentContext.file, '--through', '0'], fixture.env),
+    (error) => error.code === 'USAGE_ERROR');
+  await assert.rejects(() => main(['ack', '--parent-context-file', parentContext.file, '--through', '2', '--event', first.eventId], fixture.env),
+    (error) => error.code === 'USAGE_ERROR');
+  const acked = await main(['ack', '--parent-context-file', parentContext.file, '--through', '2'], fixture.env);
+  assert.deepEqual(acked, {
+    version: 1, ok: true, operation: 'ack', through: 2, acknowledged: [first.eventId, second.eventId], count: 2,
+  });
+  assert.equal(countEvents(parentContext, {}, fixture.env), 1);
+  const again = await main(['ack', '--parent-context-file', parentContext.file, '--through', '2'], fixture.env);
+  assert.deepEqual(again.acknowledged, [], 'already acknowledged events are not repeated');
+  const single = await main(['ack', '--parent-context-file', parentContext.file, '--event', third.eventId], fixture.env);
+  assert.deepEqual([single.eventId, single.acknowledged, single.count], [third.eventId, [third.eventId], 1]);
   assert.equal(countEvents(parentContext, {}, fixture.env), 0);
 });

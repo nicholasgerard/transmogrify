@@ -152,7 +152,16 @@ test('wakeMessage names the lane, the kind, and the exact next commands without 
   assert.match(text, /child lane lane-9 reached a terminal state \(failed\)/);
   assert.match(text, /\(kind terminal\)/);
   assert.match(text, /lane\.js" wait --parent-context-file "\/state\/parents\/p\.json" --timeout-ms 0/);
-  assert.match(text, /ack --parent-context-file "\/state\/parents\/p\.json" --event e-9/);
+  assert.match(text, /ack --parent-context-file "\/state\/parents\/p\.json" --through 4$/);
+  const batch = wakeMessage([
+    { type: 'child.turn-completed', kind: 'complete', child: { laneId: 'lane-1' }, dispatchId: 'd-1', sequence: 7, eventId: 'e-7' },
+    { type: 'child.retired', kind: 'terminal', child: { laneId: 'lane-2' }, dispatchId: 'd-2', sequence: 9, eventId: 'e-9' },
+  ], { parentContextFile: '/state/parents/p.json' });
+  assert.match(batch, /^\[transmogrify\] 2 child events: lane lane-1 completed its task and is idle[^;]*; lane lane-2 reached a terminal state \(retired\)\.$/m);
+  assert.match(batch, /Event child\.turn-completed \(kind complete\), dispatch d-1, sequence 7\./);
+  assert.match(batch, /Event child\.retired \(kind terminal\), dispatch d-2, sequence 9\./);
+  assert.match(batch, /Handle them, then acknowledge: .*ack --parent-context-file "\/state\/parents\/p\.json" --through 9$/m);
+  assert.equal(batch.split('\n').length, 4);
   assert.match(wakeMessage({ type: 'child.turn-completed', kind: 'complete', child: {}, sequence: 1, eventId: 'x' }),
     /completed its task and is idle/);
 });

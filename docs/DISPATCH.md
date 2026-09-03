@@ -226,13 +226,21 @@ On each event:
 node "$SKILL_ROOT/scripts/lane.js" ack \
   --parent-context-file "$PARENT_CONTEXT" \
   --event "$EVENT_ID"
+# or every pending event up to the highest sequence a wait or wake named:
+node "$SKILL_ROOT/scripts/lane.js" ack \
+  --parent-context-file "$PARENT_CONTEXT" \
+  --through "$SEQUENCE"
 ```
 
 Wait semantics:
 
-- `--timeout-ms` accepts `0` through `60000` and defaults to `60000`.
+- `--timeout-ms` accepts `0` through `1800000` and defaults to `60000`.
   Expiry without an event raises `NO_EVENT`; it is a heartbeat boundary, not
   completion. Repeat the bounded wait while children remain outstanding.
+- An observation that only confirms the parent's own completed `retire`,
+  `stop`, or `interrupt` (the lane's newest journal, finished within the
+  last two minutes) is recorded already acknowledged: the command's result
+  was the receipt, and it neither wakes the parent nor waits for an `ack`.
 - `--timeout-ms 0` is an immediate durable-queue snapshot and contacts no
   provider. A positive timeout observes exact children using each lane's
   persisted runtime identity.
@@ -241,8 +249,8 @@ Wait semantics:
   nor replay anything; it is accepted for forward compatibility only.
 - At most 100 events are returned per call. State scans are bounded and fail
   closed instead of growing unbounded as an installation ages.
-- While any event is unacknowledged, `wait` returns it immediately and
-  observes no child in that call. Observation resumes on the next wait.
+- A positive timeout observes every outstanding child before reading the
+  queue, so an unacknowledged old event never hides a newer completion.
 - Within one observation round every outstanding child is observed before the
   durable queue is read, so a busy child cannot starve a later child's
   terminal event. Per-child observation shares the global deadline; one

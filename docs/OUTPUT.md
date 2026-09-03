@@ -148,7 +148,8 @@ never printed.
 
 ### `ack`
 
-`eventId`, `acknowledgedAt`.
+`eventId`, `acknowledgedAt`, `acknowledged`, `count` (with `--event`); `through`,
+`acknowledged` (the ids acknowledged), `count` (with `--through`).
 
 ### `schema`
 
