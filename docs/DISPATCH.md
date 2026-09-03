@@ -79,7 +79,7 @@ Before calling the provider, Transmogrify writes an immutable dispatch record:
 | Child | requested display name |
 | Profile | requested and resolved execution profile |
 | Receipts | separate SHA-256 of the prompt body, provenance block, and rendered first message |
-| State | `reserved`, then `journaled` once the lane's mutation journal is durable |
+| State | `reserved`, then `journaled` once the lane's mutation journal is durable; `failed` when the spawn ended before any lane was reserved (settled by the spawning command, or by observation five minutes after creation), with `failedAt` and `failureReason` |
 
 The lane registry stores the same installation, parent, and dispatch lineage.
 Every later event verifies that link before observing or mutating the child.

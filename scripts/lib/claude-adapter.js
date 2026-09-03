@@ -21,7 +21,16 @@ const {
   createClaudeSurface,
   MAX_STEER_BYTES, parseJobId, sha256,
 } = require('./claude-surface');
-const { markDispatchJournaled, recordEvent, reserveDispatch } = require('./dispatch');
+const { failDispatch, markDispatchJournaled, recordEvent, reserveDispatch } = require('./dispatch');
+
+// A spawn that fails before its lane is reserved leaves the parent a dispatch
+// with nothing to observe; settle it as failed so the parent is told once and
+// the child is not counted as outstanding. Best effort: the original failure
+// is what the caller reports.
+function failReservedDispatch(dispatchEnvelope, env) {
+  if (!dispatchEnvelope) return;
+  try { failDispatch(dispatchEnvelope.dispatch.dispatchId, 'spawn-not-registered', env); } catch { /* reported by the next observation */ }
+}
 const {
   AdapterError, deadlineFor, executionRequest, laneResult, nowMs, profileFailure, worktreesRoot,
 } = require('./adapter-kit');
@@ -475,6 +484,10 @@ function completeOperationJournal(repoRoot, laneId, operation, patch, env) {
 // so a repeat observation cannot invent a second receipt.
 function observedStop(repoRoot, lane, operation, env, receipt = {}) {
   if (lane.state === 'stopped') return lane;
+  // A concurrent observer (the parent's watcher reading status) may have
+  // recorded the same worker exit first; the stop is verified either way.
+  const current = requireOwnedLane(repoRoot, lane.laneId, env);
+  if (current.state === 'stopped') return current;
   return observeLaneStopped(repoRoot, lane.laneId, {
     observationId: operation?.operationId || crypto.randomUUID(),
     observedAt: new Date().toISOString(),
@@ -695,7 +708,13 @@ async function spawnLane(options, env = process.env) {
   }
   ensureRegistry(options.repoRoot, env);
   const operationId = crypto.randomUUID();
-  const preflightAgents = await surface.agents(runtime);
+  let preflightAgents;
+  try {
+    preflightAgents = await surface.agents(runtime);
+  } catch (error) {
+    failReservedDispatch(dispatchEnvelope, env);
+    throw error;
+  }
   const spawnNonce = crypto.randomUUID();
   const marker = `[transmogrify spawn ${spawnNonce}]`;
   const prompt = `${options.input}\n\n${marker}`;
@@ -705,12 +724,19 @@ async function spawnLane(options, env = process.env) {
   const paths = projectPaths(options.repoRoot, env);
   const stdoutPath = path.join(paths.operations, `${operationId}.spawn.stdout`);
   const stderrPath = path.join(paths.operations, `${operationId}.spawn.stderr`);
-  const seatIntent = options.cwd ? null : planManagedSeat(
-    options.repoRoot, worktreesRoot(options, env), laneId,
-    { branchName: options.branchName, baseRef: options.baseRef },
-  );
-  const externalSeat = options.cwd
-    ? verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)) : null;
+  let seatIntent;
+  let externalSeat;
+  try {
+    seatIntent = options.cwd ? null : planManagedSeat(
+      options.repoRoot, worktreesRoot(options, env), laneId,
+      { branchName: options.branchName, baseRef: options.baseRef },
+    );
+    externalSeat = options.cwd
+      ? verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)) : null;
+  } catch (error) {
+    failReservedDispatch(dispatchEnvelope, env);
+    throw error;
+  }
   const spawnIntent = {
     operationId, spawnNonce, displayName: options.name, promptSha256: sha256(options.input),
     promptMarkerSha256: sha256(marker),
@@ -720,7 +746,10 @@ async function spawnLane(options, env = process.env) {
       .map((agent) => agent.sessionId.toLowerCase()).sort(),
     stdoutPath, stderrPath,
   };
-  let { lane, operation } = reserveSpawn(options.repoRoot, {
+  let lane;
+  let operation;
+  try {
+    ({ lane, operation } = reserveSpawn(options.repoRoot, {
     operation: {
       operationId, type: 'spawn', laneId,
       details: {
@@ -746,7 +775,11 @@ async function spawnLane(options, env = process.env) {
       },
       spawnIntent,
     },
-  }, env);
+  }, env));
+  } catch (error) {
+    failReservedDispatch(dispatchEnvelope, env);
+    throw error;
+  }
   if (options.dispatch) markDispatchJournaled(options.dispatch.dispatchId, env);
   if (!lane.seat) {
     const seat = materializeManagedSeat(options.repoRoot, lane.seatIntent);
@@ -2429,6 +2462,16 @@ async function reconcile(options, env = process.env) {
             delivery: 'confirmed', repaired: [], pendingOperation: null,
           });
         }
+        continue;
+      }
+      // A retired lane with nothing pending needs no runtime at all; report it
+      // as already retired instead of comparing runtimes it no longer uses.
+      if (RETIRED_STATES.has(initial.state) && !outerPending) {
+        results.push({
+          laneId: initial.laneId, providerId: initial.providerId,
+          state: initial.state, outcome: 'alreadyRetired',
+          delivery: 'confirmed', repaired: [], pendingOperation: null,
+        });
         continue;
       }
       if (!runtime) {

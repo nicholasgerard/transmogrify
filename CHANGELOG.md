@@ -39,6 +39,19 @@
   thread, is still reported as `differentRuntime` and nothing is written.
 - Every Claude adapter deadline reads the injected clock; the timing tests
   advance a fake clock instead of waiting.
+- A spawn that fails before reserving a lane settles its parent dispatch as
+  `failed` with one terminal `child.failed` event (reason
+  `spawn-not-registered`) instead of leaving a child the parent is asked
+  to attend forever; a dispatch abandoned by a crashed spawn is settled the
+  same way five minutes after creation.
+- Claude `steer` and the watcher's wake accept the CLI's follow-up
+  acknowledgement as printed by 2.1.258 (the bridge in either prefix form
+  and a query string on the URL); a steer that landed within a second was
+  previously reported `DELIVERY_UNCERTAIN`.
+- Claude `stop` no longer fails after the worker exit when the parent's
+  watcher observed and recorded the same exit first.
+- Claude reconciliation reports a retired lane with nothing pending as
+  `alreadyRetired` before comparing runtimes.
 - `scripts/maintain.js`: a bounded maintenance runner (doctor plus each
   available provider's exact-owned reconcile, aggregate counts only) and a
   recoverable `--retention` pass over aged, worktree-released journals and

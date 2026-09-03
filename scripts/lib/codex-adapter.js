@@ -39,7 +39,7 @@ const { sleep } = require('./async');
 const { check: desktopAttachCheck } = require('./desktop-attach');
 const { VERSION } = require('./version');
 const {
-  markDispatchJournaled, recordEvent, recordObservation, reserveDispatch, setObservedProfile,
+  failDispatch, markDispatchJournaled, recordEvent, recordObservation, reserveDispatch, setObservedProfile,
 } = require('./dispatch');
 const {
   ExecutionProfileError,
@@ -852,6 +852,11 @@ async function spawn(options, env = process.env) {
           lane = updateLane(options.repoRoot, laneId, {
             state: providerRequestDispatched ? 'deliveryUnknown' : 'failed',
           }, env);
+        }
+        // No lane was reserved: the parent's dispatch would otherwise dangle
+        // with nothing to observe. Settle it so the parent is told once.
+        if (!lane && dispatchEnvelope) {
+          failDispatch(dispatchEnvelope.dispatch.dispatchId, 'spawn-not-registered', env);
         }
       } catch {}
     }

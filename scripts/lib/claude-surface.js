@@ -76,6 +76,20 @@ function isVerifiedCliBuild(version, cliSha256) {
 
 // Normalize a bridge id to its cse_ form. An id outside the accepted shape is
 // PROTOCOL_ERROR, so no unvalidated value reaches a URL or a CLI argument.
+// The CLI's acknowledgement URL names the bridge in either prefix form
+// (`session_` or `cse_`, live 2.1.258 prints the former) and may carry query
+// parameters (`?from=cli&m=0`); it names the exact bridge when the path is
+// `/code/<id>` on claude.ai and the canonical id matches.
+function followupUrlNamesBridge(url, exactBridgeId) {
+  if (typeof url !== 'string') return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.origin !== 'https://claude.ai') return false;
+  const match = /^\/code\/([^/]+)$/.exec(parsed.pathname);
+  if (!match || !BRIDGE_PATTERN.test(match[1])) return false;
+  return canonicalCseId(match[1]) === exactBridgeId;
+}
+
 function canonicalCseId(bridgeId) {
   if (typeof bridgeId !== 'string' || !BRIDGE_PATTERN.test(bridgeId)) {
     throw new ClaudeSurfaceError('PROTOCOL_ERROR', 'invalid Claude bridge id');
@@ -615,13 +629,13 @@ function createClaudeSurface(dependencies = {}) {
         const rawStderr = Buffer.concat(stderr, stderrBytes).toString('utf8');
         let acknowledgment;
         try { acknowledgment = JSON.parse(rawStdout); } catch {}
-        const expectedUrl = `https://claude.ai/code/${exactBridgeId}`;
         const exactKeys = acknowledgment && typeof acknowledgment === 'object' &&
           !Array.isArray(acknowledgment) &&
           JSON.stringify(Object.keys(acknowledgment).sort()) ===
             JSON.stringify(['ok', 'session_id', 'url']);
         const exactSuccess = exactKeys && acknowledgment.ok === true &&
-          acknowledgment.session_id === exactBridgeId && acknowledgment.url === expectedUrl;
+          acknowledgment.session_id === exactBridgeId &&
+          followupUrlNamesBridge(acknowledgment.url, exactBridgeId);
         if (code === 0 && !signal && rawStderr === '' && exactSuccess) {
           resolve({
             queued: true,

@@ -9,7 +9,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const test = require('node:test');
 const {
-  createParentContext, loadParentContext, recordEvent, recordParentWake, reserveDispatch, acknowledgeEvent,
+  createParentContext, loadParentContext, recordEvent, recordParentWake, reserveDispatch, acknowledgeEvent, failDispatch,
 } = require('../scripts/lib/dispatch');
 const { registerLane } = require('../scripts/lib/state');
 const {
@@ -129,6 +129,16 @@ test('outstanding children are those with pending events or lanes still running'
   const active = parentWithChild(t);
   assert.equal(outstandingChildren(active.context, active.fixture.env).length, 1, 'an active lane is outstanding');
   void laneId;
+
+  const dangling = reserveDispatch({
+    parentContext: active.context, repoRoot: active.fixture.repoRoot, laneId: crypto.randomUUID(),
+    targetProvider: 'codex', backend: 'codex-app-server', displayName: '::: never reserved', prompt: 'Do the work.',
+  }, active.fixture.env);
+  assert.equal(outstandingChildren(active.context, active.fixture.env).length, 2, 'a dispatch without a lane is outstanding');
+  const failed = failDispatch(dangling.dispatch.dispatchId, 'spawn-not-registered', active.fixture.env);
+  assert.equal(outstandingChildren(active.context, active.fixture.env).length, 2, 'its terminal event is still unacknowledged');
+  acknowledgeEvent(active.context, failed.event.eventId, active.fixture.env);
+  assert.equal(outstandingChildren(active.context, active.fixture.env).length, 1, 'a failed dispatch is settled');
 });
 
 test('runWatcher records itself, runs bounded rounds, and reports through --status', async (t) => {

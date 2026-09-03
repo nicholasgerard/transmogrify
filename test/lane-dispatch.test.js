@@ -9,7 +9,7 @@ const test = require('node:test');
 const { main } = require('../scripts/lane');
 const { retire: retireCodex, spawn: spawnCodex } = require('../scripts/lib/codex-adapter');
 const {
-  countEvents, createParentContext, pathsFor, reserveDispatch,
+  countEvents, createParentContext, pathsFor, reserveDispatch, listDispatches,
 } = require('../scripts/lib/dispatch');
 const {
   completeLaneOperation, ensureRegistry, listLanes, listOperations, pendingOperationForLane,
@@ -393,4 +393,43 @@ test('a retirement that is still progressing does not raise attention until it s
   assert.equal(retireInFlight({ ...fresh, state: 'providerRetiredCleanupBlocked' }), false, 'a real block is never transient');
   assert.equal(retireInFlight({ ...fresh, state: 'cleanupDeferred' }), false, 'a deliberate deferral is reported at once');
   assert.equal(retireInFlight({ type: 'steer', state: 'unknown', updatedAt: fresh.updatedAt }), false);
+});
+
+test('a reserved dispatch whose lane never appeared fails after the launcher grace period', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const parentContext = createParentContext({
+    hostProvider: 'claude', hostApp: 'claude-code', displayName: 'Crashed spawn parent',
+  }, fixture.env);
+  const reserved = reserveDispatch({
+    parentContext, repoRoot: fixture.repoRoot, laneId: crypto.randomUUID(), targetProvider: 'codex',
+    backend: 'codex-app-server', displayName: '::: never reserved a lane', prompt: 'Do the work.',
+  }, fixture.env);
+  rewriteDispatch(fixture.env, reserved.dispatch.dispatchId, {
+    createdAt: new Date(Date.now() - 2 * 60_000).toISOString(),
+  });
+
+  // Inside the grace period the parent is only asked to look.
+  const early = await main([
+    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '10000',
+  ], fixture.env);
+  assert.deepEqual(early.events.map((event) => event.type), ['child.needs-attention']);
+  await main(['ack', '--parent-context-file', parentContext.file, '--event', early.events[0].eventId], fixture.env);
+
+  rewriteDispatch(fixture.env, reserved.dispatch.dispatchId, {
+    createdAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+  });
+  const waited = await main([
+    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '10000',
+  ], fixture.env);
+  assert.deepEqual(waited.events.map((event) => [event.type, event.kind, event.terminal]), [['child.failed', 'terminal', true]]);
+  assert.deepEqual(waited.events[0].data, { state: 'failed', status: 'spawn-not-registered' });
+  assert.equal(listDispatches(parentContext, fixture.env)[0].state, 'failed');
+  const children = await main(['children', '--parent-context-file', parentContext.file], fixture.env);
+  assert.equal(children.children[0].state, 'failed');
+  assert.equal(children.children[0].unacknowledgedEvents, 1);
+  await main(['ack', '--parent-context-file', parentContext.file, '--event', waited.events[0].eventId], fixture.env);
+  await assert.rejects(() => main([
+    'wait', '--parent-context-file', parentContext.file, '--timeout-ms', '2000',
+  ], fixture.env), (error) => error.code === 'NO_EVENT');
+  assert.equal(countEvents(parentContext, {}, fixture.env), 0);
 });

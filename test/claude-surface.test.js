@@ -319,7 +319,7 @@ test('Claude public follow-up uses stdin and validates the exact machine-readabl
     "  const args = process.argv.slice(2);",
     "  const exact = JSON.stringify(args) === JSON.stringify(['-p', '--cloud', 'cse_testBridge', '--output-format', 'json']);",
     "  if (!exact || input !== 'directed follow-up' || args.includes(input)) process.exit(4);",
-    "  process.stdout.write(JSON.stringify({ ok: true, session_id: 'cse_testBridge', url: 'https://claude.ai/code/cse_testBridge' }));",
+    "  process.stdout.write(JSON.stringify({ ok: true, session_id: 'cse_testBridge', url: 'https://claude.ai/code/session_testBridge?from=cli&m=0' }));",
     "});",
     '',
   ].join('\n'), { mode: 0o700 });
@@ -342,6 +342,8 @@ test('Claude public follow-up fails closed for non-exact acknowledgments and pro
     ['malformed', "process.stdout.write('{');"],
     ['wrong-bridge', `process.stdout.write(JSON.stringify(${JSON.stringify({ ...exact, session_id: 'cse_foreign' })}));`],
     ['alias-bridge', `process.stdout.write(JSON.stringify(${JSON.stringify({ ...exact, session_id: 'session_testBridge' })}));`],
+    ['foreign-url', `process.stdout.write(JSON.stringify(${JSON.stringify({ ...exact, url: 'https://claude.ai/code/cse_foreign?from=cli' })}));`],
+    ['foreign-host', `process.stdout.write(JSON.stringify(${JSON.stringify({ ...exact, url: 'https://example.com/code/cse_testBridge' })}));`],
     ['extra-field', `process.stdout.write(JSON.stringify(${JSON.stringify({ ...exact, extra: true })}));`],
     ['negative', `process.stdout.write(JSON.stringify(${JSON.stringify({ ...exact, ok: false })}));`],
     ['nonzero', `process.stdout.write(JSON.stringify(${JSON.stringify(exact)})); process.exitCode = 2;`],

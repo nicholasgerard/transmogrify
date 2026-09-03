@@ -7,7 +7,7 @@
 // with the same fingerprints.
 
 const {
-  EVENT_KINDS, kindForEvent, kindSatisfies, listDispatches, recordEvent, recordObservation,
+  EVENT_KINDS, failDispatch, kindForEvent, kindSatisfies, listDispatches, recordEvent, recordObservation,
 } = require('./dispatch');
 const {
   listOperations, pendingOperationForLane, processMatches, requireOwnedLane, settleTerminalLaneOperationPointer,
@@ -32,6 +32,10 @@ const TRANSIENT_RETIRE_STATES = new Set([
   'localRemoved',
 ]);
 const RETIRE_IN_FLIGHT_GRACE_MS = 2 * 60 * 1000;
+// A reserved dispatch with no lane this long after its creation was abandoned
+// by a spawn that died before reserving one (the same bound spawnInFlight
+// gives an unrecorded launcher).
+const UNREGISTERED_SPAWN_GRACE_MS = SPAWN_IN_FLIGHT_GRACE_MS;
 
 function retireInFlight(pending) {
   if (!pending || pending.type !== 'retire' || !TRANSIENT_RETIRE_STATES.has(pending.state)) return false;
@@ -258,10 +262,21 @@ function classifyObservation(provider, lane, result, priorPhase) {
 // (`url`, `claude-bin`); `deadline` and `remainingChildren` bound the provider
 // reads so one busy child cannot consume the whole round.
 async function observeDispatch(dispatch, values, env, deadline, remainingChildren) {
+  // A dispatch settled as failed (its spawn never registered a lane) has
+  // already produced its terminal event; there is nothing left to observe.
+  if (dispatch.state === 'failed') return { lane: null, event: null, phase: 'failed' };
   const resolved = resolveDispatchLane(dispatch, env);
   let lane = resolved.lane;
   if (!lane) {
     const ageMs = Date.now() - Date.parse(dispatch.createdAt);
+    if (resolved.reason === 'missing' && dispatch.state === 'reserved' &&
+        Number.isFinite(ageMs) && ageMs >= UNREGISTERED_SPAWN_GRACE_MS) {
+      // The spawning command reserved this dispatch but never reserved a
+      // lane, and it has been gone long enough that no launcher can still be
+      // driving it: settle the dispatch so the parent is told once.
+      const failed = failDispatch(dispatch.dispatchId, 'spawn-not-registered', env);
+      return { lane: null, event: failed.event, phase: 'failed' };
+    }
     if (Number.isFinite(ageMs) && ageMs >= 30_000) {
       const unavailable = resolved.reason === 'repository-unavailable';
       const attention = unavailable || dispatch.state === 'reserved';

@@ -145,7 +145,8 @@ function outstandingChildren(context, env) {
     if (pending.some((event) => event.dispatchId === dispatch.dispatchId)) return true;
     let lane = null;
     try { lane = resolveDispatchLane(dispatch, env).lane; } catch { return true; }
-    return !lane || !SETTLED_LANE_STATES.has(lane.state);
+    if (!lane) return dispatch.state !== 'failed';
+    return !SETTLED_LANE_STATES.has(lane.state);
   });
 }
 

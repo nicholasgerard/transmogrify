@@ -35,7 +35,10 @@ const EVENT_TYPES = new Set([
   'child.cleanup-blocked',
   'child.delivery-unknown',
 ]);
-const DISPATCH_STATES = new Set(['reserved', 'journaled']);
+// reserved: the parent recorded the child; journaled: the child's lane exists;
+// failed: the spawn ended before any lane was reserved (settled, terminal).
+const DISPATCH_STATES = new Set(['reserved', 'journaled', 'failed']);
+const DISPATCH_FAILURE_REASONS = new Set(['spawn-not-registered']);
 // What an event means to the parent. `complete` is harvestable now and the
 // child can still be steered; `terminal` means no further work will come.
 // Kinds are derived when events are read, never stored, so event ids and
@@ -699,7 +702,7 @@ function validateDispatch(record, installation, expectedId = null) {
     'schemaVersion', 'dispatchId', 'installationId', 'parentRef', 'parent', 'child',
     'requestedProfile', 'resolvedProfile', 'observedProfile', 'promptReceipts',
     'state', 'createdAt',
-  ], ['journaledAt'], 'dispatch record');
+  ], ['journaledAt', 'failedAt', 'failureReason'], 'dispatch record');
   assertExactKeys(record.parent, ['hostProvider', 'hostApp', 'displayName'], [], 'dispatch parent');
   assertExactKeys(record.child, [
     'projectKey', 'repoRoot', 'gitCommonDir', 'laneId', 'targetProvider', 'backend', 'displayName',
@@ -718,6 +721,11 @@ function validateDispatch(record, installation, expectedId = null) {
       typeof record.createdAt !== 'string' || !Number.isFinite(Date.parse(record.createdAt)) ||
       (record.journaledAt !== undefined &&
        (typeof record.journaledAt !== 'string' || !Number.isFinite(Date.parse(record.journaledAt)))) ||
+      (record.state === 'failed') !== (record.failedAt !== undefined) ||
+      (record.state === 'failed') !== (record.failureReason !== undefined) ||
+      (record.failedAt !== undefined &&
+       (typeof record.failedAt !== 'string' || !Number.isFinite(Date.parse(record.failedAt)))) ||
+      (record.failureReason !== undefined && !DISPATCH_FAILURE_REASONS.has(record.failureReason)) ||
       !Object.values(record.promptReceipts).every((value) => SHA256_PATTERN.test(value))) {
     throw new DispatchError('INVALID_LOCAL_STATE', 'dispatch record is invalid');
   }
@@ -776,6 +784,33 @@ function markDispatchJournaled(dispatchId, env = process.env) {
     const updated = { ...record, state: 'journaled', journaledAt: new Date().toISOString() };
     atomicWriteJson(path.join(paths.dispatches, `${dispatchId}.json`), updated);
     return updated;
+  });
+}
+
+// Settle a dispatch whose spawn ended before any lane was reserved. The
+// record becomes terminal and the parent receives one `child.failed` event
+// carrying the reason; a repeat returns the existing record and event. A
+// journaled dispatch has a lane, and its failure belongs to that lane.
+function failDispatch(dispatchId, reason, env = process.env) {
+  if (!DISPATCH_FAILURE_REASONS.has(reason)) {
+    throw new DispatchError('USAGE_ERROR', 'dispatch failure reason is invalid');
+  }
+  return withInstallationLock(env, (paths) => {
+    const installation = installationRecord(paths);
+    let record = ownedDispatchLocked(paths, installation, dispatchId);
+    if (record.state === 'journaled') {
+      throw new DispatchError('INVALID_STATE', 'a journaled dispatch fails through its lane');
+    }
+    if (record.state !== 'failed') {
+      record = {
+        ...record, state: 'failed', failedAt: new Date().toISOString(), failureReason: reason,
+      };
+      atomicWriteJson(path.join(paths.dispatches, `${dispatchId}.json`), record);
+    }
+    const event = recordEventLocked(paths, installation, record, {
+      dispatchId, type: 'child.failed', fingerprint: `dispatch-failed:${reason}`,
+    }, { state: 'failed', status: reason });
+    return { dispatch: record, event };
   });
 }
 
@@ -1214,6 +1249,7 @@ module.exports = {
   listEvents,
   listParentContexts,
   loadParentContext,
+  failDispatch,
   markDispatchJournaled,
   pathsFor,
   profileParts,

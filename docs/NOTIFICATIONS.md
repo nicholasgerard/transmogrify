@@ -66,6 +66,11 @@ while its launching process is alive, or for five minutes when no launcher
 is recorded; the crash repair exists for a launcher that died. A retirement
 passing through its transient states raises attention only after two
 minutes without progress, which is what a crashed retirement looks like.
+A spawn that fails before it reserves a lane settles its own dispatch as
+`failed` and records one terminal `child.failed` event (reason
+`spawn-not-registered`); a dispatch left `reserved` with no lane by a
+spawn that died is settled the same way five minutes after its creation,
+after a single attention event at thirty seconds.
 
 ## Done versus intermediate
 

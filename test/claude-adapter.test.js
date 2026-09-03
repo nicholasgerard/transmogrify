@@ -21,7 +21,7 @@ const { createParentContext, readDispatch } = require('../scripts/lib/dispatch')
 const { exactOwnedAgent, MAX_STEER_BYTES } = require('../scripts/lib/claude-surface');
 const {
   beginLaneOperation, completeLaneOperation, listLanes, listOperations,
-  pendingOperationForLane, projectPaths, reserveSpawn, updatePendingLaneOperation,
+  pendingOperationForLane, projectPaths, reserveSpawn, updatePendingLaneOperation, observeLaneStopped,
 } = require('../scripts/lib/state');
 const { removeManagedSeat, verifySeat } = require('../scripts/lib/worktree');
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
@@ -2338,4 +2338,49 @@ test('Claude fast-loop dispatch renders provenance for a model with no effort se
   assert.match(prompt, /^│ Intent {4}fast-loop$/m);
   const [lane] = listLanes(fixture.repoRoot, fixture.env);
   assert.equal(lane.executionProfile.resolved.effort.level, null);
+});
+
+test('Claude stop completes when the parent watcher recorded the worker exit first', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  let simulated = false;
+  surface.onAgents = (rows) => {
+    if (simulated || !rows.some((row) => row.sessionId === lane.providerId && row.pid === null)) return;
+    simulated = true;
+    // The watcher's status read lands between the kill and the stop's own
+    // verification and records the exit under its own observation id.
+    observeLaneStopped(fixture.repoRoot, lane.laneId, {
+      observationId: crypto.randomUUID(), observedAt: new Date().toISOString(),
+      receipt: { source: 'exact-agent-status', exactSession: true },
+    }, fixture.env);
+  };
+
+  const result = await stop({ repoRoot: fixture.repoRoot, laneId: lane.laneId, surface }, fixture.env);
+  assert.equal(simulated, true);
+  assert.equal(result.state, 'stopped');
+  assert.equal(result.receipt.alreadyStopped, false);
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null, 'the stop journal is complete');
+  assert.equal(listLanes(fixture.repoRoot, fixture.env)[0].observedStops.length, 1, 'no second stop receipt is invented');
+});
+
+test('Claude reconciliation reports a retired lane as already retired without comparing runtimes', async (t) => {
+  const { fixture, surface, lane } = await spawnedLane(t);
+  await stop({ repoRoot: fixture.repoRoot, laneId: lane.laneId, surface }, fixture.env);
+  const privateApi = {
+    preflight() {},
+    async ensureArchived() { return { archived: true, alreadyArchived: false }; },
+  };
+  const retired = await retire({
+    repoRoot: fixture.repoRoot, laneId: lane.laneId, surface, privateApi, privateArchive: true,
+    harvestedOutputSha256: 'a'.repeat(64), stopVerifyAttempts: 2, stopVerifyDelayMs: 0,
+    removeVerifyAttempts: 2, removeVerifyDelayMs: 0,
+  }, fixture.env);
+  assert.equal(retired.state, 'archivedVerified');
+  assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
+  surface.runtime.accountFingerprint = 'c'.repeat(64);
+  const callsBefore = surface.calls.length;
+
+  const result = await reconcile({ repoRoot: fixture.repoRoot, laneId: lane.laneId, surface }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.results.map((entry) => [entry.outcome, entry.delivery, entry.pendingOperation]), [['alreadyRetired', 'confirmed', null]]);
+  assert.deepEqual(surface.calls.slice(callsBefore).map((call) => call.method), [], 'no runtime preflight for a retired lane');
 });

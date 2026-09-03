@@ -20,7 +20,7 @@ const { acknowledgeEvent, decorateEvent,
   recordObservation,
   renderProvenanceBlock,
   reserveDispatch,
-  setObservedProfile,
+  setObservedProfile, failDispatch,
 } = require('../scripts/lib/dispatch');
 const { createStateFixture } = require('./helpers/state-fixture');
 
@@ -526,4 +526,36 @@ test('a parent context records one verified wake channel and refuses malformed o
   ]) {
     assert.throws(() => recordParentWake(created, bad, fixture.env), (error) => error.code === 'INVALID_LOCAL_STATE', JSON.stringify(bad));
   }
+});
+
+test('a dispatch whose spawn never registered a lane is settled as failed with one terminal event', (t) => {
+  const fixture = parentFixture(t);
+  const reserve = () => reserveDispatch({
+    parentContext: fixture.context, repoRoot: fixture.repoRoot, laneId: crypto.randomUUID(),
+    targetProvider: 'codex', backend: 'codex-app-server', displayName: '::: never registered',
+    prompt: 'Do the work.',
+  }, fixture.env);
+  const reserved = reserve();
+
+  assert.throws(() => failDispatch(reserved.dispatch.dispatchId, 'because', fixture.env),
+    (error) => error.code === 'USAGE_ERROR');
+  const failed = failDispatch(reserved.dispatch.dispatchId, 'spawn-not-registered', fixture.env);
+  assert.equal(failed.dispatch.state, 'failed');
+  assert.equal(failed.dispatch.failureReason, 'spawn-not-registered');
+  assert.ok(Number.isFinite(Date.parse(failed.dispatch.failedAt)));
+  assert.equal(failed.event.type, 'child.failed');
+  assert.deepEqual(failed.event.data, { state: 'failed', status: 'spawn-not-registered' });
+  const again = failDispatch(reserved.dispatch.dispatchId, 'spawn-not-registered', fixture.env);
+  assert.equal(again.event.eventId, failed.event.eventId, 'a repeat settles nothing new');
+  assert.deepEqual(again.dispatch, failed.dispatch);
+  const pending = listEvents(fixture.context, {}, fixture.env);
+  assert.deepEqual(pending.map((event) => [event.type, event.kind, event.terminal]), [['child.failed', 'terminal', true]]);
+  assert.deepEqual(listDispatches(fixture.context, fixture.env).map((dispatch) => dispatch.state), ['failed']);
+  assert.throws(() => markDispatchJournaled(reserved.dispatch.dispatchId, fixture.env),
+    (error) => error.code === 'INVALID_STATE');
+
+  const journaled = reserve();
+  markDispatchJournaled(journaled.dispatch.dispatchId, fixture.env);
+  assert.throws(() => failDispatch(journaled.dispatch.dispatchId, 'spawn-not-registered', fixture.env),
+    (error) => error.code === 'INVALID_STATE');
 });
