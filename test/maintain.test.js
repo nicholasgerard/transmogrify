@@ -71,7 +71,7 @@ test('maintain reconciles every available provider and reports aggregate registr
       calls.push({ target: 'codex', options });
       return {
         version: 1, ok: true, operation: 'reconcile', adapter: 'codex-app-server',
-        recovered: [{ laneId: 'x', state: 'active', outcome: 'ok' }],
+        results: [{ laneId: 'x', state: 'active', outcome: 'ok' }],
       };
     },
     claudeReconcile: async (options) => {
@@ -136,7 +136,7 @@ test('a provider reconcile that returns ok:false, or that throws, fails the over
     doctor: fakeDoctor(BOTH_AVAILABLE),
     codexReconcile: async () => ({
       version: 1, ok: false, operation: 'reconcile', adapter: 'codex-app-server',
-      recovered: [{ laneId: 'x', error: 'boom', code: 'RUNTIME_MISMATCH' }],
+      results: [{ laneId: 'x', error: 'boom', code: 'RUNTIME_MISMATCH' }],
     }),
     claudeReconcile: async () => {
       throw Object.assign(new Error('transport failed'), { code: 'TRANSPORT_ERROR' });
@@ -168,7 +168,7 @@ test('--target codex runs only the codex reconcile and rejects a Claude-only fla
       codex: { requested: true, available: true, reusable: true },
       claude: { requested: false, available: null, reusable: null },
     }),
-    codexReconcile: async () => ({ version: 1, ok: true, operation: 'reconcile', adapter: 'codex-app-server', recovered: [] }),
+    codexReconcile: async () => ({ version: 1, ok: true, operation: 'reconcile', adapter: 'codex-app-server', results: [] }),
     claudeReconcile: async () => { claudeTouched = true; throw new Error('must not run'); },
   });
   assert.equal(result.ok, true);
