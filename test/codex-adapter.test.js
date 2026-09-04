@@ -3027,3 +3027,19 @@ test('Codex recovery fails closed when a persisted steer receipt names a differe
   assert.equal(pending.operationId, operation.operationId);
   assert.equal(pending.state, 'unknown');
 });
+
+test('Codex recovery reports a retired lane bound elsewhere as already retired without contacting the runtime', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer((request) => { throw new Error(`unexpected ${request.method}`); });
+  t.after(() => server.close());
+  const retired = registerLane(fixture.repoRoot, {
+    backend: 'codex-app-server', providerId: 'thread-retired-elsewhere', displayName: '[test] retired elsewhere',
+    state: 'worktreeRemoved',
+    runtime: { endpoint: 'ws://127.0.0.1:65534/', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'test' },
+  }, fixture.env);
+  const result = await recover({ repoRoot: fixture.repoRoot, url: server.url }, fixture.env);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.results.map((r) => [r.laneId, r.outcome, r.delivery]), [[retired.laneId, 'alreadyRetired', 'confirmed']]);
+  assert.equal(result.receipt.providerConnection, 'notRequired');
+  assert.equal(server.requests.length, 0);
+});

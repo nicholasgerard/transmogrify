@@ -13,7 +13,7 @@ const {
 } = require('../scripts/lib/dispatch');
 const {
   completeLaneOperation, ensureRegistry, listLanes, listOperations, pendingOperationForLane,
-  registerLane, reserveSpawn, updateLane,
+  registerLane, reserveSpawn, updateLane, projectPaths,
 } = require('../scripts/lib/state');
 const { verifySeat } = require('../scripts/lib/worktree');
 const { NO_RESPONSE, startMockAppServer } = require('./helpers/mock-app-server');
@@ -45,6 +45,15 @@ function runtimeFor(url) {
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function markLauncherDead(fixture, laneId) {
+  const paths = projectPaths(fixture.repoRoot, fixture.env);
+  const pending = pendingOperationForLane(fixture.repoRoot, laneId, fixture.env);
+  const file = path.join(paths.operations, `${pending.operationId}.json`);
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  record.details = { ...record.details, spawner: { pid: 999999, processBirth: 'gone' } };
+  fs.writeFileSync(file, JSON.stringify(record));
+}
 
 function rewriteDispatch(env, dispatchId, patch) {
   const file = path.join(pathsFor(env).dispatches, `${dispatchId}.json`);
@@ -178,6 +187,8 @@ test('an unresolved first-turn spawn wakes the parent once and can be retired wi
   assert.equal(turnStarts, 1);
   const lane = listLanes(fixture.repoRoot, fixture.env)[0];
   assert.equal(lane.state, 'deliveryUnknown');
+  // The spawn command has exited: its journal records a launcher that is gone.
+  markLauncherDead(fixture, lane.laneId);
 
   const waitFor = (timeoutMs) => [
     'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot,
@@ -499,4 +510,22 @@ test('parent-init rediscovers the wake channel on re-adoption instead of keeping
     '--native-task-ref', 'task-readopt-1', '--wake', 'none',
   ], fixture.env);
   assert.equal(kept.wake.channel, 'none');
+});
+
+test('an open spawn journal with a live launcher is in flight in every state; a dead launcher frees it', () => {
+  const { spawnInFlight } = require('../scripts/lib/observe');
+  const { processBirth } = require('../scripts/lib/state');
+  const live = { pid: process.pid, processBirth: processBirth(process.pid) };
+  const dead = { pid: 999999, processBirth: 'gone' };
+  const journal = (state, spawner, createdAt = new Date().toISOString()) => ({
+    type: 'spawn', state, createdAt, details: spawner ? { spawner } : {},
+  });
+  for (const state of ['planned', 'seatReady', 'dispatching', 'providerRequestDispatched', 'providerCreated', 'turnRequestDispatched', 'materialized', 'partial', 'unknown']) {
+    assert.equal(spawnInFlight(journal(state, live)), true, `${state} with a live launcher is in flight`);
+    assert.equal(spawnInFlight(journal(state, dead)), false, `${state} with a dead launcher is reconcilable`);
+  }
+  assert.equal(spawnInFlight(journal('complete', live)), false, 'a settled journal is never in flight');
+  assert.equal(spawnInFlight(journal('turnRequestDispatched', null)), false, 'no launcher recorded after dispatch: reconcilable');
+  assert.equal(spawnInFlight(journal('planned', null)), true, 'no launcher recorded before dispatch: grace applies');
+  assert.equal(spawnInFlight(journal('planned', null, new Date(Date.now() - 6 * 60_000).toISOString())), false);
 });

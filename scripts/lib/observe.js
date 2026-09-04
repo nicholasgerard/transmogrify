@@ -11,8 +11,8 @@ const {
   recordEvent, recordObservation,
 } = require('./dispatch');
 const {
-  listOperations, pendingOperationForLane, processMatches, requireOwnedLane, settleTerminalLaneOperationPointer,
-  withLaneLease,
+  TERMINAL_OPERATION_STATES, listOperations, pendingOperationForLane, processMatches, requireOwnedLane,
+  settleTerminalLaneOperationPointer, withLaneLease,
 } = require('./state');
 
 // Spawn journal states before the provider request has gone out. Only these
@@ -79,14 +79,20 @@ function retireInFlight(pending) {
   return Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs < RETIRE_IN_FLIGHT_GRACE_MS;
 }
 
-// True while the process that reserved a spawn may still be driving it
-// through its pre-dispatch states. A continuous observer (the watcher, a
-// background wait) must leave such a journal alone: the crash repair exists
-// for a spawner that died, never for one that is still running.
+// True while the process that reserved a spawn may still be driving it. A
+// continuous observer (the watcher, a background wait) must leave such a
+// journal alone in every open state, not only before the provider request:
+// a status read that lands between the launcher's turn/start and its own
+// materialized write would move the lane under the launcher's feet (seen
+// live once the watcher was woken by the runtime's turn/started). The crash
+// repair exists for a spawner that died, never for one that is running. A
+// journal that recorded no spawner is assumed in flight through its
+// pre-dispatch states for a grace period only.
 function spawnInFlight(pending, dependencies = {}) {
-  if (!pending || pending.type !== 'spawn' || !PRE_DISPATCH_SPAWN_STATES.has(pending.state)) return false;
+  if (!pending || pending.type !== 'spawn' || TERMINAL_OPERATION_STATES.has(pending.state)) return false;
   const spawner = pending.details?.spawner;
   if (spawner && Number.isInteger(spawner.pid)) return processMatches(spawner, dependencies);
+  if (!PRE_DISPATCH_SPAWN_STATES.has(pending.state)) return false;
   const createdAtMs = Date.parse(pending.createdAt || '');
   return Number.isFinite(createdAtMs) && Date.now() - createdAtMs < SPAWN_IN_FLIGHT_GRACE_MS;
 }

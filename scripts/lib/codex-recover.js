@@ -16,7 +16,7 @@ const { materializeManagedSeat } = require('./worktree');
 const {
   SPAWN_ABSENCE_JOURNAL_STATES, TransmogrifyError, UNDISPATCHED_RESUME_STATES, assertProviderSeat,
   assertRuntimeIdentity, assertSeatIdentity, findTurnByClientMessage, inspectThread,
-  observedLaneState, runtimeUrl, spawnAbsenceGraceMs, updateLaneFromInspection, withClient,
+  observedLaneState, runtimeUrl, spawnAbsenceGraceMs, updateLaneFromInspection, withClient, RETIRED_STATES,
 } = require('./codex-runtime');
 const {
   finishRetiredCleanup, retirementHarvestReceipt, verifyArchived,
@@ -453,6 +453,14 @@ async function recover(options, env = process.env) {
   const endpointMoves = [];
   for (const initial of lanes) {
     if (initial.runtime?.endpoint && initial.runtime.endpoint !== endpoint) {
+      // A retired lane with nothing pending needs no runtime at all.
+      if (RETIRED_STATES.has(initial.state) && !pendingOperationForLane(options.repoRoot, initial.laneId, env)) {
+        localResults.push({
+          laneId: initial.laneId, providerId: initial.providerId, state: initial.state,
+          outcome: 'alreadyRetired', delivery: 'confirmed', repaired: [], pendingOperation: null,
+        });
+        continue;
+      }
       // Decided once the client is connected, from the runtime's own identity.
       endpointMoves.push(initial);
       continue;
