@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Launch the shared Codex app-server runtime DETACHED from this shell/session,
-# or report the one already listening. Safe to run repeatedly.
+# Ensure the installer-managed Codex daemon and its loopback relay, or fall
+# back to the detached standalone app-server when the daemon is unavailable.
 #
-# The runtime hosts every lane's executing turns for this protocol surface. It
-# is a standalone app-server: Codex Desktop is not documented to adopt it. Its
-# lifetime must be independent of any one operator shell.
+# The daemon hosts every lane's executing turns and survives operator shells.
+# Codex Desktop reaches its unix socket through the owned loopback relay.
 #
 # Env overrides:
 #   TRANSMOGRIFY_BIN   codex binary   (default PATH, then standalone fallback)
-#   TRANSMOGRIFY_URL   listen URL     (default ws://127.0.0.1:<port>)
-#   TRANSMOGRIFY_PORT  listen port    (default 8843; ignored when URL is supplied)
+#   TRANSMOGRIFY_URL   fallback URL   (default ws://127.0.0.1:<port>)
+#   TRANSMOGRIFY_PORT  fallback port  (default 8843; ignored when URL is supplied)
+#   TRANSMOGRIFY_RELAY_PORT relay port (default 8844)
 #   TRANSMOGRIFY_LOG   log file       (default ~/.codex/log/app-server-<port>.log)
 set -euo pipefail
 
@@ -21,7 +21,7 @@ usage() {
   code="${1:-2}"
   if [ "$code" -eq 0 ]; then
     echo "usage: runtime-up.sh [--url ws://127.0.0.1:<port>]"
-    echo "environment: TRANSMOGRIFY_BIN, TRANSMOGRIFY_URL, TRANSMOGRIFY_PORT, TRANSMOGRIFY_LOG"
+    echo "environment: TRANSMOGRIFY_BIN, TRANSMOGRIFY_URL, TRANSMOGRIFY_PORT, TRANSMOGRIFY_RELAY_PORT, TRANSMOGRIFY_LOG"
   else
     echo "usage: runtime-up.sh [--url ws://127.0.0.1:<port>]" >&2
   fi
@@ -78,7 +78,7 @@ if [ -z "$BIN" ] && [ -n "${HOME:-}" ]; then
   BIN="$HOME/.codex/packages/standalone/current/codex"
 fi
 
-ARGS=("$LAUNCHER" --url "$URL" --probe "$PROBE")
+ARGS=("$LAUNCHER" --managed --url "$URL" --probe "$PROBE" --relay-port "${TRANSMOGRIFY_RELAY_PORT:-8844}")
 if [ -n "$BIN" ]; then
   ARGS+=(--bin "$BIN")
 fi

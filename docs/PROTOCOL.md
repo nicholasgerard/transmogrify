@@ -10,7 +10,7 @@ Codex app-server. Every claim carries one label:
 | implementation contract | Enforced by this repository and its tests |
 | unverified | Deliberately not promised |
 
-The supported runtime line is `0.151.x`. Dated receipts are collected in
+The minimum supported runtime is `0.151.0`. Dated receipts are collected in
 [Compatibility tuple and verified receipts](#compatibility-tuple-and-verified-receipts).
 
 Regenerate the schemas before changing a protocol claim:
@@ -32,8 +32,10 @@ production transport support claim. See the
 
 **Implementation contract.** `scripts/lib/app-server.js`:
 
-- accepts only literal `127.0.0.1` or `::1` URLs and refuses URL credentials,
-  non-root paths, queries, and fragments;
+- accepts canonical `ws+unix:<normalized absolute socket path>` endpoints and
+  literal `127.0.0.1` or `::1` URLs; loopback URLs refuse credentials,
+  non-root paths, queries, and fragments, while Unix paths are bounded to 100
+  UTF-8 bytes;
 - accepts text frames only and caps each inbound WebSocket message at 8 MiB;
 - bounds connection and request timeouts, separates client and server request
   IDs, validates response envelopes, and closes every unresolved call as
@@ -52,8 +54,42 @@ client closes the connection and projects every pending call as
 transport-unknown.
 
 `scripts/doctor.js` performs only this handshake and closes. A runtime outside
-the supported `0.151.x` line remains visible through the doctor's bounded
+the supported `0.151.0`-or-newer range remains visible through the doctor's bounded
 version report, but `rpc.js` and lifecycle mutations refuse it.
+
+## Managed daemon and relay
+
+**Implementation contract.** `scripts/runtime-up.sh` first checks the Codex
+installer's managed standalone binary at
+`<CODEX_HOME>/packages/standalone/current/codex`. It reads the running daemon
+with `app-server daemon version`. Only when no daemon control socket exists may
+it use `app-server daemon start`, followed by another version read and an
+initialize-only probe of
+`<CODEX_HOME>/app-server-control/app-server-control.sock`. It never calls
+`daemon bootstrap`, `stop`, `restart`, or `enable-remote-control`.
+
+Transmogrify connects to the daemon directly with `ws+unix:`. Codex Desktop,
+which requires a loopback TCP WebSocket, reaches that same socket through
+`scripts/lib/relay.js`. The relay binds only `127.0.0.1` or `::1`, forwards raw
+bytes, caps and rotates its private log, and records its pid plus measured
+process birth under the Transmogrify state root. Start reuses that exact live
+record. An unrecorded listener is adopted only after the TCP and Unix endpoints
+complete supported app-server handshakes with identical runtime identities.
+Stop signals only the pid whose process birth still matches the record.
+
+The default relay is `ws://127.0.0.1:8844/`; `TRANSMOGRIFY_RELAY_PORT` selects a
+different deterministic port. Runtime selection is explicit `--url`, then
+`TRANSMOGRIFY_URL`, then the live relay record, then the legacy standalone
+`TRANSMOGRIFY_PORT`/8843 endpoint. If the daemon cannot be verified or started,
+`runtime-up.sh` returns JSON that identifies the standalone fallback and its
+reason.
+
+**Live-verified, 2026-09-04.** Codex 0.151.0's managed daemon served the
+app-server WebSocket protocol at both `/` and `/rpc` through its Unix control
+socket. Two clients shared thread and turn notifications. Codex Desktop reached
+the same daemon through a byte-forwarding loopback relay on port 8844. The
+daemon's initialize user agent used its first client's product name, so
+compatibility is judged by the version component.
 
 **Schema-derived.** `JSONRPCMessage.json`, `JSONRPCRequest.json`, and
 `JSONRPCResponse.json` define the JSON-RPC request, response, notification, and
@@ -500,7 +536,7 @@ lifecycle.
 
 | Component | Receipt |
 | --- | --- |
-| Codex app-server line | `0.151.x` supported; `0.151.0` live-verified 2026-09-01 |
+| Codex app-server line | `0.151.0` or newer supported; `0.151.0` live-verified 2026-09-01 |
 | Lifecycle and transport receipts | 2026-09-01 |
 | Native surface and topology receipts | 2026-09-02 |
 | Codex Desktop, attached and streaming | `26.825.51511` (`7377`, 2026-09-01); `26.901.20858` (`7658`, 2026-09-02) |

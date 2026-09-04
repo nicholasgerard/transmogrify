@@ -171,17 +171,37 @@ lsof -nP -iTCP:8843 -sTCP:ESTABLISHED
 
 Reuse a listener only after the initialize handshake succeeds. Run
 `"$SKILL_ROOT/scripts/runtime-up.sh"` only when no compatible runtime exists and
-the machine owner authorizes this Transmogrify installation to own the new
-detached process. The launcher refuses non-loopback endpoints and never cleans
-up a process it did not launch and identify exactly. A newly launched child runs
+the machine owner authorizes this Transmogrify installation to own a relay or
+standalone fallback. A successful command prints JSON. `runtime:"managed-daemon"`
+names the loopback relay in `url`, the daemon's `socket` and `daemonVersion`,
+and `relayState`. `runtime:"standalone-fallback"` names the legacy endpoint and
+`fallbackReason`.
+
+The daemon must come from
+`<CODEX_HOME>/packages/standalone/current/codex`; a `codex` elsewhere on `PATH`
+is not used to manage it. A present daemon socket that cannot answer `daemon
+version` is never started over. Resolve the permission or sandbox boundary and
+retry. The command never bootstraps, stops, restarts, or reconfigures the
+daemon.
+
+The relay record is under the private Transmogrify state root. A stale record
+is ignored. An occupied relay port is reused only when its TCP endpoint and the
+daemon's Unix socket identify the same runtime and the listener's process birth
+can be measured; otherwise the command refuses without signalling it. Use
+`TRANSMOGRIFY_RELAY_PORT` to choose another deterministic loopback port.
+
+When the daemon is unavailable, the standalone launcher refuses non-loopback
+endpoints and never cleans up a process it did not launch and identify exactly.
+A newly launched standalone child runs
 with `-c mcp_servers.codex_app={command="",enabled=false}` so the Desktop-only
 `codex_app` MCP bridge stays off on the runtime this installation owns; a reused
 listener keeps its own configuration.
 
-Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
-`PATH`, `TRANSMOGRIFY_URL` or `TRANSMOGRIFY_PORT` for the loopback endpoint, and
-`TRANSMOGRIFY_LOG` for an absolute owned-runtime log path. A command-line
-`--url` takes precedence over the URL environment variables. `TRANSMOGRIFY_DEBUG_STACK=1`
+Use `TRANSMOGRIFY_BIN` for the standalone fallback executable,
+`TRANSMOGRIFY_URL` or `TRANSMOGRIFY_PORT` for its loopback endpoint,
+`TRANSMOGRIFY_RELAY_PORT` for the daemon relay, and `TRANSMOGRIFY_LOG` for the
+standalone log path. A command-line `--url` takes precedence over the URL
+environment variables. `TRANSMOGRIFY_DEBUG_STACK=1`
 makes `lane.js` print the stack of an uncoded failure (`OPERATOR_ERROR`) to
 stderr before its fixed public body, for maintainers. Two switches
 turn off turnkey notification mechanisms for a run: `TRANSMOGRIFY_WATCH=off`

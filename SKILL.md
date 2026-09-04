@@ -7,7 +7,7 @@ metadata:
   version: "0.5.0"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
-  supported_codex_runtime: "app-server 0.151.x"
+  supported_codex_runtime: "app-server 0.151.0 or newer"
   verified_codex_desktop: "26.901.20858 (7658)"
   verified_codex_mobile: "ChatGPT for iOS 1.2026.230 (32543289983)"
   verified_claude_cli: "2.1.258"
@@ -54,7 +54,7 @@ The hosting operator supplies or confirms these values before lane work:
 
 | Parameter | Meaning | Default |
 | --- | --- | --- |
-| RUNTIME_URL | Shared Codex app-server WebSocket | `--url` → `TRANSMOGRIFY_URL` → `TRANSMOGRIFY_PORT` → `ws://127.0.0.1:8843` |
+| RUNTIME_URL | Shared Codex app-server endpoint | `--url` → `TRANSMOGRIFY_URL` → live daemon-relay record → `TRANSMOGRIFY_PORT` → legacy `ws://127.0.0.1:8843` |
 | CLAUDE_BIN | Optional exact Claude CLI executable | `--claude-bin` → `CLAUDE_BIN` → pinned CLI on `PATH` |
 | REPO_ROOT | Absolute target repository root | required |
 | WORKTREES | Managed lane worktree parent | `REPO_ROOT/.worktrees` |
@@ -93,7 +93,7 @@ kills, restarts, steers, archives, removes, or adopts a session. Use
 | `setup.ready:true`, provider `available:true` | Reuse the provider. Run only the doctor's printed maintenance commands, or an equally narrow exact-lane command. |
 | `setup.ownerActions[]` with `blocking:true` (Claude CLI logged out or unpinned, runtime needs authorization, sandbox denies loopback) | Do what the operator may do itself; ask the owner once, quoting the exact `ownerAction`; rerun the doctor until `setup.ready`. Never work around it through a private path. |
 | Advisory action (Codex Desktop not attached, not installed, unsupported platform) | Only native visibility is withheld. Ask the owner once whether to attach Desktop; if declined or impossible, spawn Codex lanes with `--allow-protocol-only` and say so. |
-| No Codex runtime, owner has authorized this installation to own one | `"$SKILL_ROOT/scripts/runtime-up.sh"` reuses a verified listener or launches a detached child. Never kill, restart, or reconfigure a runtime that may host another orchestrator's lanes. |
+| No Codex runtime, owner has authorized this installation to own one | `"$SKILL_ROOT/scripts/runtime-up.sh"` ensures the managed daemon and relay, or explicitly reports its fallback to the detached standalone runtime. Never kill, restart, or reconfigure a runtime that may host another orchestrator's lanes. |
 | `boundary:sandbox-loopback-denied` | Obtain one scoped host authorization for the doctor and the exact provider-control commands; do not report the provider ready until the probe succeeds. |
 | Pending operations reported | Reconcile them (section 6) before creating new work. |
 
@@ -419,8 +419,8 @@ before improvising. Every tool prints structured JSON on one exit table
 
 ## 9. Provider rules that never bend
 
-- Codex: the app-server WebSocket is an experimental, unauthenticated loopback
-  control plane, pinned to the verified `0.151.x` line; scope every
+- Codex: the app-server WebSocket is an experimental, unauthenticated local
+  control plane with minimum version `0.151.0`; scope every
   notification and mutation to exact owned thread IDs; `rpc.js` is read-only
   and default-deny; a runtime this installation launches keeps
   `mcp_servers.codex_app` disabled and a reused listener is never

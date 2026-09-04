@@ -13,7 +13,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const { processBirth } = require('./lib/state');
-const { validateUrl } = require('./lib/app-server');
+const { supportedAppServerVersion, validateUrl } = require('./lib/app-server');
+const { DEFAULT_RELAY_PORT, ensureRelay } = require('./lib/relay');
 const { exitCodeForError } = require('./lib/public-error');
 const {
   ListenerError, execFileResult, inspectListeners, normalizeListenUrl, parseLsofListeners,
@@ -54,6 +55,126 @@ class RuntimeLaunchError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+function commandResult(executable, args, options = {}) {
+  return new Promise((resolve) => {
+    execFile(executable, args, {
+      encoding: 'utf8',
+      env: options.env,
+      maxBuffer: MAX_CAPTURE_BYTES,
+      timeout: options.timeoutMs || 5000,
+    }, (error, stdout, stderr) => {
+      resolve({
+        code: typeof error?.code === 'number' ? error.code : (error ? 1 : 0),
+        stdout: String(stdout || ''),
+        stderr: String(stderr || ''),
+      });
+    });
+  });
+}
+
+function managedDaemonPaths(env = process.env) {
+  const codexHome = env.CODEX_HOME || path.join(env.HOME || os.homedir(), '.codex');
+  if (!path.isAbsolute(codexHome) || path.normalize(codexHome) !== codexHome) {
+    throw new RuntimeLaunchError('CODEX_HOME must be a normalized absolute path', 'USAGE_ERROR');
+  }
+  return {
+    codexHome,
+    bin: path.join(codexHome, 'packages', 'standalone', 'current', 'codex'),
+    socketPath: path.join(codexHome, 'app-server-control', 'app-server-control.sock'),
+  };
+}
+
+function managedBinary(paths, dependencies = {}) {
+  const exists = dependencies.existsSync || fs.existsSync;
+  if (!exists(paths.bin)) return null;
+  try {
+    const binary = (dependencies.realpathSync || fs.realpathSync)(paths.bin);
+    (dependencies.accessSync || fs.accessSync)(binary, fs.constants.X_OK);
+    return binary;
+  } catch {
+    return null;
+  }
+}
+
+function daemonVersion(result) {
+  if (!result || result.code !== 0) return null;
+  let parsed;
+  try { parsed = JSON.parse(result.stdout); } catch { return null; }
+  const version = parsed?.appServerVersion;
+  if (typeof version !== 'string' ||
+      !supportedAppServerVersion(`managed-daemon/${version}`)) return null;
+  return version;
+}
+
+// Prefer the installer-managed daemon. A present control socket whose version
+// cannot be read is never started over: it may be a live daemon hidden by the
+// current sandbox. Only an absent socket permits `daemon start`.
+async function ensureManagedDaemon(options, dependencies = {}) {
+  const env = dependencies.env || process.env;
+  const paths = options.managedPaths || managedDaemonPaths(env);
+  const binary = managedBinary(paths, dependencies);
+  if (!binary) return { available: false, reason: 'managed-install-missing' };
+  const run = dependencies.commandResult || commandResult;
+  const versionArgs = ['app-server', 'daemon', 'version'];
+  let versionResult = await run(binary, versionArgs, { env, timeoutMs: 5000 });
+  let version = daemonVersion(versionResult);
+  let state = 'reused';
+  if (!version) {
+    const exists = dependencies.existsSync || fs.existsSync;
+    if (exists(paths.socketPath)) {
+      return { available: false, reason: 'managed-daemon-unreachable' };
+    }
+    const started = await run(binary, ['app-server', 'daemon', 'start'], { env, timeoutMs: 15000 });
+    if (started.code !== 0) return { available: false, reason: 'managed-daemon-start-failed' };
+    state = 'started';
+    versionResult = await run(binary, versionArgs, { env, timeoutMs: 5000 });
+    version = daemonVersion(versionResult);
+    if (!version) return { available: false, reason: 'managed-daemon-version-unavailable' };
+  }
+  const socketUrl = validateUrl(`ws+unix:${paths.socketPath}`);
+  const probe = dependencies.probeRuntime || ((url) => probeRuntime(options.probe, url, dependencies));
+  if (!await probe(socketUrl)) return { available: false, reason: 'managed-daemon-probe-failed' };
+  return {
+    available: true,
+    state,
+    version,
+    bin: binary,
+    socketPath: paths.socketPath,
+    socketUrl,
+  };
+}
+
+async function ensurePreferredRuntime(options, dependencies = {}) {
+  const env = dependencies.env || process.env;
+  const daemon = await (dependencies.ensureManagedDaemon || ensureManagedDaemon)(options, dependencies);
+  if (daemon.available) {
+    const relay = await (dependencies.ensureRelay || ensureRelay)({
+      socketPath: daemon.socketPath,
+      port: options.relayPort ?? env.TRANSMOGRIFY_RELAY_PORT ?? DEFAULT_RELAY_PORT,
+    }, env, dependencies.relayDependencies || dependencies);
+    return {
+      runtime: 'managed-daemon',
+      state: daemon.state,
+      url: relay.url,
+      socket: daemon.socketPath,
+      daemonVersion: daemon.version,
+      relayState: relay.state,
+    };
+  }
+  const standalone = await (dependencies.ensureStandalone || ensureRuntime)({
+    url: options.url,
+    probe: options.probe,
+    bin: options.bin,
+    log: options.log,
+  }, dependencies);
+  return {
+    runtime: 'standalone-fallback',
+    state: standalone.state,
+    url: standalone.clientUrl,
+    fallbackReason: daemon.reason,
+  };
 }
 
 // Run the read-only probe against the endpoint. True only when it completed a
@@ -333,7 +454,48 @@ function parseCli(argv) {
   return values;
 }
 
+function parseManagedCli(argv) {
+  const values = { managed: false };
+  for (let index = 0; index < argv.length; index += 1) {
+    const option = argv[index];
+    if (option === '--managed') {
+      if (values.managed) throw new RuntimeLaunchError('repeated --managed', 'USAGE_ERROR');
+      values.managed = true;
+      continue;
+    }
+    if (!['--url', '--bin', '--log', '--probe', '--relay-port'].includes(option) || index + 1 >= argv.length) {
+      throw new RuntimeLaunchError(
+        'usage: runtime-launch.js --managed --url <fallback-loopback-url> --probe <runtime-probe.js> [--relay-port 8844] [--bin <codex>] [--log <file>]',
+        'USAGE_ERROR',
+      );
+    }
+    if (values[option.slice(2)] !== undefined) {
+      throw new RuntimeLaunchError(`repeated ${option}`, 'USAGE_ERROR');
+    }
+    values[option.slice(2)] = argv[index + 1];
+    index += 1;
+  }
+  if (!values.managed || !values.url || !values.probe || !path.isAbsolute(values.probe)) {
+    throw new RuntimeLaunchError('managed runtime, fallback URL, and absolute probe path are required', 'USAGE_ERROR');
+  }
+  if (values.bin && !path.isAbsolute(values.bin)) {
+    throw new RuntimeLaunchError('TRANSMOGRIFY_BIN must resolve to an absolute path', 'USAGE_ERROR');
+  }
+  return {
+    url: validateUrl(values.url),
+    probe: values.probe,
+    bin: values.bin,
+    log: values.log,
+    relayPort: values['relay-port'],
+  };
+}
+
 async function main(argv = process.argv.slice(2)) {
+  if (argv.includes('--managed')) {
+    const result = await ensurePreferredRuntime(parseManagedCli(argv));
+    console.log(JSON.stringify(result));
+    return result;
+  }
   const result = await ensureRuntime(parseCli(argv));
   if (result.state === 'reused') {
     console.log(`verified loopback-only Codex app-server already listening on :${result.port}`);
@@ -355,10 +517,16 @@ if (require.main === module) {
 
 module.exports = {
   RuntimeLaunchError,
+  commandResult,
+  daemonVersion,
+  ensureManagedDaemon,
+  ensurePreferredRuntime,
   ensureRuntime,
   inspectListeners,
+  managedDaemonPaths,
   normalizeListenUrl,
   parseLsofListeners,
+  parseManagedCli,
   openRuntimeLog,
   processMatches,
   sanitizedRuntimeEnv,

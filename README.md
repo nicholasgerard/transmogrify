@@ -75,7 +75,7 @@ verified builds and receipts are in the
 - [Node.js](https://nodejs.org/en/download) 20 or newer with npm.
 - Git, Bash, `ps`, and `lsof`. Confirm them with `node --version`,
   `npm --version`, `git --version`, and `lsof -v`.
-- Codex CLI/app-server `0.151.x` for Codex targets, verified with `0.151.0`.
+- Codex CLI/app-server `0.151.0` or newer for Codex targets, verified with `0.151.0`.
   Attached live visibility is verified with Codex Desktop `26.901.20858`
   (`7658`) and `26.825.51511` (`7377`), and mobile visibility with ChatGPT for
   iOS `1.2026.230` (`32543289983`). Install and sign in using the
@@ -193,18 +193,31 @@ Use `--target all` to preflight both providers on the pinned macOS Claude
 host, or `--target claude` when only the Claude surface is needed. A
 Codex-only Linux host should keep `--target codex`.
 
-If a verified Codex runtime is already listening, reuse it. If none exists,
-`scripts/runtime-up.sh` can create a detached loopback runtime only when the
-machine owner authorizes this installation to own that runtime:
+If a verified Codex runtime is already available, reuse it. If none exists,
+`scripts/runtime-up.sh` ensures Codex's installer-managed daemon and a private
+loopback relay only when the machine owner authorizes this installation to own
+the relay:
 
 ```bash
 "$SKILL_ROOT/scripts/runtime-up.sh"
 ```
 
-The launcher accepts loopback listeners only, refuses an occupied endpoint
-that does not complete the Codex initialize handshake, reuses a compatible
-listener without touching it, and verifies the exact identity of any child it
-launches or cleans up. The child runs with
+The command prints JSON containing the selected `url`. For the managed daemon,
+it also names the Unix `socket`, `daemonVersion`, and whether the relay was
+reused or started. The relay accepts literal loopback binds only and carries a
+private pid-and-process-birth record. An already listening process is reused
+only after both its TCP endpoint and the daemon socket identify the same
+app-server runtime.
+
+The daemon path requires the managed install at
+`<CODEX_HOME>/packages/standalone/current/codex`. It uses only `daemon version`
+and, when no daemon socket exists, `daemon start`; it never bootstraps, stops,
+or restarts the daemon. If the managed daemon is unavailable, the JSON result
+names the fallback reason and the launcher uses the legacy standalone runtime
+on port 8843. That fallback accepts loopback listeners only, refuses an
+occupied endpoint that does not complete the Codex initialize handshake,
+reuses a compatible listener without touching it, and verifies the exact
+identity of any child it launches or cleans up. The standalone child runs with
 `-c mcp_servers.codex_app={command="",enabled=false}` so the Desktop-only
 `codex_app` bridge stays off on a shared runtime, and it inherits only a
 bounded non-secret environment (`HOME`, `CODEX_HOME`, and the like), relying on
@@ -366,7 +379,8 @@ a complete packet, handback, digest, and retirement walkthrough in
 | `scripts/doctor.js` | Read-only startup discovery and aggregate ownership check |
 | `scripts/lane.js` | Provider-neutral spawn, steer, status, interrupt/stop, recover, retire, reconcile, and abandon |
 | `scripts/maintain.js` | Bounded maintenance: the read-only doctor plus each available provider's exact-owned reconcile; `--retention` moves aged, worktree-released operation journals and superseded install backups into recoverable trash |
-| `scripts/runtime-up.sh` | Reuse or explicitly launch a detached Codex app-server |
+| `scripts/runtime-up.sh` | Ensure the managed Codex daemon and loopback relay, or report the standalone fallback as JSON |
+| `scripts/lib/relay.js` | Own the loopback TCP-to-daemon-socket relay by pid and process birth |
 | `scripts/desktop-attach.js` | Measure, launch, or (with owner authorization) relaunch Codex Desktop as a client of the shared runtime |
 | `scripts/lane-status-listen.js` | Listen for state transitions on exact owned Codex lanes |
 | `scripts/watch.js` | Per-parent watcher, started by `spawn`: reads a working child every few seconds and an idle one only when nudged (by the parent's own commands, a Claude child's session hook, or a Codex runtime notification), records the durable events, and wakes the parent once per round through its recorded channel ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)) |

@@ -10,6 +10,9 @@ const { once } = require('node:events');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
+  daemonVersion,
+  ensureManagedDaemon,
+  ensurePreferredRuntime,
   ensureRuntime,
   normalizeListenUrl,
   openRuntimeLog,
@@ -18,6 +21,7 @@ const {
   spawnRuntime,
   terminateOwnedProcess,
 } = require('../scripts/runtime-launch');
+const { runtimeUrl } = require('../scripts/lib/codex-runtime');
 const { processBirth } = require('../scripts/lib/state');
 const { REPO_ROOT } = require('./helpers/run-cli');
 
@@ -108,6 +112,131 @@ test('verified loopback listener is reused without spawning a process', async ()
   assert.equal(result.state, 'reused');
   assert.deepEqual(result.pids, [40001]);
   assert.equal(spawned, false);
+});
+
+test('managed daemon version accepts the supported semantic version only', () => {
+  assert.equal(daemonVersion({ code: 0, stdout: '{"appServerVersion":"0.151.0"}\n', stderr: '' }), '0.151.0');
+  assert.equal(daemonVersion({ code: 0, stdout: '{"appServerVersion":"0.153.2","managedCodexVersion":"0.160.0"}\n', stderr: '' }), '0.153.2');
+  assert.equal(daemonVersion({ code: 0, stdout: '{"appServerVersion":"0.150.9"}\n', stderr: '' }), null);
+  assert.equal(daemonVersion({ code: 0, stdout: '{"managedCodexVersion":"0.153.2"}\n', stderr: '' }), null);
+  assert.equal(daemonVersion({ code: 1, stdout: '{"appServerVersion":"0.153.2"}\n', stderr: '' }), null);
+});
+
+test('existing managed daemon is probed and never started', async () => {
+  const commands = [];
+  const result = await ensureManagedDaemon({
+    probe: '/tmp/probe',
+    managedPaths: {
+      bin: '/managed/current/codex',
+      socketPath: '/tmp/codex-daemon.sock',
+    },
+  }, {
+    existsSync: () => true,
+    realpathSync: (value) => value,
+    accessSync: () => {},
+    commandResult: async (binary, args) => {
+      commands.push({ binary, args });
+      return { code: 0, stdout: '{"appServerVersion":"0.153.0"}\n', stderr: '' };
+    },
+    probeRuntime: async (url) => url === 'ws+unix:/tmp/codex-daemon.sock',
+  });
+  assert.equal(result.available, true);
+  assert.equal(result.state, 'reused');
+  assert.deepEqual(commands.map((entry) => entry.args), [['app-server', 'daemon', 'version']]);
+});
+
+test('absent managed daemon uses only version, start, version before the probe', async () => {
+  const commands = [];
+  const results = [
+    { code: 1, stdout: '', stderr: '' },
+    { code: 0, stdout: '', stderr: '' },
+    { code: 0, stdout: '{"appServerVersion":"0.151.0"}\n', stderr: '' },
+  ];
+  const result = await ensureManagedDaemon({
+    probe: '/tmp/probe',
+    managedPaths: {
+      bin: '/managed/current/codex',
+      socketPath: '/tmp/codex-daemon.sock',
+    },
+  }, {
+    existsSync: (value) => value.endsWith('/codex'),
+    realpathSync: (value) => value,
+    accessSync: () => {},
+    commandResult: async (binary, args) => {
+      commands.push({ binary, args });
+      return results.shift();
+    },
+    probeRuntime: async () => true,
+  });
+  assert.equal(result.state, 'started');
+  assert.deepEqual(commands.map((entry) => entry.args), [
+    ['app-server', 'daemon', 'version'],
+    ['app-server', 'daemon', 'start'],
+    ['app-server', 'daemon', 'version'],
+  ]);
+  assert.equal(commands.flatMap((entry) => entry.args).includes('bootstrap'), false);
+  assert.equal(commands.flatMap((entry) => entry.args).includes('stop'), false);
+  assert.equal(commands.flatMap((entry) => entry.args).includes('restart'), false);
+});
+
+test('an unreachable present daemon socket is never started over', async () => {
+  const commands = [];
+  const result = await ensureManagedDaemon({
+    probe: '/tmp/probe',
+    managedPaths: {
+      bin: '/managed/current/codex',
+      socketPath: '/tmp/codex-daemon.sock',
+    },
+  }, {
+    existsSync: () => true,
+    realpathSync: (value) => value,
+    accessSync: () => {},
+    commandResult: async (binary, args) => {
+      commands.push({ binary, args });
+      return { code: 1, stdout: '', stderr: '' };
+    },
+  });
+  assert.deepEqual(result, { available: false, reason: 'managed-daemon-unreachable' });
+  assert.deepEqual(commands.map((entry) => entry.args), [['app-server', 'daemon', 'version']]);
+});
+
+test('preferred runtime reports the relay URL and falls back explicitly', async () => {
+  const daemonResult = await ensurePreferredRuntime({ url: URL, probe: '/tmp/probe' }, {
+    ensureManagedDaemon: async () => ({
+      available: true,
+      state: 'reused',
+      version: '0.153.0',
+      socketPath: '/tmp/codex-daemon.sock',
+    }),
+    ensureRelay: async () => ({ state: 'reused', url: 'ws://127.0.0.1:8844/' }),
+  });
+  assert.deepEqual(daemonResult, {
+    runtime: 'managed-daemon',
+    state: 'reused',
+    url: 'ws://127.0.0.1:8844/',
+    socket: '/tmp/codex-daemon.sock',
+    daemonVersion: '0.153.0',
+    relayState: 'reused',
+  });
+
+  const fallback = await ensurePreferredRuntime({ url: URL, probe: '/tmp/probe' }, {
+    ensureManagedDaemon: async () => ({ available: false, reason: 'managed-install-missing' }),
+    ensureStandalone: async () => ({ state: 'reused', clientUrl: URL }),
+  });
+  assert.deepEqual(fallback, {
+    runtime: 'standalone-fallback',
+    state: 'reused',
+    url: URL,
+    fallbackReason: 'managed-install-missing',
+  });
+});
+
+test('runtime URL resolves explicit, environment, relay record, then legacy port', () => {
+  const relay = () => 'ws://127.0.0.1:8844/';
+  assert.equal(runtimeUrl({ url: URL }, { TRANSMOGRIFY_URL: 'ws://127.0.0.1:1' }, { activeRelayUrl: relay }), URL);
+  assert.equal(runtimeUrl({}, { TRANSMOGRIFY_URL: 'ws://127.0.0.1:2' }, { activeRelayUrl: relay }), 'ws://127.0.0.1:2');
+  assert.equal(runtimeUrl({}, {}, { activeRelayUrl: relay }), 'ws://127.0.0.1:8844/');
+  assert.equal(runtimeUrl({}, { TRANSMOGRIFY_PORT: '9443' }, { activeRelayUrl: () => null }), 'ws://127.0.0.1:9443');
 });
 
 test('wildcard listener fails closed before probing or spawning', async () => {
@@ -302,7 +431,9 @@ test('shell launcher starts and then reuses an isolated detached mock runtime', 
   const url = `ws://127.0.0.1:${port}/`;
   const env = {
     ...process.env,
+    CODEX_HOME: path.join(root, 'codex-home'),
     PATH: `${path.dirname(process.execPath)}:${process.env.PATH || '/usr/bin:/bin'}`,
+    TRANSMOGRIFY_STATE_DIR: path.join(root, 'state'),
     TRANSMOGRIFY_BIN: wrapper,
     TRANSMOGRIFY_LOG: log,
   };
@@ -319,13 +450,22 @@ test('shell launcher starts and then reuses an isolated detached mock runtime', 
     fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '',
   ].filter(Boolean).join('\n');
   assert.equal(launched.code, 0, launchDiagnostic);
-  const pid = Number(launched.stdout.match(/runtime up: pid=(\d+)/)?.[1]);
-  assert.equal(Number.isInteger(pid), true, launched.stdout);
-  owned = { pid, processBirth: processBirth(pid) };
+  const launchedResult = JSON.parse(launched.stdout);
+  assert.equal(launchedResult.runtime, 'standalone-fallback');
+  const pid = Number(fs.readFileSync(log, 'utf8').match(/pid=(\d+)/)?.[1] || 0);
+  // The standalone launcher no longer exposes process identity in public JSON;
+  // lsof supplies the exact pid for this isolated fixture.
+  const listening = await new Promise((resolve) => {
+    execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp'], { encoding: 'utf8' },
+      (error, stdout) => resolve(error ? 0 : Number(stdout.match(/p(\d+)/)?.[1])));
+  });
+  const ownedPid = pid || listening;
+  assert.equal(Number.isInteger(ownedPid) && ownedPid > 0, true, launched.stdout);
+  owned = { pid: ownedPid, processBirth: processBirth(ownedPid) };
   assert.equal(typeof owned.processBirth, 'string');
 
   const reused = await runRuntimeUp(url, env);
   assert.equal(reused.code, 0, reused.stderr);
-  assert.match(reused.stdout, /loopback-only Codex app-server already listening/);
-  assert.equal(processBirth(pid), owned.processBirth);
+  assert.equal(JSON.parse(reused.stdout).runtime, 'standalone-fallback');
+  assert.equal(processBirth(ownedPid), owned.processBirth);
 });

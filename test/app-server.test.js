@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 const { AppServerClient, MAX_INBOUND_MESSAGE_BYTES } = require('../scripts/lib/app-server');
 const { NO_RESPONSE, startMockAppServer } = require('./helpers/mock-app-server');
@@ -20,6 +23,29 @@ test('app-server client initializes before sending requests and always supplies 
   assert.deepEqual(result, { data: [] });
   assert.deepEqual(server.requests.slice(0, 3).map((request) => request.method), [
     'initialize', 'initialized', 'model/list',
+  ]);
+});
+
+test('app-server client connects over a canonical unix-socket endpoint', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-app-server-'));
+  const socketPath = path.join(root, 'app.sock');
+  const server = await startMockAppServer(undefined, { socketPath });
+  t.after(async () => {
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const client = new AppServerClient({ url: server.url });
+  t.after(() => client.close());
+
+  await client.connect();
+  assert.equal(client.runtimeIdentity.endpoint, `ws+unix:${socketPath}`);
+  // The initialized notification is sent after connect resolves; give the
+  // mock a moment to record it.
+  for (let attempt = 0; attempt < 50 && server.requests.length < 2; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(server.requests.slice(0, 2).map((request) => request.method), [
+    'initialize', 'initialized',
   ]);
 });
 
@@ -180,6 +206,20 @@ test('app-server client rejects secret-bearing or non-root endpoint URLs without
       (error) => error.code === 'USAGE_ERROR' &&
         /credentials, paths, queries, and fragments/.test(error.message) &&
         !error.message.includes('supersecret'),
+    );
+  }
+});
+
+test('app-server client rejects non-canonical unix-socket endpoints', () => {
+  for (const url of [
+    'ws+unix:relative.sock',
+    'ws+unix:/tmp/../tmp/app.sock',
+    'ws+unix:/tmp/app.sock?secret',
+    `ws+unix:/${'x'.repeat(101)}`,
+  ]) {
+    assert.throws(
+      () => new AppServerClient({ url }),
+      (error) => error.code === 'USAGE_ERROR',
     );
   }
 });
