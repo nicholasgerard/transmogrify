@@ -1,12 +1,17 @@
 'use strict';
 
 const { once } = require('node:events');
+const fs = require('node:fs');
+const http = require('node:http');
 const { WebSocketServer } = require('ws');
 
 const NO_RESPONSE = Symbol('NO_RESPONSE');
 
 async function startMockAppServer(handler = () => ({ result: {} }), options = {}) {
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  const transportServer = options.socketPath ? http.createServer() : null;
+  const server = transportServer
+    ? new WebSocketServer({ server: transportServer })
+    : new WebSocketServer({ host: '127.0.0.1', port: 0 });
   const requests = [];
 
   server.handshakes = [];
@@ -36,17 +41,32 @@ async function startMockAppServer(handler = () => ({ result: {} }), options = {}
     });
   });
 
-  await once(server, 'listening');
-  const address = server.address();
+  if (transportServer) {
+    try { fs.unlinkSync(options.socketPath); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    transportServer.listen(options.socketPath);
+    await once(transportServer, 'listening');
+  } else {
+    await once(server, 'listening');
+  }
+  const address = transportServer ? options.socketPath : server.address();
 
   return {
     requests,
     handshakes: server.handshakes,
-    url: `ws://127.0.0.1:${address.port}`,
+    url: transportServer ? `ws+unix:${address}` : `ws://127.0.0.1:${address.port}`,
     async close() {
       for (const client of server.clients) client.terminate();
       server.close();
       await once(server, 'close');
+      if (transportServer) {
+        transportServer.close();
+        await once(transportServer, 'close');
+        try { fs.unlinkSync(options.socketPath); } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+      }
     },
   };
 }

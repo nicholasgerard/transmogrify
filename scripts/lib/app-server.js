@@ -8,6 +8,7 @@
 // transport-unknown. It relays no approval or user-input authority.
 
 const { EventEmitter } = require('node:events');
+const net = require('node:net');
 const path = require('node:path');
 const WebSocket = require('ws');
 const { VERSION } = require('./version');
@@ -35,10 +36,26 @@ class AppServerError extends Error {
   }
 }
 
-// Accept only a literal loopback ws or wss URL with a root path. Credentials, a
-// path, a query, a fragment, or a non-loopback host is USAGE_ERROR, because the
-// accepted endpoint is an unauthenticated local control plane.
+const MAX_UNIX_SOCKET_PATH_BYTES = 100;
+
+// Accept either a canonical absolute unix-socket endpoint or a literal
+// loopback ws/wss URL with a root path. Both transports remain local-only
+// because the accepted endpoint is an unauthenticated control plane.
 function validateUrl(url) {
+  if (typeof url === 'string' && url.startsWith('ws+unix:')) {
+    const socketPath = url.slice('ws+unix:'.length);
+    if (!path.isAbsolute(socketPath) || path.normalize(socketPath) !== socketPath ||
+        /[\u0000-\u001f\u007f\u2028\u2029?#]/u.test(socketPath)) {
+      throw new AppServerError(
+        'invalid unix app-server URL: expected ws+unix:<normalized absolute socket path>',
+        { code: 'USAGE_ERROR' },
+      );
+    }
+    if (Buffer.byteLength(socketPath, 'utf8') > MAX_UNIX_SOCKET_PATH_BYTES) {
+      throw new AppServerError('unix app-server socket path is too long', { code: 'USAGE_ERROR' });
+    }
+    return `ws+unix:${socketPath}`;
+  }
   let parsed;
   try { parsed = new URL(url); } catch (error) {
     throw new AppServerError('invalid WebSocket URL', { code: 'USAGE_ERROR', cause: error });
@@ -56,6 +73,18 @@ function validateUrl(url) {
     throw new AppServerError('refusing non-loopback app-server URL', { code: 'USAGE_ERROR' });
   }
   return parsed.toString();
+}
+
+// ws performs the HTTP upgrade while createConnection selects the underlying
+// unix socket. The public endpoint stays ws+unix:... for runtime identity and
+// ownership comparisons; the synthetic URL is never exposed to callers.
+function webSocketTransport(endpoint) {
+  if (!endpoint.startsWith('ws+unix:')) return { address: endpoint, options: {} };
+  const socketPath = endpoint.slice('ws+unix:'.length);
+  return {
+    address: 'ws://localhost/',
+    options: { createConnection: () => net.createConnection(socketPath) },
+  };
 }
 
 // Every timeout is a positive 32-bit-safe integer, so no call can wait forever.
@@ -141,9 +170,14 @@ class AppServerClient extends EventEmitter {
     await new Promise((resolve, reject) => {
       let socket;
       try {
+        const transport = webSocketTransport(this.url);
         // No per-message deflate: the managed daemon (like Codex Desktop's own
         // client) closes a handshake that offers the extension.
-        socket = new WebSocket(this.url, { maxPayload: MAX_INBOUND_MESSAGE_BYTES, perMessageDeflate: false });
+        socket = new WebSocket(transport.address, {
+          ...transport.options,
+          maxPayload: MAX_INBOUND_MESSAGE_BYTES,
+          perMessageDeflate: false,
+        });
       } catch (error) {
         reject(new AppServerError(error.message, { code: 'TRANSPORT_ERROR', cause: error }));
         return;
@@ -421,6 +455,7 @@ module.exports = {
   AppServerClient,
   AppServerError,
   MAX_INBOUND_MESSAGE_BYTES,
+  MAX_UNIX_SOCKET_PATH_BYTES,
   canonicalCodexUserAgent,
   validateTimeout,
   validateUrl,

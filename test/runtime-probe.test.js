@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 const { WebSocketServer } = require('ws');
 const { once } = require('node:events');
@@ -17,6 +20,19 @@ test('runtime probe exposes a no-side-effect help path', async () => {
 test('runtime probe positively identifies a Codex app-server handshake', async (t) => {
   const server = await startMockAppServer();
   t.after(() => server.close());
+
+  const result = await runNodeScript('scripts/runtime-probe.js', ['--url', server.url]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /codex_cli_rs\/0\.151\.0/);
+});
+
+test('runtime probe positively identifies a unix-socket app-server', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-runtime-probe-'));
+  const server = await startMockAppServer(undefined, { socketPath: path.join(root, 'app.sock') });
+  t.after(async () => {
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 
   const result = await runNodeScript('scripts/runtime-probe.js', ['--url', server.url]);
   assert.equal(result.code, 0, result.stderr);

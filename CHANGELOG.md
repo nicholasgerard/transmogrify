@@ -2,6 +2,11 @@
 
 ## 0.6.0 (in progress)
 
+- Prefer Codex's installer-managed app-server daemon and reach its Unix control
+  socket directly from Transmogrify or through an owned loopback TCP relay for
+  Desktop. `runtime-up.sh` now returns the relay URL, socket, and daemon version
+  as JSON, and explicitly reports its legacy standalone fallback. Runtime URL
+  selection reads the live relay record before falling back to port 8843.
 - The Codex runtime is accepted by version, 0.151.0 or newer, whatever
   product name it reports: the managed daemon names itself after the
   originator of its first client. The client's handshake no longer offers

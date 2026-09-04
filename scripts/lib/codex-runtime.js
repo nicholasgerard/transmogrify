@@ -8,6 +8,7 @@
 const crypto = require('node:crypto');
 const { requireOwnedLane, requireOwnedProviderLane, updateLane } = require('./state');
 const { AppServerClient, validateUrl } = require('./app-server');
+const { activeRelayUrl } = require('./relay');
 const { AdapterError } = require('./adapter-kit');
 const { sleep } = require('./async');
 const { VERSION } = require('./version');
@@ -75,10 +76,11 @@ const MAX_SPAWN_ABSENCE_GRACE_MS = 86_400_000;
 // The shared adapter error under the name this adapter has always exported.
 const TransmogrifyError = AdapterError;
 
-// The selected runtime endpoint: explicit option, then TRANSMOGRIFY_URL, then
-// the default loopback port. Callers still pass the result through validateUrl.
-function runtimeUrl(options, env = process.env) {
+// The selected runtime endpoint: explicit option, TRANSMOGRIFY_URL, the live
+// managed-daemon relay record, then the legacy standalone loopback port.
+function runtimeUrl(options, env = process.env, dependencies = {}) {
   return options.url || env.TRANSMOGRIFY_URL ||
+    (dependencies.activeRelayUrl || activeRelayUrl)(env, dependencies) ||
     `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`;
 }
 

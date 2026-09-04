@@ -11,12 +11,12 @@ const { VERSION } = require('./lib/version');
 
 function usage(message) {
   if (message) console.error(`error: ${message}`);
-  console.error('usage: runtime-probe.js [--url ws://127.0.0.1:8843] [--timeout-ms ms]');
+  console.error('usage: runtime-probe.js [--url <loopback-ws-or-ws+unix-endpoint>] [--timeout-ms ms]');
   process.exit(2);
 }
 
 function help() {
-  console.log('usage: runtime-probe.js [--url ws://127.0.0.1:8843] [--timeout-ms ms]');
+  console.log('usage: runtime-probe.js [--url <loopback-ws-or-ws+unix-endpoint>] [--timeout-ms ms]');
   process.exit(0);
 }
 
