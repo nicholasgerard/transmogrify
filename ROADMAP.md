@@ -228,6 +228,22 @@ reusing both without starting anything, the doctor reaching the runtime
 through the relay record, the Claude build measurement cached by digest, and
 the Codex method probe cached by runtime version.
 
+2026-09-04, wave 0.6 second harvest and the exchange acceptance, unattended
+maintainer run. Guided setup, Desktop attachment through the relay, and the
+lane exchange were dispatched in parallel, reviewed, merged (suite 558), and
+retired; the exchange lane's own seat was committed with its new `harvest
+--commit`. Then a disposable Codex probe lane exercised the whole contract on
+the live daemon: the spawn provisioned its seat (the exchange directory, the
+project's `node_modules` by symlink, both recorded on the seat), the lane
+wrote its handback inside the worktree, `harvest --commit` produced the
+commit under the handed-back title with provider attribution and printed the
+retirement command, and `retire` verified the archive and removed the seat
+without a blocked cleanup or any manual step. Also verified live after the
+merges: the attachment check selects the relay from its record and reports
+the attached Desktop with `persisted: false`, the doctor's plan is empty on
+this machine, `persist --dry-run` prints the exact login-session change and
+LaunchAgent, and `setup --dry-run` performs nothing.
+
 ## The 0.6.0 wave
 
 Goal: a runtime that survives relaunches, app updates, and logins, and an
