@@ -96,7 +96,7 @@ provider or measured local interfaces.
 
 ### Run record
 
-2026-09-03, releases 0.2.2 through 0.2.5, Nick at Codex Desktop, Claude
+2026-09-03, releases 0.2.2 through 0.2.5, the owner at Codex Desktop, Claude
 Desktop, and iPhone. Exercised and green: skill loaded in both hosts; doctor
 with runtime reuse and `setup.ready`; Claude lane from the Claude host with
 live Desktop and iPhone visibility; Codex lane from the Claude host with the
@@ -283,12 +283,12 @@ and one machine that has never seen Transmogrify.
   session in the lineage at retirement; an unproven fork stays
   `forkedCopyStopped`. Acceptance: stop, recover, steer lands in the newest
   transcript, retire clears every row. About 400 lines with tests.
-- Two acceptance rows still need Nick present: mobile reattachment after a
+- Two acceptance rows still need the owner present: mobile reattachment after a
   Desktop restart (spawn a narrating Codex probe, quit and relaunch Desktop
   attached, confirm the lane is listed and streams on the iPhone, steer from
   the phone, retire; if the thread is missing after the relaunch, `recover
   --input` is the repair to test), and a seeded same-name foreign session
-  (Nick starts a hand-run `claude --bg --remote-control` and a hand-run Codex
+  (the owner starts a hand-run `claude --bg --remote-control` and a hand-run Codex
   thread with a lane's exact title; spawn, steer, and retire the lane; verify
   by hand that the foreign sessions never receive anything and survive).
 - Replace the environment-variable attach with Codex's managed daemon
@@ -310,7 +310,7 @@ and one machine that has never seen Transmogrify.
   (2) `daemon bootstrap --remote-control`, our client over the socket,
   cross-client `thread/status/changed` and `turn/completed` for a thread
   another client created, steer, interrupt, archive, plus a schema diff
-  between 0.151.0 and 0.153.0-alpha.5; (3) with Nick, one deliberate Desktop
+  between 0.151.0 and 0.153.0-alpha.5; (3) with the owner, one deliberate Desktop
   launch with the switch on a disposable profile, lsof receipt of the socket
   connection, a thread from our client rendering on Desktop and iPhone;
   (4) persistence across a Dock relaunch and a login. Kill criteria: pid
