@@ -168,8 +168,18 @@ each `available`, `reconciled`, `results`, `notOk`, `skipped`, and `code`
 when a reconcile threw), `counts`
 (`ownedActive`, `ownedStopped`, `pendingOperations`, `pendingRetirements`,
 `cleanupBlocked`, `unattendedChildren`), `setup` (the doctor's own setup
-block: `ready`, `ownerActions`). No provider id, lane id, name, or path ever
-appears in this output.
+block: `ready`, `ownerActions`, and optional `plan`). No provider id, lane id,
+name, or path ever appears in this output.
+
+## Doctor explanation
+
+`doctor.js --explain` adds `setup.plan`. The plan has `context`, a sentence
+for the current terminal, IDE, or unsupported host when one applies, and
+ordered `steps`. Every step has `what`, `why`, `consent`, and `command`.
+`consent` is one of `none`, `install`, `sign-in`, `start-runtime`, or
+`relaunch-desktop`. The existing `setup.ownerActions` remain unchanged beside
+the plan. On a terminal, the doctor also prints a short `Found`, `Ready`,
+`Needed`, `Next` summary before the JSON document.
 
 With `--retention`, the result carries `retention` instead of
 `providers`/`counts`/`setup`: `dryRun`, `keepDays`, `keepBackups`,

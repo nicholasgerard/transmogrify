@@ -74,6 +74,10 @@ const RECONCILE_ENTRY = {
   error: { code: true },
 };
 const PROFILE_FIELDS = { requestedProfile: true, resolvedProfile: true, observedProfile: true };
+const SETUP_PLAN = {
+  context: true,
+  steps: { what: true, why: true, consent: true, command: true },
+};
 
 function laneShape(receipt, extra = {}) {
   return {
@@ -175,6 +179,7 @@ const SCHEMAS = Object.freeze({
     setup: {
       ready: true,
       ownerActions: { provider: true, reason: true, blocking: true, ownerAction: true },
+      plan: SETUP_PLAN,
     },
     retention: {
       dryRun: true, keepDays: true, keepBackups: true,
@@ -240,6 +245,7 @@ module.exports = {
   PHASES,
   PROVIDER_PHASES,
   SCHEMAS,
+  SETUP_PLAN,
   describeSchema,
   normalizePhase,
   phaseFields,

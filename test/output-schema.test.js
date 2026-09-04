@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const {
-  PHASES, PROVIDER_PHASES, SCHEMAS, describeSchema, normalizePhase, phaseFields, publicResult,
+  PHASES, PROVIDER_PHASES, SCHEMAS, SETUP_PLAN, describeSchema, normalizePhase, phaseFields, publicResult,
 } = require('../scripts/lib/output-schema');
 
 test('every provider phase maps to one normalized phase and unknown words stay unknown', () => {
@@ -114,4 +114,27 @@ test('the schema command and docs/OUTPUT.md agree on operations and top-level ke
     }
   }
   for (const phase of PHASES) assert.ok(doc.includes(`\`${phase}\``), `OUTPUT.md names phase ${phase}`);
+});
+
+test('the setup plan schema exposes only the documented explanation fields', () => {
+  assert.deepEqual(SETUP_PLAN, {
+    context: true,
+    steps: { what: true, why: true, consent: true, command: true },
+  });
+  const projected = publicResult({
+    version: 1, ok: true, operation: 'maintain', dryRun: true,
+    setup: {
+      ready: false,
+      ownerActions: [],
+      plan: {
+        context: 'A terminal context.',
+        privateSignal: 'secret',
+        steps: [{ what: 'Do one thing.', why: 'It is needed.', consent: 'none', command: 'do-it', secret: 'hidden' }],
+      },
+    },
+  });
+  assert.deepEqual(projected.setup.plan, {
+    context: 'A terminal context.',
+    steps: [{ what: 'Do one thing.', why: 'It is needed.', consent: 'none', command: 'do-it' }],
+  });
 });

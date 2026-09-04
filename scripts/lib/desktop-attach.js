@@ -231,6 +231,13 @@ async function ancestorProcessIds(run, env, startPid) {
   return ancestors;
 }
 
+// The private-runtime self-host check is an identity intersection, shared with
+// host-context detection so the two callers cannot disagree about ancestry.
+function hostedByDesktop(ancestorPids, desktopPids) {
+  const desktop = new Set(desktopPids);
+  return ancestorPids.some((pid) => desktop.has(pid));
+}
+
 // Established client connections into the runtime port, or an empty list when
 // nothing is connected.
 async function establishedClients(run, port, env) {
@@ -324,7 +331,7 @@ async function check(options = {}, env = process.env, dependencies = {}) {
   let app;
   let pids;
   let clients;
-  let hostedByDesktop = false;
+  let desktopHostsSession = false;
   try {
     app = await resolveDesktopApp(run, env);
     if (!app) {
@@ -336,8 +343,9 @@ async function check(options = {}, env = process.env, dependencies = {}) {
     }
     pids = await desktopProcessIds(run, app.appPath, env);
     clients = pids.length ? await establishedClients(run, port, env) : [];
-    hostedByDesktop = pids.length > 0 &&
-      (await ancestorProcessIds(run, env, selfPid)).some((ancestor) => pids.includes(ancestor));
+    desktopHostsSession = pids.length > 0 && hostedByDesktop(
+      await ancestorProcessIds(run, env, selfPid), pids,
+    );
   } catch (error) {
     if (error instanceof DesktopAttachError && error.code !== 'USAGE_ERROR') {
       return unattached(null, {
@@ -354,7 +362,7 @@ async function check(options = {}, env = process.env, dependencies = {}) {
     buildTested: buildTested(app),
     running: pids.length > 0,
     pids,
-    hostedByDesktop,
+    hostedByDesktop: desktopHostsSession,
   };
   if (!pids.length) {
     return unattached(desktop, { state: 'notRunning', evidence: 'no-desktop-process' }, 'run-desktop-attach-ensure');
@@ -542,5 +550,6 @@ module.exports = {
   check,
   clientConnections,
   ensure,
+  hostedByDesktop,
   parseEstablishedConnections,
 };
