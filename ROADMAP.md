@@ -192,6 +192,22 @@ hosts. Desktop was restored attached to the shared loopback runtime. Next
 candidate: a loopback TCP relay to the daemon's socket, so Desktop reaches
 the daemon through the supported `CODEX_APP_SERVER_WS_URL` path.
 
+2026-09-04, loopback relay to the managed daemon, owner present. With the
+managed daemon running in the owner's real home and a 20-line Node relay
+listening on 127.0.0.1:8844 and piping bytes to the daemon's unix socket,
+Codex Desktop relaunched with `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:8844/rpc`
+attached through the relay (one TCP connection to the relay, one client on
+the daemon socket, no private runtime, nothing on 8843), and a disposable
+thread created by a second client on the daemon's socket ran a real turn
+to completion with the full notification stream (`thread/started`,
+`turn/started`, `item/agentMessage/delta`, `turn/completed`) and was
+archived. Two things the daemon design must absorb: the daemon's
+`initialize` user agent starts with the originator of its first client
+(not `codex_cli_rs/…`), so the verified-runtime check needs to read the
+version rather than the product name; and a daemon started from the
+managed install reports its own version (0.151.0 here) independently of
+the CLI on `PATH`.
+
 ## Priority 1: compatibility and acceptance hardening
 
 - Onboarding that works wherever the start prompt lands: compatibility by
