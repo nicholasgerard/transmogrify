@@ -58,8 +58,9 @@ describe('the start prompt', () => {
     );
     assert.match(
       remotePrompt,
-      /"\$TRANSMOGRIFY_SCRATCH\/install\.sh" --target "\$TRANSMOGRIFY_INSTALL_TARGET" --dry-run/,
+      /"\$TRANSMOGRIFY_SCRATCH\/install\.sh" --dry-run/,
     );
+    assert.doesNotMatch(remotePrompt, /TRANSMOGRIFY_INSTALL_TARGET|install\.sh" --target/);
     assert.match(remotePrompt, /cleanup_transmogrify_scratch/);
   });
 
@@ -70,21 +71,21 @@ describe('the start prompt', () => {
     assert.match(remotePrompt, /never fall back to the repository default branch/);
   });
 
-  test('tells the agent to reuse a compatible runtime', () => {
-    assert.match(remotePrompt, /reuse a compatible runtime/i);
+  test('tells the agent to reuse only what the doctor found', () => {
+    assert.match(remotePrompt, /Reuse what the doctor found/i);
     assert.match(
       remotePrompt,
-      /Never kill, restart,\s+reconfigure, steer, interrupt, archive, or adopt/i,
+      /Never kill, restart,\s+reconfigure, steer,\s+interrupt, archive, or adopt/i,
     );
   });
 
-  test('tells the agent to ask before starting a new runtime', () => {
-    assert.match(remotePrompt, /ask before starting one/i);
+  test('requires one consent before starting a new runtime', () => {
+    assert.match(remotePrompt, /ask one yes-or-no question and\s+wait/i);
+    assert.match(remotePrompt, /setup\.js" --repo-root "\$REPO_ROOT" --start-runtime/);
   });
 
   test('names both host targets so it works pasted into either agent', () => {
-    assert.match(remotePrompt, /TRANSMOGRIFY_INSTALL_TARGET=codex/);
-    assert.match(remotePrompt, /TRANSMOGRIFY_INSTALL_TARGET=claude/);
+    assert.match(remotePrompt, /Install for both Claude and Codex/);
     assert.match(remotePrompt, /\.agents\/skills\/transmogrify/);
     assert.match(remotePrompt, /\.claude\/skills\/transmogrify/);
     assert.match(remotePrompt, /--target all/);

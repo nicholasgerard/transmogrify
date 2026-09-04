@@ -30,6 +30,7 @@ endpoint. Add `--url` only to override that selection.
 | Symptom or code | Section |
 | --- | --- |
 | Install, upgrade, rollback, or uninstall | [Installation and upgrades](#installation-and-upgrades) |
+| `consent-required`, `hosting-cli-protected`, `foreign-runtime`, `manual-action-required`, `step-not-verified` | [Guided setup stops](#guided-setup-stops) |
 | Refused `WORKTREES` root inside the repository | [Managed worktree is not ignored](#managed-worktree-is-not-ignored) |
 | Ownership or mode refusal on state and seat paths | [Private state or worktree permissions](#private-state-or-worktree-permissions) |
 | `EPERM` on operator state, sockets, `ps`, or the Keychain inside a child lane | [Lane sandbox denials](#lane-sandbox-denials) |
@@ -69,26 +70,35 @@ Desktop and the ChatGPT app can load the skill, and a new session in the other
 app picks it up. Inspect the remaining machine setup without changing it:
 
 ```bash
-node "$HOME/.agents/skills/transmogrify/scripts/setup.js" \
-  --repo-root /absolute/path/to/repository --dry-run
+export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
+node "$SKILL_ROOT/scripts/doctor.js" \
+  --repo-root /absolute/path/to/repository --target all --explain
 ```
 
-For guided setup, remove `--dry-run`. A TTY asks before each consented step.
-A non-interactive run needs the exact flag printed by `setup.js --help` for
-the next step. `consent-required` means no matching flag or interactive yes
-was supplied. `hosting-cli-protected` means the requested installer would
-replace the Claude or Codex CLI running the current session; open the other
-host or a plain terminal and retry there. `foreign-runtime` means a compatible
-standalone runtime appeared during setup but was not started by this run;
-rerun the doctor and reuse it explicitly instead of adopting or replacing it.
-`manual-action-required` means the doctor described a safe manual repair that
-is not on setup's fixed execution allowlist.
+For guided setup, run `setup.js --repo-root /absolute/path/to/repository`. A
+TTY asks before each consented step. A non-interactive run needs only the
+matching flag for the first step. Do not pre-authorize later steps.
 
-Setup reruns the doctor after every successful action. If it reports
-`step-not-verified`, the action returned but the machine still measures the
-same unmet requirement. Fix that provider directly, then start a fresh setup
-run; do not blindly repeat an installer, sign-in, app relaunch, or runtime
-start.
+### Guided setup stops
+
+Start by rerunning the read-only explanation so the repair is based on the
+current machine rather than the previous attempt:
+
+```bash
+node "$SKILL_ROOT/scripts/doctor.js" \
+  --repo-root /absolute/path/to/repository --target all --explain
+```
+
+| Setup result | Meaning | Repair |
+| --- | --- | --- |
+| `consent-required` | The first needed step was not authorized. | Read its reason, ask one question, then rerun setup with only the matching consent flag. |
+| `hosting-cli-protected` | Installation would replace the Claude or Codex CLI hosting this session. | Open the other host or a plain terminal and authorize that one install step there. |
+| `foreign-runtime` | A compatible Codex runtime appeared, but this setup did not start it. | Rerun the doctor and explicitly reuse it; never adopt, replace, or restart it. |
+| `manual-action-required` | The doctor found a safe repair outside setup's fixed allowlist. | Follow the exact doctor guidance or repair that provider directly, then rerun the doctor. |
+| `step-not-verified` | The action returned, but the same need was still measured. | Repair the provider directly and start a fresh setup run; do not blindly repeat an install, sign-in, app relaunch, or runtime start. |
+
+Setup reruns the doctor after every successful action. Report what was found,
+ready, needed, and next in plain words, then handle only the new first step.
 
 To upgrade, update a trusted source checkout, reinstall its exact dependency
 lock, inspect the dry run, and install:

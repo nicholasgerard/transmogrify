@@ -40,6 +40,10 @@
 - Add consent-gated guided setup for both hosts, with measured doctor reruns,
   protected hosting CLIs, owned-runtime checks, Desktop attach persistence,
   vendor-documented installers, and machine-wide install readiness guidance.
+- Make the one-line start handoff install both host skills, run the explaining
+  doctor, and guide only the first consented setup step at a time. Terminal,
+  IDE, and unsupported-machine narration now comes from the same context
+  sentences as the doctor's plan.
 - The Codex runtime is accepted by version, 0.151.0 or newer, whatever
   product name it reports: the managed daemon names itself after the
   originator of its first client. The client's handshake no longer offers
