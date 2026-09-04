@@ -7,6 +7,11 @@
   Desktop. `runtime-up.sh` now returns the relay URL, socket, and daemon version
   as JSON, and explicitly reports its legacy standalone fallback. Runtime URL
   selection reads the live relay record before falling back to port 8843.
+- Claude Code CLI compatibility now has a measured minimum of 2.1.258 with no
+  maximum: newer builds are probed once and cached by executable digest, failed
+  probes are named, and setup advice never proposes a downgrade. The doctor
+  also caches required Codex app-server method probes by runtime version and
+  inventories the PATH, Desktop-bundled, and explicitly selected Codex CLIs.
 - The Codex runtime is accepted by version, 0.151.0 or newer, whatever
   product name it reports: the managed daemon names itself after the
   originator of its first client. The client's handshake no longer offers

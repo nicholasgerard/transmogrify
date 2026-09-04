@@ -177,6 +177,30 @@ With `--retention`, the result carries `retention` instead of
 `trashDir`. Retention only moves matter into a recoverable trash directory;
 it never unlinks anything.
 
+### `doctor`
+
+The doctor is a separate read-only JSON report rather than a lane output-schema
+operation. Its top level carries `version`, `ok`, `mode`,
+`providerMutationsAttempted`, `registry`, `providers`, `setup`, and
+`nextSafeMaintenanceCommands`.
+
+Each provider reports `requested`, `available`, `reusable`, `reuse`, `probe`,
+the supported or pre-measured compatibility receipt in `pinned`, and a bounded
+`observed` block. Claude's observed block adds `buildMeasurement` (`result`,
+`source`, `measuredAt`) and `agentListReadable`. Codex's observed block adds
+`compatibility`, `compatibleMethods`, and `failingMethod` when present. Codex
+also reports `cliBinaries`; each entry contains an executable `path`, discovery
+`sources` (`PATH`, `codex-desktop`, or `TRANSMOGRIFY_BIN`), and the parsed
+`version` or `null`. Those binaries are invoked only with `--version`.
+
+An unavailable provider has an `error.code` and `setup`. Setup carries
+`reason`, `blocking`, and `ownerAction`; `cli-unmeasured-failed` additionally
+names `failingProbe`, and `runtime-unsupported` names `failingMethod`.
+`setup.ownerActions` aggregates the user actions without provider-private
+details. Claude versions below `2.1.258` use `cli-unsupported`; a failed newer
+build measurement uses `cli-unmeasured-failed`. Codex versions or methods that
+do not meet the runtime contract use `runtime-unsupported`.
+
 ## Failure envelope
 
 `version`, `ok: false`, `code`, `message`, and optional `details` limited to:

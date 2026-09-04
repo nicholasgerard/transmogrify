@@ -7,6 +7,7 @@ const test = require('node:test');
 const {
   CLAUDE_BACKEND,
   CODEX_BACKEND,
+  codexCliBinaries,
   main,
   parseDoctorArgs,
 } = require('../scripts/doctor');
@@ -114,21 +115,30 @@ test('doctor reuses only read-only provider surfaces and emits aggregate ownersh
     evidence: 'desktop-attachment:disabled',
     nextAction: 'use-allow-protocol-only',
   });
-  assert.equal(result.providers.codex.probe, 'initialize-handshake-and-desktop-attachment-read');
+  assert.equal(result.providers.codex.probe, 'initialize-handshake-method-compatibility-and-desktop-attachment-read');
   assert.deepEqual(result.providers.codex.observed, {
     userAgentFamily: 'codex_cli_rs',
     version: '0.151.0',
     pinnedVersionLine: true,
+    compatibility: 'good',
+    compatibleMethods: [
+      'thread/list', 'thread/turns/list', 'turn/steer', 'thread/name/set', 'thread/archive',
+    ],
   });
   assert.equal(result.providers.claude.reuse, 'installed-cli-session-surface');
   assert.equal(result.providers.claude.reusable, true);
   assert.equal(result.providers.claude.observed.agentListReadable, true);
   assert.equal(result.providers.claude.pinned.cliVersion, PINNED_CLI_VERSION);
   assert.equal(result.providers.claude.pinned.cliSha256, PINNED_CLI_SHA256);
-  await waitForRequests(server, 2);
+  await waitForRequests(server, 7);
   assert.deepEqual(server.requests.map((request) => request.method), [
     'initialize',
     'initialized',
+    'thread/list',
+    'thread/turns/list',
+    'turn/steer',
+    'thread/name/set',
+    'thread/archive',
   ]);
   assert.deepEqual(claudeCalls.map((call) => call.method), ['preflight', 'run']);
   assert.deepEqual(claudeCalls[0].options, { claudeBin: '/opt/homebrew/bin/claude' });
@@ -190,10 +200,15 @@ test('doctor creates the outside-repository registry and skips unrequested provi
   assert.equal(result.providers.claude.available, null);
   assert.equal(claudeTouched, false);
   assert.deepEqual(result.nextSafeMaintenanceCommands, []);
-  await waitForRequests(server, 2);
+  await waitForRequests(server, 7);
   assert.deepEqual(server.requests.map((request) => request.method), [
     'initialize',
     'initialized',
+    'thread/list',
+    'thread/turns/list',
+    'turn/steer',
+    'thread/name/set',
+    'thread/archive',
   ]);
 });
 
@@ -394,7 +409,12 @@ test('doctor detects but will not recommend reusing an unverified Codex version'
     userAgentFamily: 'Codex Desktop',
     version: '0.148.0',
     pinnedVersionLine: false,
+    compatibility: 'failed',
+    compatibleMethods: [],
+    failingMethod: 'minimum-version',
   });
+  assert.equal(result.providers.codex.setup.reason, 'runtime-unsupported');
+  assert.equal(result.providers.codex.setup.failingMethod, 'minimum-version');
   assert.deepEqual(result.nextSafeMaintenanceCommands, []);
   assert.equal(JSON.stringify(result).includes('/tmp/private-codex-home'), false);
   assert.equal(JSON.stringify(result).includes('private suffix'), false);
@@ -530,4 +550,92 @@ test('doctor names the owner action for every unmet setup precondition', async (
   assert.deepEqual(ready.setup, { ready: true, ownerActions: [] });
   assert.equal(ready.providers.claude.setup, undefined);
   assert.equal(ready.providers.codex.setup, undefined);
+});
+
+test('doctor distinguishes unsupported and failed-measurement Claude builds without proposing a downgrade', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  for (const [reason, probe] of [
+    ['cli-unsupported', 'minimum-version'],
+    ['cli-unmeasured-failed', 'settings-argument'],
+  ]) {
+    const result = await main([
+      '--repo-root', fixture.repoRoot,
+      '--target', 'claude',
+    ], { ...fixture.env, CLAUDE_CODE_EXECPATH: '/running/claude' }, {
+      claudeSurface: {
+        preflight() {
+          const error = new Error('private build detail');
+          error.code = 'UNSUPPORTED_ENVIRONMENT';
+          error.details = { reason, probe };
+          throw error;
+        },
+        run() { throw new Error('must not run'); },
+      },
+    });
+    assert.equal(result.providers.claude.setup.reason, reason);
+    assert.equal(result.setup.ready, false);
+    assert.doesNotMatch(result.providers.claude.setup.ownerAction, /2\.1\.258|downgrade|older/i);
+    assert.match(result.providers.claude.setup.ownerAction, /claude install/);
+    if (reason === 'cli-unmeasured-failed') {
+      assert.equal(result.providers.claude.setup.failingProbe, probe);
+      assert.match(result.providers.claude.setup.ownerAction, /settings-argument/);
+    }
+  }
+});
+
+test('doctor reports a supported-version Codex method failure as runtime-unsupported', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const server = await startMockAppServer((request) => {
+    if (request.method === 'thread/list') {
+      return { error: { code: -32601, message: 'method not found' } };
+    }
+    return { result: {} };
+  }, {
+    initializeResult: {
+      codexHome: '/tmp/codex-home',
+      platformFamily: 'unix',
+      platformOs: 'test',
+      userAgent: 'codex_cli_rs/0.155.0',
+    },
+  });
+  t.after(() => server.close());
+  const result = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'codex',
+    '--url', server.url,
+  ], fixture.env);
+  assert.equal(result.providers.codex.available, true);
+  assert.equal(result.providers.codex.reusable, false);
+  assert.equal(result.providers.codex.setup.reason, 'runtime-unsupported');
+  assert.equal(result.providers.codex.setup.failingMethod, 'thread/list');
+  assert.match(result.providers.codex.setup.ownerAction, /thread\/list/);
+});
+
+test('doctor inventories every distinct Codex CLI candidate using only --version', (t) => {
+  const root = fs.mkdtempSync('/tmp/transmogrify-doctor-binaries-');
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const firstDir = `${root}/first`;
+  const secondDir = `${root}/second`;
+  fs.mkdirSync(firstDir);
+  fs.mkdirSync(secondDir);
+  const first = `${firstDir}/codex`;
+  const second = `${secondDir}/codex`;
+  fs.writeFileSync(first, '#!/bin/sh\n', { mode: 0o700 });
+  fs.writeFileSync(second, '#!/bin/sh\n', { mode: 0o700 });
+  const calls = [];
+  const binaries = codexCliBinaries({
+    PATH: `${firstDir}:${secondDir}`,
+    TRANSMOGRIFY_BIN: second,
+  }, {
+    execFileSync(executable, args) {
+      calls.push([executable, args]);
+      return executable === fs.realpathSync(first) ? 'codex-cli 0.148.0\n' : 'codex-cli 0.153.0\n';
+    },
+  });
+  assert.deepEqual(binaries.filter((binary) => binary.path.startsWith(fs.realpathSync(root))), [
+    { path: fs.realpathSync(first), sources: ['PATH'], version: '0.148.0' },
+    { path: fs.realpathSync(second), sources: ['PATH', 'TRANSMOGRIFY_BIN'], version: '0.153.0' },
+  ]);
+  assert.equal(binaries.some((binary) => binary.sources.includes('codex-desktop')), true);
+  assert.equal(calls.every((call) => JSON.stringify(call[1]) === '["--version"]'), true);
 });

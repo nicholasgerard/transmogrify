@@ -8,6 +8,7 @@ const test = require('node:test');
 const {
   BRIDGE_PATTERN,
   MAX_STEER_BYTES,
+  MINIMUM_CLI_VERSION,
   PINNED_CLI_SHA256,
   PINNED_CLI_VERSION,
   assertSafeLaneValue,
@@ -18,10 +19,12 @@ const {
   claudeSpawnArgs,
   createClaudeSurface,
   exactOwnedAgent,
+  isVerifiedCliBuild,
   parseAgents,
   parseAuthStatus,
   parseJobId,
   parseVersion,
+  measuredBuildFile,
   sanitizedClaudeEnv,
   sha256,
 } = require('../scripts/lib/claude-surface');
@@ -188,7 +191,7 @@ test('Claude auth parsing and child environment exclude ambient Claude credentia
   });
 });
 
-test('Claude preflight pins platform, CLI hash/version, default config, and account fingerprint', (t) => {
+test('Claude preflight pins platform, CLI identity, default config, and account fingerprint', (t) => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-surface-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const cli = path.join(root, 'claude');
@@ -214,7 +217,8 @@ test('Claude preflight pins platform, CLI hash/version, default config, and acco
       throw new Error('unexpected command');
     },
   });
-  const runtime = surface.preflight({ claudeBin: cli }, { PATH: '/bin' });
+  const env = { PATH: '/bin', TRANSMOGRIFY_STATE_DIR: path.join(root, 'state') };
+  const runtime = surface.preflight({ claudeBin: cli }, env);
   assert.equal(runtime.cliPath, fs.realpathSync(cli));
   assert.equal(runtime.cliSha256, PINNED_CLI_SHA256);
   assert.equal(runtime.cliVersion, PINNED_CLI_VERSION);
@@ -223,6 +227,9 @@ test('Claude preflight pins platform, CLI hash/version, default config, and acco
   assert.equal(runtime.projectsDevice, fs.statSync(projects).dev);
   assert.equal(runtime.projectsInode, fs.statSync(projects).ino);
   assert.equal(runtime.accountFingerprint.length, 64);
+  const measurement = measuredBuildFile(PINNED_CLI_SHA256, env);
+  assert.equal(fs.statSync(measurement).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(fs.readFileSync(measurement, 'utf8')).source, 'verified-build-fast-path');
   assert.deepEqual(calls.map((entry) => entry[1]), [
     ['--version'],
     ['auth', 'status', '--json'],
@@ -234,15 +241,101 @@ test('Claude preflight pins platform, CLI hash/version, default config, and acco
 
   fs.chmodSync(projects, 0o777);
   assert.throws(
-    () => surface.preflight({ claudeBin: cli }, { PATH: '/bin' }),
+    () => surface.preflight({ claudeBin: cli }, env),
     /Claude projects directory is not owner-controlled/,
   );
   fs.chmodSync(projects, 0o700);
   fs.chmodSync(path.dirname(projects), 0o777);
   assert.throws(
-    () => surface.preflight({ claudeBin: cli }, { PATH: '/bin' }),
+    () => surface.preflight({ claudeBin: cli }, env),
     /Claude config directory is not owner-controlled/,
   );
+});
+
+test('Claude preflight measures a newer build once and reuses its owner-only cache', (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-measure-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cli = path.join(root, 'claude');
+  const projects = path.join(root, '.claude', 'projects');
+  const state = path.join(root, 'state');
+  fs.writeFileSync(cli, '#!/bin/sh\n', { mode: 0o700 });
+  fs.mkdirSync(projects, { recursive: true, mode: 0o700 });
+  const digest = 'a'.repeat(64);
+  const calls = [];
+  const auth = JSON.stringify({
+    loggedIn: true,
+    authMethod: 'claude.ai',
+    apiProvider: 'firstParty',
+    projectsDirectory: projects,
+    orgId: 'org-test',
+    email: 'test@example.invalid',
+  });
+  const surface = createClaudeSurface({
+    platform: 'darwin',
+    arch: 'arm64',
+    sha256File: () => digest,
+    execFileSync(_executable, args) {
+      calls.push(args);
+      if (args[0] === '--version') return '2.1.259 (Claude Code)\n';
+      if (args[0] === 'auth') return auth;
+      if (args[0] === 'agents') return '[]';
+      if (args.includes('--help')) return '--settings <json> --cloud <session> --output-format <format>\n';
+      throw new Error('unexpected command');
+    },
+  });
+  const env = { PATH: '/bin', TRANSMOGRIFY_STATE_DIR: state };
+  const first = surface.preflight({ claudeBin: cli }, env);
+  assert.equal(first.cliVersion, '2.1.259');
+  assert.equal(first.cliMeasurement.source, 'live-probe');
+  assert.deepEqual(calls.map((args) => args[0]), [
+    '--version', '--version', 'auth', 'agents', '--settings', '-p', 'auth',
+  ]);
+  const recordPath = measuredBuildFile(digest, env);
+  assert.equal(fs.statSync(recordPath).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(fs.readFileSync(recordPath, 'utf8')).result, 'good');
+  assert.equal(isVerifiedCliBuild('2.1.259', digest, {
+    cliPath: fs.realpathSync(cli), env,
+  }), true);
+
+  surface.preflight({ claudeBin: cli }, env);
+  assert.deepEqual(calls.slice(7).map((args) => args[0]), ['--version', 'auth']);
+});
+
+test('Claude preflight rejects below-minimum builds and names a cached failed probe', (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-measure-fail-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cli = path.join(root, 'claude');
+  const state = path.join(root, 'state');
+  fs.writeFileSync(cli, '#!/bin/sh\n', { mode: 0o700 });
+  const env = { PATH: '/bin', TRANSMOGRIFY_STATE_DIR: state };
+  let version = '2.1.257';
+  const digest = 'c'.repeat(64);
+  const calls = [];
+  const surface = createClaudeSurface({
+    platform: 'darwin', arch: 'arm64', sha256File: () => digest,
+    execFileSync(_executable, args) {
+      calls.push(args);
+      if (args[0] === '--version') return `${version} (Claude Code)\n`;
+      if (args[0] === 'auth') return '{"loggedIn":false}';
+      if (args[0] === 'agents') return '[]';
+      if (args[0] === '--settings') return 'no compatible option here';
+      throw new Error('unexpected command');
+    },
+  });
+  assert.throws(() => surface.preflight({ claudeBin: cli }, env),
+    (error) => error.details.reason === 'cli-unsupported' &&
+      error.details.probe === 'minimum-version');
+  assert.equal(MINIMUM_CLI_VERSION, '2.1.258');
+
+  version = '2.1.260';
+  assert.throws(() => surface.preflight({ claudeBin: cli }, env),
+    (error) => error.details.reason === 'cli-unmeasured-failed' &&
+      error.details.probe === 'settings-argument');
+  const afterFailure = calls.length;
+  assert.throws(() => surface.preflight({ claudeBin: cli }, env),
+    (error) => error.details.reason === 'cli-unmeasured-failed' &&
+      error.details.probe === 'settings-argument');
+  assert.equal(calls.length, afterFailure + 1, 'only --version runs before the failed cache is reused');
 });
 
 test('Claude worker verification shares one shrinking subprocess deadline', async (t) => {
@@ -525,6 +618,30 @@ test('Claude preflight failures carry a setup reason for the doctor', () => {
     })),
     (error) => error.code === 'UNSUPPORTED_ENVIRONMENT' && error.details.reason === 'account-not-first-party',
   );
+});
+
+test('Claude preflight preserves logged-out JSON from the auth command nonzero exit', (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-auth-exit-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cli = path.join(root, 'claude');
+  fs.writeFileSync(cli, '#!/bin/sh\n', { mode: 0o700 });
+  const surface = createClaudeSurface({
+    platform: 'darwin', arch: 'arm64', sha256File: () => PINNED_CLI_SHA256,
+    execFileSync(_executable, args) {
+      if (args[0] === '--version') return `${PINNED_CLI_VERSION} (Claude Code)\n`;
+      const error = new Error('auth exited one');
+      error.stdout = JSON.stringify({
+        loggedIn: false,
+        authMethod: 'none',
+        apiProvider: 'firstParty',
+        projectsDirectory: path.join(root, '.claude', 'projects'),
+      });
+      throw error;
+    },
+  });
+  assert.throws(() => surface.preflight({ claudeBin: cli }, {
+    PATH: '/bin', TRANSMOGRIFY_STATE_DIR: path.join(root, 'state'),
+  }), (error) => error.details.reason === 'not-logged-in');
 });
 
 test('Claude delivery receipts survive the CLI peer-message wrapper around the marker', (t) => {

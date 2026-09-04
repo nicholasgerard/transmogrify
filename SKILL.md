@@ -7,10 +7,11 @@ metadata:
   version: "0.5.0"
   verified_date: "2026-09-02"
   verified_codex_runtime: "app-server 0.151.0"
-  supported_codex_runtime: "app-server 0.151.0 or newer"
+  supported_codex_runtime: "app-server >=0.151.0"
   verified_codex_desktop: "26.901.20858 (7658)"
   verified_codex_mobile: "ChatGPT for iOS 1.2026.230 (32543289983)"
   verified_claude_cli: "2.1.258"
+  supported_claude_cli: ">=2.1.258"
   verified_claude_desktop: "1.40609.1"
   verified_claude_mobile: "Claude for iOS 1.260828.1 (33349478298)"
 ---
@@ -55,7 +56,7 @@ The hosting operator supplies or confirms these values before lane work:
 | Parameter | Meaning | Default |
 | --- | --- | --- |
 | RUNTIME_URL | Shared Codex app-server endpoint | `--url` → `TRANSMOGRIFY_URL` → live daemon-relay record → `TRANSMOGRIFY_PORT` → legacy `ws://127.0.0.1:8843` |
-| CLAUDE_BIN | Optional exact Claude CLI executable | `--claude-bin` → `CLAUDE_BIN` → pinned CLI on `PATH` |
+| CLAUDE_BIN | Optional exact Claude CLI executable | `--claude-bin` → `CLAUDE_BIN` → supported CLI on `PATH` |
 | REPO_ROOT | Absolute target repository root | required |
 | WORKTREES | Managed lane worktree parent | `REPO_ROOT/.worktrees` |
 | MAILBOX_DIR | Durable directives and acknowledgments, outside the repository | `${XDG_STATE_HOME:-~/.local/state}/transmogrify/mailboxes/<repo>/` |
@@ -84,14 +85,15 @@ node "$SKILL_ROOT/scripts/doctor.js" --repo-root "$REPO_ROOT" --target all
 ```
 
 The doctor is a read-only provider probe: it may create the empty registry,
-initialize a short-lived Codex client, and list Claude agents; it never starts,
-kills, restarts, steers, archives, removes, or adopts a session. Use
-`--target codex|claude` for a single-provider session.
+initialize a short-lived Codex client, test required methods against the nil
+thread ID, measure a Claude CLI build, and list Claude agents. It never starts,
+kills, restarts, steers a real turn, archives a real thread, removes, or adopts
+a session. Use `--target codex|claude` for a single-provider session.
 
 | Doctor result | What to do |
 | --- | --- |
 | `setup.ready:true`, provider `available:true` | Reuse the provider. Run only the doctor's printed maintenance commands, or an equally narrow exact-lane command. |
-| `setup.ownerActions[]` with `blocking:true` (Claude CLI logged out or unpinned, runtime needs authorization, sandbox denies loopback) | Do what the operator may do itself; ask the owner once, quoting the exact `ownerAction`; rerun the doctor until `setup.ready`. Never work around it through a private path. |
+| `setup.ownerActions[]` with `blocking:true` (Claude CLI logged out, below the minimum, or failed measurement; runtime needs authorization; sandbox denies loopback) | Do what the operator may do itself; ask the owner once, quoting the exact `ownerAction`; rerun the doctor until `setup.ready`. Never work around it through a private path. |
 | Advisory action (Codex Desktop not attached, not installed, unsupported platform) | Only native visibility is withheld. Ask the owner once whether to attach Desktop; if declined or impossible, spawn Codex lanes with `--allow-protocol-only` and say so. |
 | No Codex runtime, owner has authorized this installation to own one | `"$SKILL_ROOT/scripts/runtime-up.sh"` ensures the managed daemon and relay, or explicitly reports its fallback to the detached standalone runtime. Never kill, restart, or reconfigure a runtime that may host another orchestrator's lanes. |
 | `boundary:sandbox-loopback-denied` | Obtain one scoped host authorization for the doctor and the exact provider-control commands; do not report the provider ready until the probe succeeds. |
@@ -102,9 +104,9 @@ is the separate measured receipt that Codex Desktop is a client of that
 runtime, so new lanes render and stream in the app. If Desktop restarts while
 an independently managed app-server survives, that receipt goes false by
 itself: reconcile only the exact lanes the surviving runtime owns and
-re-attach before new dispatches. On the Claude side, an unavailable or
-unpinned CLI is a hard stop for lifecycle mutations; a changed Desktop build
-disables private archival only.
+re-attach before new dispatches. On the Claude side, an unavailable,
+below-minimum, or failed-measurement CLI is a hard stop for lifecycle
+mutations; a changed Desktop build disables private archival only.
 
 ### Attach Codex Desktop (macOS)
 
@@ -235,7 +237,7 @@ node "$SKILL_ROOT/scripts/lane.js" status --repo-root "$REPO_ROOT" --lane "$LANE
 | `executing` | a turn is in progress | Codex `steer` and `interrupt`; Claude `steer` queues to the next safe point |
 | `waiting` | blocked on input or approval (Claude) | `steer` still queues; review the child |
 | `idle` | no turn is active | Codex `recover --input` starts a boundary turn; Claude accepts a queued steer |
-| `stopped` | the whole Claude session is stopped | retire it and spawn anew; in-place resume is not available on the pinned CLI |
+| `stopped` | the whole Claude session is stopped | retire it and spawn anew; in-place resume is not available on the verified 2.1.258 CLI |
 | `failed` | the newest turn or thread failed | inspect, then recover or retire |
 | `retired` | archived, seat released | nothing |
 | `unknown` | no recognizable status | reconcile before acting |
@@ -326,7 +328,7 @@ was explicitly authorized for this run.
 - Codex `recover` without input observes exact thread IDs; with `--input` it
   resumes the same thread and starts one turn at the boundary (the lane must
   be `idle`). Claude `recover` runs `--resume` on the exact session; when the
-  pinned CLI forks instead, the adapter stops that copy and the lane stays
+  measured CLI forks instead, the adapter stops that copy and the lane stays
   stopped (`forkedCopyStopped`).
 - A Codex lane bound on another runtime endpoint is moved to the selected
   one by `recover` when that runtime serves the same Codex home on the same
@@ -419,17 +421,17 @@ before improvising. Every tool prints structured JSON on one exit table
 
 ## 9. Provider rules that never bend
 
-- Codex: the app-server WebSocket is an experimental, unauthenticated local
-  control plane with minimum version `0.151.0`; scope every
+- Codex: the app-server WebSocket is an experimental, unauthenticated loopback
+  control plane with a measured minimum of `0.151.0`; scope every
   notification and mutation to exact owned thread IDs; `rpc.js` is read-only
   and default-deny; a runtime this installation launches keeps
   `mcp_servers.codex_app` disabled and a reused listener is never
   reconfigured ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
-- Claude Code: Darwin arm64 only, with exact CLI, account, config, worker,
-  and execution-identity pins; public `claude -p --cloud` is the directed
-  input channel; remote archive is a pinned private API read from the macOS
-  Keychain only after explicit retirement authorization, never printed,
-  never refreshed, never enrolling a device
+- Claude Code: Darwin arm64 only, with a measured CLI at `2.1.258` or newer
+  plus exact account, config, worker, and execution-identity pins; public
+  `claude -p --cloud` is the directed input channel; remote archive is a pinned
+  private API read from the macOS Keychain only after explicit retirement
+  authorization, never printed, never refreshed, never enrolling a device
   ([docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md)).
 
 Report the lane ID, provider, lifecycle state, durable harvest location,

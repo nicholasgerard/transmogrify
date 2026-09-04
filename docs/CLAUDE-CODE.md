@@ -1,8 +1,8 @@
 # Claude Code integration
 
 This document separates Claude Code's public contract from the local and
-private surfaces the adapter uses, and records the pinned builds those
-surfaces were verified against. Read it if you operate Claude lanes or need to
+private surfaces the adapter uses, and records the compatibility range and
+private-surface pins. Read it if you operate Claude lanes or need to
 know exactly where the integration leaves documented ground.
 
 The target is the Code experience in Claude Desktop and the Claude mobile app,
@@ -13,7 +13,8 @@ not consumer Chat.
 - The adapter uses Remote Control directly. It never creates a plain terminal
   session and then runs `/desktop`, because that transfer exits the CLI and
   leaves no stable external lifecycle control plane.
-- Lifecycle mutation requires the pinned CLI. An unknown build fails closed.
+- Lifecycle mutation requires Claude Code 2.1.258 or newer. A newer build is
+  measured once and cached; a build that fails a named probe fails closed.
 - Private archival is off unless the caller passes `--private-archive`, and
   its preflight pins the CLI hash, Desktop bundle ID, version, and `app.asar`
   hash, plus platform, organization, and account/config identity.
@@ -74,7 +75,7 @@ Both name arguments receive the same canonical `::: <summary>` value. The
 marker makes owned rows visually consistent with Codex but never substitutes
 for the recorded session, job, bridge, runtime, and seat identity.
 
-The pinned CLI exposes the initial prompt as the documented positional
+The supported CLI exposes the initial prompt as the documented positional
 argument, so it can be visible briefly to same-user process inspection.
 Follow-up steering does not share this limitation, because that content goes
 to the public `--cloud` command through stdin.
@@ -84,7 +85,7 @@ and `--settings` surfaces. Every request is resolved before provider access,
 with requested and resolved values journaled separately. Aliases are retained
 in the requested receipt but compile to a versioned model selector. Standard
 and Fast compile to explicit `fastMode:false` and `fastMode:true`; Fast is
-accepted only for models in the pinned compatibility catalog. Recovery
+accepted only for models in the compatibility catalog. Recovery
 reapplies that exact versioned selector, effort, and setting, so an old lane
 cannot silently move with a rolling alias or inherit a changed host speed
 preference. See [Execution profiles](EXECUTION-PROFILES.md) and
@@ -172,8 +173,8 @@ It binds a new worker and socket epoch before restoring control. An ambiguous
 resume is reconciled against the same full UUID and Remote Control bridge
 rather than resumed a second time.
 
-On the pinned CLI, resuming a stopped background job produced a new job with a
-new session id and its own transcript (observed 2026-09-03), so in-place
+On the verified 2.1.258 CLI, resuming a stopped background job produced a new
+job with a new session id and its own transcript (observed 2026-09-03), so in-place
 recovery of a stopped lane is not available on this build. The adapter treats
 that result as a fork: it stops the copy its own command created inside the
 recorded dispatch window, closes the recovery journal as `forkedCopyStopped`,
@@ -273,24 +274,30 @@ session ID. A documented external RPC for Remote Control server mode would
 additionally allow shared-process discovery and ownership without separate CLI
 invocations, but it is not required for the current lifecycle contract.
 
-## Pinned compatibility receipts
+## Compatibility receipts
 
-| Component | Pinned receipt |
+| Component | Receipt |
 | --- | --- |
 | Platform | Darwin arm64 |
-| Claude Code CLI | `2.1.258` |
-| CLI SHA-256 | `b63136194160791c27cfa7b0403060d85eb0752991625fde8c09f9acacb17c78` |
+| Claude Code CLI public lifecycle | `2.1.258` or newer after measurement |
+| Pre-measured CLI SHA-256 | `b63136194160791c27cfa7b0403060d85eb0752991625fde8c09f9acacb17c78` |
 | Prior CLI SHA-256, runtime-transition receipt only, not accepted for mutation | `64590d7d9d9c189d33fb3dfa58c5408eaf2a10fe556bd84155d95efaab46b60e` |
 | Claude Desktop | `1.40609.1` |
 | Desktop bundle ID | `com.anthropic.claudefordesktop` |
 | Desktop `app.asar` SHA-256 | `0fcf5499f5eee77bb769362a3603a4278b5ba9a8ae2620395146afc60c13861f` |
 | Claude for iOS | `1.260828.1` (`33349478298`) |
 
-The public lifecycle adapter pins the platform, CLI build, first-party
-account, and the device/inode identities of the default config and projects
-directories. Both directories must be current-user-owned and not group or
-world writable; symlink traversal fails closed. Private native archival
-additionally pins the Desktop version, bundle ID, and `app.asar` hash.
+The public lifecycle adapter requires the minimum version, then probes an
+unknown build's version output, auth-status JSON shape, agent-list JSON shape,
+`--settings` parser support, and public follow-up parser contract. The result
+is cached at `measured-builds/<cli-sha256>.json` under the private state root;
+the record includes the executable path and digest, probe results, and date,
+and is written mode `0600`. A failed cache names the first failed probe and is
+not rerun on every preflight. The account and device/inode identities of the
+default config and projects directories are still checked on every preflight.
+Both directories must be current-user-owned and not group or world writable;
+symlink traversal fails closed. Private native archival additionally pins the
+pre-measured CLI digest, Desktop version, bundle ID, and `app.asar` hash.
 
 This is a measured compatibility boundary, not a claim that other versions or
 platforms cannot support the design.
@@ -310,9 +317,9 @@ platforms cannot support the design.
 | Transmogrify removes only its clean managed worktree | Implemented and adversarially tested |
 | Transmogrify clears local Claude record without risking an external/deferred seat | Managed-seat ordering implemented and tested; external/deferred removal is intentionally deferred |
 | Mobile-originated input is observed end to end | Live-verified |
-| Unknown future CLI build fails closed for lifecycle mutations | Implemented and tested |
+| Newer CLI build is measured once and reused only after every probe passes | Implemented and tested |
 | Verified running-worker CLI transition reconciles without changing account/config identity | Implemented, tested, and live-verified |
 | Unknown future Desktop build disables private archive | Implemented and tested |
 
-Live verification covers the named client and pinned host tuple above, not
-unmeasured or future client builds.
+Live verification covers the named client and pre-measured host tuple above;
+newer CLI builds rely on their local compatibility measurement.

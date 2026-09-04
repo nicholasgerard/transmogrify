@@ -1,9 +1,9 @@
 'use strict';
 
-// Measured Claude Code CLI surface: the pinned executable, the sanitized child
+// Measured Claude Code CLI surface: the exact executable, the sanitized child
 // environment, argument construction, agent-listing ownership checks, worker and
 // socket execution receipts, and JSONL transcript proof of delivery. Every
-// command runs against the exact verified build and every observation is tied to
+// command runs against the exact measured build and every observation is tied to
 // one owned session. It never touches a session other than the exact owned one
 // and never changes the user's Claude configuration or global updater.
 
@@ -12,15 +12,17 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile, execFileSync, spawn } = require('node:child_process');
-const { processBirth } = require('./state');
+const { atomicWriteJson, processBirth, stateRoot } = require('./state');
 const { ownedLaneNameError } = require('./validation');
 const { readOwnedJson } = require('./record-guards');
 
-// The CLI builds this adapter has been measured against, by version and SHA-256.
-// A build outside this map cannot host a managed lane.
+// Builds already measured in release acceptance, by version and SHA-256. They
+// skip live build probing but still receive a local measurement record.
 const VERIFIED_CLI_BUILDS = new Map([
   ['2.1.258', 'b63136194160791c27cfa7b0403060d85eb0752991625fde8c09f9acacb17c78'],
 ]);
+const MINIMUM_CLI_VERSION = '2.1.258';
+// Kept for the private archive tuple and the published verified-build receipt.
 const PINNED_CLI_VERSION = '2.1.258';
 const PINNED_CLI_SHA256 = VERIFIED_CLI_BUILDS.get(PINNED_CLI_VERSION);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -70,8 +72,57 @@ function sanitizedClaudeEnv(env = process.env) {
   return clean;
 }
 
-function isVerifiedCliBuild(version, cliSha256) {
-  return VERIFIED_CLI_BUILDS.get(version) === cliSha256;
+function compareVersions(left, right) {
+  const leftParts = String(left).split('.').map(Number);
+  const rightParts = String(right).split('.').map(Number);
+  if (leftParts.length !== 3 || rightParts.length !== 3 ||
+      [...leftParts, ...rightParts].some((part) => !Number.isSafeInteger(part) || part < 0)) {
+    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude CLI returned an invalid version');
+  }
+  for (let index = 0; index < 3; index += 1) {
+    if (leftParts[index] !== rightParts[index]) return leftParts[index] - rightParts[index];
+  }
+  return 0;
+}
+
+function measuredBuildFile(cliSha256, env = process.env) {
+  if (!/^[0-9a-f]{64}$/.test(cliSha256 || '')) {
+    throw new ClaudeSurfaceError('INVALID_LOCAL_STATE', 'Claude CLI digest is invalid');
+  }
+  return path.join(stateRoot(env), 'measured-builds', `${cliSha256}.json`);
+}
+
+function readMeasuredBuild(version, cliSha256, cliPath, env = process.env) {
+  const read = readOwnedJson(measuredBuildFile(cliSha256, env), {
+    maxBytes: MAX_CAPTURE_BYTES,
+    modeMask: 0o077,
+  });
+  if (read.status === 'missing') return null;
+  if (read.status === 'unsafe') {
+    throw new ClaudeSurfaceError('UNSAFE_LOCAL_STATE', 'Claude measured-build record is not owner-only');
+  }
+  if (read.status !== 'ok') {
+    throw new ClaudeSurfaceError('INVALID_LOCAL_STATE', 'Claude measured-build record is not valid JSON');
+  }
+  const record = read.value;
+  if (!record || record.version !== 1 || record.provider !== 'claude-code-cli' ||
+      record.cliVersion !== version || record.cliSha256 !== cliSha256 ||
+      record.cliPath !== cliPath || !path.isAbsolute(record.cliPath || '') ||
+      !['good', 'failed'].includes(record.result) ||
+      typeof record.measuredAt !== 'string' || !Array.isArray(record.probes) ||
+      record.probes.some((probe) => !probe || typeof probe.name !== 'string' ||
+        typeof probe.ok !== 'boolean') ||
+      (record.result === 'failed' && typeof record.failingProbe !== 'string')) {
+    throw new ClaudeSurfaceError('INVALID_LOCAL_STATE', 'Claude measured-build record has an invalid shape');
+  }
+  return record;
+}
+
+function isVerifiedCliBuild(version, cliSha256, options = {}) {
+  if (VERIFIED_CLI_BUILDS.get(version) === cliSha256) return true;
+  if (!options.cliPath) return false;
+  const record = readMeasuredBuild(version, cliSha256, options.cliPath, options.env);
+  return record?.result === 'good';
 }
 
 // Normalize a bridge id to its cse_ form. An id outside the accepted shape is
@@ -88,6 +139,20 @@ function followupUrlNamesBridge(url, exactBridgeId) {
   const match = /^\/code\/([^/]+)$/.exec(parsed.pathname);
   if (!match || !BRIDGE_PATTERN.test(match[1])) return false;
   return canonicalCseId(match[1]) === exactBridgeId;
+}
+
+function parseFollowupAcknowledgment(raw, exactBridgeId) {
+  let acknowledgment;
+  try { acknowledgment = JSON.parse(raw); } catch { return null; }
+  const exactKeys = acknowledgment && typeof acknowledgment === 'object' &&
+    !Array.isArray(acknowledgment) &&
+    JSON.stringify(Object.keys(acknowledgment).sort()) ===
+      JSON.stringify(['ok', 'session_id', 'url']);
+  return exactKeys && acknowledgment.ok === true &&
+    acknowledgment.session_id === exactBridgeId &&
+    followupUrlNamesBridge(acknowledgment.url, exactBridgeId)
+    ? acknowledgment
+    : null;
 }
 
 function canonicalCseId(bridgeId) {
@@ -172,7 +237,7 @@ function claudeSpawnArgs(name, prompt, options = {}) {
   return args;
 }
 
-// The exact resume argv for one session id, with the lane's pinned execution
+// The exact resume argv for one session id, with the lane's recorded execution
 // controls reapplied.
 function claudeResumeArgs(sessionId, options = {}) {
   if (typeof sessionId !== 'string' || !UUID_PATTERN.test(sessionId)) {
@@ -306,6 +371,21 @@ function parseAuthStatus(raw) {
   return status;
 }
 
+// Build compatibility needs the public JSON envelope, independent of whether
+// this particular user is signed in. The later account preflight still applies
+// the stronger first-party and logged-in requirements.
+function parseAuthStatusShape(raw) {
+  let status;
+  try { status = JSON.parse(raw); } catch {
+    throw new ClaudeSurfaceError('PROTOCOL_ERROR', 'Claude auth status did not return JSON');
+  }
+  if (!status || typeof status !== 'object' || Array.isArray(status) ||
+      typeof status.loggedIn !== 'boolean') {
+    throw new ClaudeSurfaceError('PROTOCOL_ERROR', 'Claude auth status returned an invalid shape');
+  }
+  return status;
+}
+
 // The lane's eight-character job id must match exactly one row across the whole
 // account, and that row must be the owned session. A collision is
 // OWNERSHIP_MISMATCH, so a short-id command can never reach a stranger.
@@ -416,8 +496,10 @@ function resolveCliPath(options, env, dependencies) {
 function createClaudeSurface(dependencies = {}) {
   const deps = {
     arch: dependencies.arch || process.arch,
+    atomicWriteJson: dependencies.atomicWriteJson || atomicWriteJson,
     execFile: dependencies.execFile || execFilePromise,
     execFileSync: dependencies.execFileSync || execFileSync,
+    now: dependencies.now || (() => new Date()),
     openCommand: dependencies.openCommand || '/usr/bin/open',
     platform: dependencies.platform || process.platform,
     processBirth: dependencies.processBirth || processBirth,
@@ -425,6 +507,139 @@ function createClaudeSurface(dependencies = {}) {
     socketReceipt: dependencies.socketReceipt || null,
     spawn: dependencies.spawn || spawn,
   };
+
+  // `claude auth status --json` returns its useful logged-out JSON on a
+  // non-zero exit. Preserve that bounded stdout for the shape/account parser;
+  // other commands retain normal execFileSync failure semantics.
+  function authStatusOutput(cliPath, cleanEnv, timeout) {
+    try {
+      return deps.execFileSync(cliPath, ['auth', 'status', '--json'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: cleanEnv,
+        maxBuffer: MAX_CAPTURE_BYTES,
+        timeout,
+      });
+    } catch (error) {
+      const stdout = error?.stdout;
+      if (typeof stdout === 'string' && Buffer.byteLength(stdout) <= MAX_CAPTURE_BYTES) return stdout;
+      if (Buffer.isBuffer(stdout) && stdout.length <= MAX_CAPTURE_BYTES) return stdout.toString('utf8');
+      throw error;
+    }
+  }
+
+  function buildMeasurementRecord(runtime, source, probes, result, failingProbe) {
+    return {
+      version: 1,
+      provider: 'claude-code-cli',
+      cliPath: runtime.cliPath,
+      cliVersion: runtime.cliVersion,
+      cliSha256: runtime.cliSha256,
+      measuredAt: deps.now().toISOString(),
+      source,
+      result,
+      probes,
+      ...(failingProbe ? { failingProbe } : {}),
+    };
+  }
+
+  // Probe a previously unknown build once. Both argument checks use --help so
+  // they exercise the CLI parser without creating or addressing a real session.
+  // A failed record is durable too, preventing repeated provider reads for the
+  // same executable digest and naming the exact failed probe to the doctor.
+  function measureCliBuild(runtime, options = {}) {
+    const env = options.env || process.env;
+    const preverified = VERIFIED_CLI_BUILDS.get(runtime.cliVersion) === runtime.cliSha256;
+    const existing = readMeasuredBuild(
+      runtime.cliVersion, runtime.cliSha256, runtime.cliPath, env,
+    );
+    if (existing?.result === 'good') return existing;
+    if (existing && !preverified) {
+      throw new ClaudeSurfaceError(
+        'UNSUPPORTED_ENVIRONMENT',
+        `Claude CLI compatibility probe failed: ${existing.failingProbe}`,
+        { reason: 'cli-unmeasured-failed', probe: existing.failingProbe },
+      );
+    }
+
+    const probeNames = [
+      'version',
+      'auth-status-json',
+      'agents-json-all',
+      'settings-argument',
+      'follow-up-acknowledgment',
+    ];
+    if (preverified) {
+      const record = buildMeasurementRecord(
+        runtime,
+        'verified-build-fast-path',
+        probeNames.map((name) => ({ name, ok: true })),
+        'good',
+      );
+      deps.atomicWriteJson(measuredBuildFile(runtime.cliSha256, env), record);
+      return record;
+    }
+
+    const probes = [];
+    const remainingMs = typeof runtime.remainingMs === 'function'
+      ? runtime.remainingMs
+      : () => options.timeoutMs || DEFAULT_COMMAND_TIMEOUT_MS;
+    const command = (args) => deps.execFileSync(runtime.cliPath, args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: runtime.cleanEnv,
+      maxBuffer: MAX_CAPTURE_BYTES,
+      timeout: remainingMs(),
+    });
+    const checks = [
+      ['version', () => {
+        if (parseVersion(command(['--version'])) !== runtime.cliVersion) {
+          throw new Error('version changed during measurement');
+        }
+      }],
+      ['auth-status-json', () => parseAuthStatusShape(
+        authStatusOutput(runtime.cliPath, runtime.cleanEnv, remainingMs()),
+      )],
+      ['agents-json-all', () => parseAgents(command(['agents', '--json', '--all']))],
+      ['settings-argument', () => {
+        const help = command(['--settings', '{}', '--help']);
+        if (!/(?:^|\s)--settings(?:\s|[=<,]|$)/m.test(help)) throw new Error('missing --settings help');
+      }],
+      ['follow-up-acknowledgment', () => {
+        const bridgeId = 'cse_transmogrifyCompatibilityProbe';
+        const help = command(['-p', '--cloud', bridgeId, '--output-format', 'json', '--help']);
+        if (!help.includes('--cloud') || !help.includes('--output-format')) {
+          throw new Error('missing follow-up options');
+        }
+        const fixture = JSON.stringify({
+          ok: true,
+          session_id: bridgeId,
+          url: `https://claude.ai/code/${bridgeId}`,
+        });
+        if (!parseFollowupAcknowledgment(fixture, bridgeId)) {
+          throw new Error('follow-up acknowledgment parser mismatch');
+        }
+      }],
+    ];
+    for (const [name, check] of checks) {
+      try {
+        check();
+        probes.push({ name, ok: true });
+      } catch {
+        probes.push({ name, ok: false });
+        const record = buildMeasurementRecord(runtime, 'live-probe', probes, 'failed', name);
+        deps.atomicWriteJson(measuredBuildFile(runtime.cliSha256, env), record);
+        throw new ClaudeSurfaceError(
+          'UNSUPPORTED_ENVIRONMENT',
+          `Claude CLI compatibility probe failed: ${name}`,
+          { reason: 'cli-unmeasured-failed', probe: name },
+        );
+      }
+    }
+    const record = buildMeasurementRecord(runtime, 'live-probe', probes, 'good');
+    deps.atomicWriteJson(measuredBuildFile(runtime.cliSha256, env), record);
+    return record;
+  }
 
   // The CLI must still be the exact realpath and digest measured at preflight. Any
   // change is RUNTIME_MISMATCH and no command is run.
@@ -446,7 +661,7 @@ function createClaudeSurface(dependencies = {}) {
     }
   }
 
-  // Measure the compatibility tuple: Darwin arm64, a verified CLI build,
+  // Measure the compatibility tuple: Darwin arm64, a supported CLI build,
   // first-party claude.ai auth, and symlink-free owner-controlled config and
   // projects directories. The CLI digest is re-read afterwards so a swap during
   // preflight is caught, and a custom CLAUDE_CONFIG_DIR is refused outright.
@@ -479,20 +694,21 @@ function createClaudeSurface(dependencies = {}) {
       maxBuffer: MAX_CAPTURE_BYTES,
       timeout: remainingMs(),
     }));
-    if (!isVerifiedCliBuild(version, cliSha256)) {
+    if (compareVersions(version, MINIMUM_CLI_VERSION) < 0) {
       throw new ClaudeSurfaceError(
         'UNSUPPORTED_ENVIRONMENT',
-        `unverified Claude CLI build ${version} (${cliSha256.slice(0, 12)})`,
-        { reason: 'cli-unpinned' },
+        `Claude CLI ${version} is below the supported minimum ${MINIMUM_CLI_VERSION}`,
+        { reason: 'cli-unsupported', probe: 'minimum-version' },
       );
     }
-    const auth = parseAuthStatus(deps.execFileSync(cliPath, ['auth', 'status', '--json'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: cleanEnv,
-      maxBuffer: MAX_CAPTURE_BYTES,
-      timeout: remainingMs(),
-    }));
+    const measurement = measureCliBuild({
+      cliPath,
+      cliVersion: version,
+      cliSha256,
+      cleanEnv,
+      remainingMs,
+    }, { env });
+    const auth = parseAuthStatus(authStatusOutput(cliPath, cleanEnv, remainingMs()));
     if (deps.sha256File(cliPath) !== cliSha256) {
       throw new ClaudeSurfaceError('RUNTIME_MISMATCH', 'Claude CLI changed during preflight');
     }
@@ -512,6 +728,11 @@ function createClaudeSurface(dependencies = {}) {
       cliPath,
       cliVersion: version,
       cliSha256,
+      cliMeasurement: {
+        result: measurement.result,
+        source: measurement.source,
+        measuredAt: measurement.measuredAt,
+      },
       configDir,
       configDevice: configStat.dev,
       configInode: configStat.ino,
@@ -634,15 +855,7 @@ function createClaudeSurface(dependencies = {}) {
         }
         const rawStdout = Buffer.concat(stdout, stdoutBytes).toString('utf8');
         const rawStderr = Buffer.concat(stderr, stderrBytes).toString('utf8');
-        let acknowledgment;
-        try { acknowledgment = JSON.parse(rawStdout); } catch {}
-        const exactKeys = acknowledgment && typeof acknowledgment === 'object' &&
-          !Array.isArray(acknowledgment) &&
-          JSON.stringify(Object.keys(acknowledgment).sort()) ===
-            JSON.stringify(['ok', 'session_id', 'url']);
-        const exactSuccess = exactKeys && acknowledgment.ok === true &&
-          acknowledgment.session_id === exactBridgeId &&
-          followupUrlNamesBridge(acknowledgment.url, exactBridgeId);
+        const exactSuccess = parseFollowupAcknowledgment(rawStdout, exactBridgeId) !== null;
         if (code === 0 && !signal && rawStderr === '' && exactSuccess) {
           resolve({
             queued: true,
@@ -769,7 +982,7 @@ function createClaudeSurface(dependencies = {}) {
     return Math.max(1, remaining);
   }
 
-  // Bind exactly one open text-segment file of the worker process to the pinned
+  // Bind exactly one open text-segment file of the worker process to the measured
   // CLI digest. Zero or several matches is UNSUPPORTED_WORKER, so a command is
   // never sent to a process running a different build.
   function verifyWorkerExecutable(runtime, pid, deadline) {
@@ -792,7 +1005,7 @@ function createClaudeSurface(dependencies = {}) {
       if (matches.length > 1) break;
     }
     if (matches.length !== 1) {
-      throw new ClaudeSurfaceError('UNSUPPORTED_WORKER', 'cannot bind one pinned executable to the Claude worker');
+      throw new ClaudeSurfaceError('UNSUPPORTED_WORKER', 'cannot bind one measured executable to the Claude worker');
     }
     return { path: matches[0], sha256: runtime.cliSha256 };
   }
@@ -853,7 +1066,7 @@ function createClaudeSurface(dependencies = {}) {
     return finishExecutionReceipt(runtime, agent, metadata, options);
   }
 
-  // Complete an execution receipt: process birth, the pinned worker executable,
+  // Complete an execution receipt: process birth, the measured worker executable,
   // and the socket identity. Process birth is read again afterwards, so a worker
   // replaced mid-verification is OWNERSHIP_MISMATCH.
   function finishExecutionReceipt(runtime, agent, metadata, options = {}) {
@@ -1093,6 +1306,7 @@ function createClaudeSurface(dependencies = {}) {
     exactOwnedAgent,
     executionReceipt,
     launch,
+    measureCliBuild,
     preflight,
     run,
     sendRemoteFollowup,
@@ -1102,9 +1316,17 @@ function createClaudeSurface(dependencies = {}) {
   };
 }
 
+// Public one-shot helper for diagnostics and tests that already hold an exact
+// runtime identity. Normal lifecycle callers use the surface method so their
+// injected process dependencies remain shared.
+function measureCliBuild(runtime, options = {}) {
+  return createClaudeSurface(options.dependencies).measureCliBuild(runtime, options);
+}
+
 module.exports = {
   BRIDGE_PATTERN,
   MAX_STEER_BYTES,
+  MINIMUM_CLI_VERSION,
   PINNED_CLI_SHA256,
   PINNED_CLI_VERSION,
   VERIFIED_CLI_BUILDS,
@@ -1116,8 +1338,12 @@ module.exports = {
   claudeSpawnArgs,
   createClaudeSurface,
   exactOwnedAgent,
+  isVerifiedCliBuild,
+  measureCliBuild,
+  measuredBuildFile,
   parseAgents,
   parseAuthStatus,
+  parseFollowupAcknowledgment,
   parseJobId,
   parseVersion,
   sanitizedClaudeEnv,
