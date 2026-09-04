@@ -171,6 +171,27 @@ private app-server child). The setting lasts until logout; persistence
 across logins and the app's behavior when the runtime is not listening at
 launch are not yet measured.
 
+2026-09-04, managed daemon experiments, owner present. Passed on a scratch
+Codex home with the pinned 0.151.0 CLI: `daemon start` (it requires the
+installer's managed standalone install at `<home>/packages/standalone/
+current`), `enable-remote-control` on the running daemon without a
+restart, `daemon version` read through the socket by the app's bundled
+0.153.0 CLI (the app accepts any daemon at 0.141.0 or newer, read from
+its bundle), and two websocket clients on the daemon's unix socket at
+`/rpc` where one received the other's `thread/started`,
+`thread/name/updated`, and `thread/status/changed`. Failed with Codex
+Desktop 26.901.22334 on the owner's real home: relaunched with
+`CODEX_APP_SERVER_USE_LOCAL_DAEMON=1` it started its private runtime
+anyway, because its daemon branch also requires that the app pass no
+config overrides and this build always passes `features.code_mode_host`
+and its bundled `codex_app` MCP server; relaunched with
+`CODEX_APP_SERVER_WS_URL=ws+unix://<socket>:/rpc` it failed to start
+(`connect ECONNREFUSED 127.0.0.1:1080`), because the app routes any
+websocket host that is not loopback through a SOCKS proxy meant for SSH
+hosts. Desktop was restored attached to the shared loopback runtime. Next
+candidate: a loopback TCP relay to the daemon's socket, so Desktop reaches
+the daemon through the supported `CODEX_APP_SERVER_WS_URL` path.
+
 ## Priority 1: compatibility and acceptance hardening
 
 - Onboarding that works wherever the start prompt lands: compatibility by
