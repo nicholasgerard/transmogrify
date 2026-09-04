@@ -141,7 +141,9 @@ class AppServerClient extends EventEmitter {
     await new Promise((resolve, reject) => {
       let socket;
       try {
-        socket = new WebSocket(this.url, { maxPayload: MAX_INBOUND_MESSAGE_BYTES });
+        // No per-message deflate: the managed daemon (like Codex Desktop's own
+        // client) closes a handshake that offers the extension.
+        socket = new WebSocket(this.url, { maxPayload: MAX_INBOUND_MESSAGE_BYTES, perMessageDeflate: false });
       } catch (error) {
         reject(new AppServerError(error.message, { code: 'TRANSPORT_ERROR', cause: error }));
         return;

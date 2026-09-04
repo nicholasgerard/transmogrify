@@ -341,3 +341,13 @@ test('app-server client judges the runtime by version, not by product name', asy
   assert.equal(initialized.userAgent, 'codex_cli_rs/0.148.0');
   assert.equal(client.verifiedRuntime, false, 'below the minimum line is connected but not supported');
 });
+
+test('app-server client offers no per-message deflate, which the managed daemon refuses', async (t) => {
+  const server = await startMockAppServer();
+  t.after(() => server.close());
+  const client = new AppServerClient({ url: server.url });
+  t.after(() => client.close());
+  await client.connect();
+  assert.equal(server.handshakes.length, 1);
+  assert.equal(server.handshakes[0].headers['sec-websocket-extensions'], undefined);
+});

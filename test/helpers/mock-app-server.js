@@ -9,7 +9,9 @@ async function startMockAppServer(handler = () => ({ result: {} }), options = {}
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   const requests = [];
 
-  server.on('connection', (socket) => {
+  server.handshakes = [];
+  server.on('connection', (socket, request) => {
+    server.handshakes.push({ headers: { ...(request?.headers || {}) } });
     socket.on('message', async (raw) => {
       const request = JSON.parse(raw.toString());
       requests.push(request);
@@ -39,6 +41,7 @@ async function startMockAppServer(handler = () => ({ result: {} }), options = {}
 
   return {
     requests,
+    handshakes: server.handshakes,
     url: `ws://127.0.0.1:${address.port}`,
     async close() {
       for (const client of server.clients) client.terminate();

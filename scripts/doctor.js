@@ -281,9 +281,10 @@ async function probeCodex(options, env, dependencies) {
     // connect resolves. Yield once so the WebSocket can flush that final
     // handshake frame before this short-lived read-only client closes.
     await new Promise((resolve) => setImmediate(resolve));
-    const userAgent = initialized.userAgent.match(
-      /^(codex_cli_rs|Codex Desktop)\/(\d+(?:\.\d+){2})/,
-    );
+    // The canonical user agent is "<product>/<version>"; the product is
+    // codex_cli_rs, Codex Desktop, or, for the managed daemon, the name of
+    // whichever client connected first. Only the version decides support.
+    const userAgent = initialized.userAgent.match(/^(.+)\/(\d+(?:\.\d+){2})$/);
     if (!userAgent) {
       const error = new Error('unparseable Codex app-server version');
       error.code = 'RUNTIME_MISMATCH';
