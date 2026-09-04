@@ -31,7 +31,7 @@ Add `--url` only to Codex commands when the runtime is not the default
 | Install, upgrade, rollback, or uninstall | [Installation and upgrades](#installation-and-upgrades) |
 | Refused `WORKTREES` root inside the repository | [Managed worktree is not ignored](#managed-worktree-is-not-ignored) |
 | Ownership or mode refusal on state and seat paths | [Private state or worktree permissions](#private-state-or-worktree-permissions) |
-| `boundary:sandbox-loopback-denied`, occupied or incompatible endpoint | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
+| `boundary:sandbox-loopback-denied`, `runtime-unsupported`, occupied or incompatible endpoint | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
 | `NATIVE_VISIBILITY_REQUIRED`, `DESKTOP_RELAUNCH_REQUIRED`, `DESKTOP_HOST_SESSION`, `ATTACHED_ELSEWHERE`, `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, `DESKTOP_QUIT_TIMEOUT` | [Codex Desktop is not attached](#codex-desktop-is-not-attached) |
 | `NO_ACTIVE_TURN`, unmarked or foreign native rows | [Codex lane and native row symptoms](#codex-lane-and-native-row-symptoms) |
 | `NOT_OWNED`, `RUNTIME_MISMATCH`, `OWNERSHIP_MISMATCH`, `SEAT_MISMATCH`, `EXECUTION_EPOCH_UNBOUND`, `ADAPTER_MISMATCH` | [Ownership or identity refused](#ownership-or-identity-refused) |
@@ -178,6 +178,16 @@ with `-c mcp_servers.codex_app={command="",enabled=false}` so the Desktop-only
 `codex_app` MCP bridge stays off on the runtime this installation owns; a reused
 listener keeps its own configuration.
 
+`runtime-unsupported` means either the app-server is older than `0.151.0` or
+its first compatibility measurement rejected a required method or parameter
+shape. The doctor names the first failed method. It probes `thread/list`,
+`thread/turns/list`, `turn/steer`, `thread/name/set`, and `thread/archive`
+against bounded reads or the nil thread ID, then caches the result once per
+runtime version under the private state root. It also lists every executable
+found on `PATH`, in Codex Desktop, and through `TRANSMOGRIFY_BIN`, with the
+result of `--version`. A listed CLI is discovery evidence, not permission to
+start it.
+
 Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 `PATH`, `TRANSMOGRIFY_URL` or `TRANSMOGRIFY_PORT` for the loopback endpoint, and
 `TRANSMOGRIFY_LOG` for an absolute owned-runtime log path. A command-line
@@ -293,10 +303,11 @@ claude auth status
 claude agents --json --all
 ```
 
-An unsupported CLI build fails all Claude lifecycle mutations. An unsupported
-Desktop build disables only private native archival. Install the current pinned
-CLI with `claude install 2.1.258`; never weaken the version or hash checks to
-make a new build pass.
+A CLI below `2.1.258` reports `cli-unsupported`; upgrade it through Claude's
+own installer with `claude install`. A newer unknown build is probed once. If
+one of its public JSON or argument-shape checks fails, the doctor reports
+`cli-unmeasured-failed` and names the probe. It never recommends an older
+version. An unsupported Desktop build disables only private native archival.
 
 Transmogrify sets `DISABLE_UPDATES=1` only in the Claude subprocesses it owns,
 as documented by Anthropic's
@@ -328,7 +339,7 @@ nothing:
 | --- | --- | --- |
 | `NOT_OWNED` | the id is not a complete lane id this installation owns; a prefix, a name, or a provider id is discovery evidence, never ownership | pass the full `laneId` from `children` or `parent-list`; never adopt by name |
 | `ADAPTER_MISMATCH` | the lane belongs to the other provider, or the flag is provider-specific | use the operation and flags the lane's provider accepts |
-| `RUNTIME_MISMATCH` | the Codex runtime endpoint, Codex home, or platform, or the Claude CLI, account, or config identity, differs from the lane's receipt | rerun the doctor; point `TRANSMOGRIFY_URL` or `CLAUDE_BIN` at the recorded runtime, or run `recover` against the new endpoint: when it serves the same Codex home on the same platform and the thread is readable there, the lane is moved to it (`runtimeRebound`); never mutate across runtimes |
+| `RUNTIME_MISMATCH` | the Codex runtime endpoint, Codex home, or platform, or the Claude CLI path, digest, account, or config identity, differs from the lane's receipt | rerun the doctor; point `TRANSMOGRIFY_URL` or `CLAUDE_BIN` at the recorded runtime, or run `recover` against the new endpoint: when it serves the same Codex home on the same platform and the thread is readable there, the lane is moved to it (`runtimeRebound`); never mutate across runtimes |
 | `OWNERSHIP_MISMATCH` | the provider reports a different cwd, session, or selector than the receipt | stop and report; the row is not this lane |
 | `SEAT_MISMATCH`, `EXECUTION_EPOCH_UNBOUND` | the worktree or the live worker no longer matches the recorded identity | inspect the seat or session by hand; reconcile; retire if the lane is gone |
 
@@ -361,8 +372,8 @@ journal open and repeats the cause and the owner action on every reconcile.
 ## Claude recovery forked or did not resume
 
 `recover` on a stopped Claude lane runs `claude --resume <session> --bg`. On
-the pinned CLI that command starts a new job with a new session id and its
-own transcript instead of reviving the stopped one, so the adapter reports
+the verified 2.1.258 CLI that command starts a new job with a new session id
+and its own transcript instead of reviving the stopped one, so the adapter reports
 `RECOVERY_UNCERTAIN` with `causeCode` `FORKED_COPY`: it stopped the copy its
 own command created (never removed it, never adopted it), closed the journal
 as `forkedCopyStopped`, and left the lane stopped with its original session.
@@ -413,8 +424,8 @@ reconciliation as well: every steer carries its operation id as the
 that marker and settles the journal `complete` (`steerInputReceipt`) when it
 is found, or `notDelivered` (`steerInputAbsent`) once that turn is no longer
 in progress and the marker is absent. It stays open only while the target turn
-is still active and unreceipted. The marker on `turn/steer` is schema-derived
-from the pinned runtime line and not yet observed live.
+is still active and unreceipted. The marker on `turn/steer` is schema-derived,
+and its parameter shape is included in the runtime compatibility measurement.
 
 When reconciliation leaves a spawn, steer, stop, recover, resume, or interrupt
 journal open and the owner decides to stop waiting, `abandon` closes it:
@@ -460,7 +471,7 @@ Ignored files are included in the dirt census and remain preserved.
 
 Review and harvest the preserved worktree manually. Do not edit the ownership
 registry to make it appear eligible, and do not run `claude rm` against an
-external or deferred seat: the pinned CLI may delete the session's worktree.
+external or deferred seat: the Claude CLI may delete the session's worktree.
 If the owner keeps the seat, stop and leave the refusal intact. If the owner
 manually removes that exact managed seat, rerun only its exact retirement with
 `--accept-manual-seat-removal`. The retry refuses any surviving filesystem

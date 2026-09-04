@@ -5,7 +5,14 @@ const { WebSocketServer } = require('ws');
 
 const NO_RESPONSE = Symbol('NO_RESPONSE');
 
-async function startMockAppServer(handler = () => ({ result: {} }), options = {}) {
+function defaultHandler(request) {
+  if (request.method === 'thread/list' || request.method === 'thread/turns/list') {
+    return { result: { data: [], nextCursor: null } };
+  }
+  return { result: {} };
+}
+
+async function startMockAppServer(handler = defaultHandler, options = {}) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   const requests = [];
 

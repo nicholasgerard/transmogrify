@@ -2,21 +2,26 @@
 'use strict';
 
 // Read-only startup diagnostics. It reports the ownership registry, one Codex
-// initialize handshake, the Codex Desktop attachment receipt as
+// initialize handshake, cached method compatibility, discovered Codex CLI
+// versions, the Codex Desktop attachment receipt as
 // nativeVisibility, and a Claude preflight plus agent listing. It attempts no
 // provider mutation, launches and quits nothing, and reports only redacted
 // failure codes. It exits 2 on a usage error and 3 when a requested provider is
 // not reusable.
 
 const path = require('node:path');
+const fs = require('node:fs');
+const { execFileSync } = require('node:child_process');
 const { parseArgs } = require('node:util');
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
 const {
+  MINIMUM_CLI_VERSION,
   PINNED_CLI_SHA256,
   PINNED_CLI_VERSION,
   createClaudeSurface,
   parseAgents,
 } = require('./lib/claude-surface');
+const { measureCodexCompatibility } = require('./lib/codex-compat');
 const { check: desktopAttachCheck } = require('./lib/desktop-attach');
 const { ensureRegistry, readRegistry } = require('./lib/state');
 const { VERSION } = require('./lib/version');
@@ -34,9 +39,9 @@ const CLAUDE_SETUP_ACTIONS = new Map([
   ['not-logged-in', 'Run \`claude auth login\`, then rerun the doctor.'],
   ['auth-status-unreadable', 'Run \`claude auth status\`; if it fails, reinstall Claude Code and sign in, then rerun the doctor.'],
   ['account-not-first-party', 'Sign in to Claude Code with a first-party claude.ai account (\`claude auth login\`), then rerun the doctor.'],
-  ['cli-unpinned', 'Install the pinned Claude Code CLI with \`claude install 2.1.258\`, then rerun the doctor.'],
-  ['cli-not-found', 'Install Claude Code and sign in with \`claude auth login\`, or point CLAUDE_BIN at the pinned binary.'],
-  ['cli-not-executable', 'Make the Claude CLI executable, or point CLAUDE_BIN at the pinned binary.'],
+  ['cli-unsupported', 'Upgrade Claude Code through its own installer with \`claude install\`, then rerun the doctor.'],
+  ['cli-not-found', 'Install Claude Code and sign in with \`claude auth login\`, or point CLAUDE_BIN at the installed binary.'],
+  ['cli-not-executable', 'Make the Claude CLI executable, or point CLAUDE_BIN at an executable installation.'],
   ['unsupported-platform', 'Claude lanes run only on Apple Silicon macOS; use \`--target codex\` on this host.'],
   ['custom-config-dir', 'Unset CLAUDE_CONFIG_DIR for Transmogrify commands; only the default config directory is measured.'],
 ]);
@@ -58,11 +63,78 @@ const CODEX_SETUP_ACTIONS = new Map([
 
 function claudeSetup(error) {
   const reason = typeof error?.details?.reason === 'string' ? error.details.reason : 'unavailable';
+  if (reason === 'cli-unmeasured-failed') {
+    const probe = typeof error?.details?.probe === 'string' ? error.details.probe : 'unknown';
+    return {
+      reason,
+      blocking: true,
+      ownerAction: `Claude Code failed the ${probe} compatibility probe. Upgrade it with \`claude install\`, then rerun the doctor.`,
+      failingProbe: probe,
+    };
+  }
   return { reason, blocking: true, ownerAction: CLAUDE_SETUP_ACTIONS.get(reason) || CLAUDE_SETUP_FALLBACK };
 }
-function codexSetup(reason) {
+function codexSetup(reason, details = {}) {
+  if (reason === 'runtime-unsupported') {
+    return {
+      reason,
+      blocking: true,
+      ownerAction: `Use a Codex app-server that supports ${details.failingMethod || 'the required lifecycle methods'}, then rerun the doctor.`,
+      failingMethod: details.failingMethod || 'unknown',
+    };
+  }
   const entry = CODEX_SETUP_ACTIONS.get(reason);
   return entry ? { reason, blocking: entry.blocking, ownerAction: entry.ownerAction } : null;
+}
+
+function parseCodexCliVersion(raw) {
+  const match = String(raw).match(/(?:^|\s)(\d+\.\d+\.\d+)(?:\s|$)/);
+  return match ? match[1] : null;
+}
+
+// Inventory each distinct executable from the three discovery surfaces. The
+// only child command is --version; discovery never starts an app-server.
+function codexCliBinaries(env = process.env, dependencies = {}) {
+  const candidates = [];
+  for (const directory of String(env.PATH || '').split(path.delimiter)) {
+    if (directory && path.isAbsolute(directory)) candidates.push({ path: path.join(directory, 'codex'), source: 'PATH' });
+  }
+  candidates.push({
+    path: '/Applications/ChatGPT.app/Contents/Resources/codex',
+    source: 'codex-desktop',
+  });
+  if (env.TRANSMOGRIFY_BIN && path.isAbsolute(env.TRANSMOGRIFY_BIN)) {
+    candidates.push({ path: env.TRANSMOGRIFY_BIN, source: 'TRANSMOGRIFY_BIN' });
+  }
+  const binaries = new Map();
+  for (const candidate of candidates) {
+    let resolved;
+    try {
+      resolved = fs.realpathSync(candidate.path);
+      const stat = fs.statSync(resolved);
+      if (!stat.isFile() || (stat.mode & 0o111) === 0) continue;
+    } catch {
+      continue;
+    }
+    const existing = binaries.get(resolved);
+    if (existing) {
+      if (!existing.sources.includes(candidate.source)) existing.sources.push(candidate.source);
+      continue;
+    }
+    let version = null;
+    try {
+      const run = dependencies.execFileSync || execFileSync;
+      version = parseCodexCliVersion(run(resolved, ['--version'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: { PATH: env.PATH || '/usr/bin:/bin' },
+        maxBuffer: 4096,
+        timeout: 5000,
+      }));
+    } catch {}
+    binaries.set(resolved, { path: resolved, sources: [candidate.source], version });
+  }
+  return [...binaries.values()];
 }
 function attachmentSetupReason(attachment) {
   return new Map([
@@ -260,10 +332,11 @@ function nativeVisibilityFor(receipt) {
 }
 
 // One initialize handshake plus the Desktop attachment read, then close.
-// Reusable means the runtime is inside the pinned version line; a runtime
-// outside it is reported honestly rather than used. No lifecycle method is sent.
+// Reusable means the runtime is at the minimum version and passed the cached
+// method probe. Mutation-shaped probes address only the nil thread id.
 async function probeCodex(options, env, dependencies) {
   let client;
+  const cliBinaries = codexCliBinaries(env, dependencies);
   try {
     client = dependencies.createAppServerClient
       ? dependencies.createAppServerClient(options)
@@ -290,17 +363,26 @@ async function probeCodex(options, env, dependencies) {
       error.code = 'RUNTIME_MISMATCH';
       throw error;
     }
-    const reusable = client.verifiedRuntime === true;
+    const compatibility = await (dependencies.measureCodexCompatibility || measureCodexCompatibility)(
+      client,
+      userAgent[2],
+      { env, timeoutMs: options.timeoutMs },
+    );
+    const reusable = client.verifiedRuntime === true && compatibility.result === 'good';
     const attachment = await inspectDesktopAttachment(options, env, dependencies);
-    const attachmentSetup = attachment?.attachment?.state === 'attached'
-      ? null : codexSetup(attachmentSetupReason(attachment?.attachment));
+    const compatibilitySetup = reusable ? null : codexSetup('runtime-unsupported', {
+      failingMethod: compatibility.failingMethod || 'minimum-version',
+    });
+    const attachmentSetup = compatibilitySetup || (attachment?.attachment?.state === 'attached'
+      ? null : codexSetup(attachmentSetupReason(attachment?.attachment)));
     return {
       provider: 'codex',
       requested: true,
       available: true,
       reusable,
       reuse: reusable ? 'existing-compatible-protocol-runtime' : 'blocked-unverified-runtime',
-      probe: 'initialize-handshake-and-desktop-attachment-read',
+      probe: 'initialize-handshake-method-compatibility-and-desktop-attachment-read',
+      cliBinaries,
       nativeVisibility: nativeVisibilityFor(attachment),
       ...(attachmentSetup ? { setup: attachmentSetup } : {}),
       pinned: {
@@ -310,7 +392,10 @@ async function probeCodex(options, env, dependencies) {
       observed: {
         userAgentFamily: userAgent[1],
         version: userAgent[2],
-        pinnedVersionLine: reusable,
+        pinnedVersionLine: client.verifiedRuntime === true,
+        compatibility: compatibility.result,
+        compatibleMethods: compatibility.probes.filter((entry) => entry.ok).map((entry) => entry.method),
+        ...(compatibility.failingMethod ? { failingMethod: compatibility.failingMethod } : {}),
       },
     };
   } catch (error) {
@@ -322,6 +407,7 @@ async function probeCodex(options, env, dependencies) {
       reusable: false,
       reuse: 'unavailable',
       probe: 'initialize-handshake-only',
+      cliBinaries,
       nativeVisibility: {
         verified: false,
         nativeDispatchReady: false,
@@ -346,7 +432,7 @@ async function probeCodex(options, env, dependencies) {
   }
 }
 
-// Claude preflight plus one agent listing. It proves the pinned CLI build,
+// Claude preflight plus one agent listing. It proves the supported CLI build,
 // first-party auth, and a parseable listing without touching any session.
 async function probeClaude(options, env, dependencies) {
   const surface = dependencies.claudeSurface ||
@@ -363,8 +449,9 @@ async function probeClaude(options, env, dependencies) {
       available: true,
       reusable: true,
       reuse: 'installed-cli-session-surface',
-      probe: 'public-preflight-and-agent-list-only',
+      probe: 'public-build-measurement-and-agent-list-only',
       pinned: {
+        minimumCliVersion: MINIMUM_CLI_VERSION,
         cliVersion: PINNED_CLI_VERSION,
         cliSha256: PINNED_CLI_SHA256,
         platform: 'darwin-arm64',
@@ -373,6 +460,7 @@ async function probeClaude(options, env, dependencies) {
       observed: {
         cliVersion: runtime.cliVersion,
         cliSha256: runtime.cliSha256,
+        buildMeasurement: runtime.cliMeasurement || null,
         agentListReadable: true,
       },
     };
@@ -383,8 +471,9 @@ async function probeClaude(options, env, dependencies) {
       available: false,
       reusable: false,
       reuse: 'unavailable',
-      probe: 'public-preflight-and-agent-list-only',
+      probe: 'public-build-measurement-and-agent-list-only',
       pinned: {
+        minimumCliVersion: MINIMUM_CLI_VERSION,
         cliVersion: PINNED_CLI_VERSION,
         cliSha256: PINNED_CLI_SHA256,
         platform: 'darwin-arm64',
@@ -440,6 +529,7 @@ async function doctor(options, env = process.env, dependencies = {}) {
     verifiedDate: VERIFIED_DATE,
   };
   const claudePinned = {
+    minimumCliVersion: MINIMUM_CLI_VERSION,
     cliVersion: PINNED_CLI_VERSION,
     cliSha256: PINNED_CLI_SHA256,
     platform: 'darwin-arm64',
@@ -450,7 +540,7 @@ async function doctor(options, env = process.env, dependencies = {}) {
       ? notRequested('codex', codexPinned, 'initialize-handshake-only')
       : await probeCodex(options, env, dependencies),
     claude: options.target === 'codex'
-      ? notRequested('claude', claudePinned, 'public-preflight-and-agent-list-only')
+      ? notRequested('claude', claudePinned, 'public-build-measurement-and-agent-list-only')
       : await probeClaude(options, env, dependencies),
   };
   const requested = Object.values(providers).filter((provider) => provider.requested);
@@ -500,6 +590,7 @@ if (require.main === module) {
 module.exports = {
   CLAUDE_BACKEND,
   CODEX_BACKEND,
+  codexCliBinaries,
   doctor,
   main,
   ownershipSummary,
