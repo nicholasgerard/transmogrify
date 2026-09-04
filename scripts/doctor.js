@@ -23,6 +23,8 @@ const {
 } = require('./lib/claude-surface');
 const { measureCodexCompatibility } = require('./lib/codex-compat');
 const { check: desktopAttachCheck } = require('./lib/desktop-attach');
+const { detectHostContext } = require('./lib/host-context');
+const { computeSetupPlan } = require('./lib/setup-plan');
 const { ensureRegistry, readRegistry } = require('./lib/state');
 const { VERSION } = require('./lib/version');
 const { EXIT, isUsageCode, publicErrorMessage } = require('./lib/public-error');
@@ -165,7 +167,8 @@ options:
   --target codex|claude|all   providers to inspect (default: all)
   --url <loopback-ws-url>     Codex app-server endpoint
   --claude-bin <absolute>     exact Claude CLI executable
-  --timeout-ms <milliseconds> bounded provider probe timeout`;
+  --timeout-ms <milliseconds> bounded provider probe timeout
+  --explain                    add an ordered plain-language setup plan`;
 
 function usage(message) {
   const error = new Error(message);
@@ -190,6 +193,7 @@ function parseDoctorArgs(argv, env = process.env) {
       url: { type: 'string' },
       'claude-bin': { type: 'string' },
       'timeout-ms': { type: 'string' },
+      explain: { type: 'boolean' },
     },
   });
   const repoRoot = parsed.values['repo-root'] || env.REPO_ROOT;
@@ -231,7 +235,7 @@ function parseDoctorArgs(argv, env = process.env) {
   if (claudeBin && !path.isAbsolute(claudeBin)) {
     usage('--claude-bin or CLAUDE_BIN must be an absolute path');
   }
-  return { repoRoot, target, url, claudeBin, timeoutMs };
+  return { repoRoot, target, url, claudeBin, timeoutMs, explain: parsed.values.explain === true };
 }
 
 // Lane and pending-operation counts per backend. Counts only; no lane id,
@@ -544,6 +548,12 @@ async function doctor(options, env = process.env, dependencies = {}) {
       : await probeClaude(options, env, dependencies),
   };
   const requested = Object.values(providers).filter((provider) => provider.requested);
+  const setup = setupSummary(providers);
+  if (options.explain) {
+    const inspectHost = dependencies.detectHostContext || detectHostContext;
+    const hostContext = inspectHost(env, dependencies.hostContextDependencies || dependencies);
+    setup.plan = computeSetupPlan({ providers, setup }, hostContext);
+  }
   return {
     version: 1,
     ok: requested.every((provider) => provider.reusable === true),
@@ -555,9 +565,32 @@ async function doctor(options, env = process.env, dependencies = {}) {
       ownership,
     },
     providers,
-    setup: setupSummary(providers),
+    setup,
     nextSafeMaintenanceCommands: maintenanceCommands(options, ownership, providers),
   };
+}
+
+function renderSetupSummary(result) {
+  const plan = result?.setup?.plan;
+  if (!plan) return '';
+  const found = Object.entries(result.providers || {})
+    .filter(([, provider]) => provider.requested && provider.available)
+    .map(([provider]) => provider === 'codex' ? 'a Codex runtime' : 'Claude Code');
+  const ready = Object.entries(result.providers || {})
+    .filter(([, provider]) => provider.requested && provider.reusable)
+    .map(([provider]) => provider === 'codex' ? 'the Codex runtime' : 'Claude Code');
+  const readyText = ready.length > 0 ? `${ready.join(' and ')} ${ready.length === 1 ? 'is' : 'are'} ready.` : 'No lane host is ready yet.';
+  const neededText = plan.steps.length === 0
+    ? 'No setup changes are needed.'
+    : plan.steps.map((entry) => entry.what).join(' ');
+  const nextAction = plan.steps[0]?.what || 'You can start lanes now.';
+  const nextText = plan.context ? `${plan.context} ${nextAction}` : nextAction;
+  return [
+    `Found: ${found.length > 0 ? `${found.join(' and ')}.` : 'No lane host was found.'}`,
+    `Ready: ${readyText}`,
+    `Needed: ${neededText}`,
+    `Next: ${nextText}`,
+  ].join('\n');
 }
 
 async function main(argv = process.argv.slice(2), env = process.env, dependencies = {}) {
@@ -571,6 +604,7 @@ if (require.main === module) {
       console.log(result.help);
       return;
     }
+    if (process.stdout.isTTY && result.setup?.plan) console.log(renderSetupSummary(result));
     console.log(JSON.stringify(result, null, 2));
     if (!result.ok) process.exitCode = 3;
   }).catch((error) => {
@@ -596,4 +630,5 @@ module.exports = {
   ownershipSummary,
   parseDoctorArgs,
   publicFailureCode,
+  renderSetupSummary,
 };

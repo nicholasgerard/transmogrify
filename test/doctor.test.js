@@ -10,6 +10,7 @@ const {
   codexCliBinaries,
   main,
   parseDoctorArgs,
+  renderSetupSummary,
 } = require('../scripts/doctor');
 const {
   PINNED_CLI_SHA256,
@@ -431,7 +432,9 @@ test('doctor arguments honor the documented environment fallbacks and reject uns
     url: 'ws://127.0.0.1:9999/',
     claudeBin: '/tmp/claude',
     timeoutMs: 20_000,
+    explain: false,
   });
+  assert.equal(parseDoctorArgs(['--repo-root', '/tmp/repo', '--explain'], {}).explain, true);
   assert.throws(() => parseDoctorArgs(['--repo-root', 'relative'], {}), /absolute path/);
   assert.throws(() => parseDoctorArgs([
     '--repo-root', '/tmp/repo', '--target', 'other',
@@ -451,6 +454,38 @@ test('doctor arguments honor the documented environment fallbacks and reject uns
   assert.throws(() => parseDoctorArgs([
     '--repo-root', '/tmp/repo', '--target', 'claude', '--url', 'ws://127.0.0.1:8843',
   ], {}), /not valid with --target claude/);
+});
+
+test('doctor explain attaches a plan and renders the four-line TTY summary', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const explained = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'codex',
+    '--url', 'ws://127.0.0.1:8843',
+    '--explain',
+  ], fixture.env, {
+    createAppServerClient: () => ({
+      verifiedRuntime: true,
+      async connect() { return { userAgent: 'codex_cli_rs/0.151.0' }; },
+      close() {},
+    }),
+    desktopAttachment: async () => ({
+      attachment: {
+        state: 'attached', evidence: 'lsof-established-loopback-connection', clientPid: 1,
+        connection: '127.0.0.1:1->127.0.0.1:2', observedAt: '2026-09-03T10:00:00.000Z',
+      },
+      desktop: { bundleId: 'com.openai.codex', version: '26.901.20858', build: '7658', buildTested: true },
+      nextAction: 'none',
+    }),
+    detectHostContext: () => ({
+      app: 'codex-tui', surface: 'terminal',
+      platform: { os: 'darwin', arch: 'arm64', claudeLanesSupported: true },
+    }),
+    measureCodexCompatibility: async () => ({ result: 'good', probes: [] }),
+  });
+  assert.deepEqual(explained.setup.plan.steps, []);
+  assert.match(explained.setup.plan.context, /live streaming shows there/);
+  assert.match(renderSetupSummary(explained), /^Found: .+\nReady: .+\nNeeded: .+\nNext: /);
 });
 
 test('doctor exposes a non-mutating help entrypoint', async () => {

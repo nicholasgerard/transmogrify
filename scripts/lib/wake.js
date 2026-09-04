@@ -8,10 +8,10 @@
 
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
 const { AppServerClient, validateUrl } = require('./app-server');
 const { UUID_PATTERN, readOwnedJson } = require('./record-guards');
 const { createClaudeSurface } = require('./claude-surface');
+const { walkProcessAncestry } = require('./process-ancestry');
 const { VERSION } = require('./version');
 
 const CHANNELS = Object.freeze(['claude-bridge', 'codex-thread', 'none']);
@@ -33,27 +33,19 @@ class WakeError extends Error {
   }
 }
 
-function parentPidOf(pid, run) {
-  const raw = run('ps', ['-o', 'ppid=', '-p', String(pid)]).trim();
-  return /^\d+$/.test(raw) ? Number(raw) : 0;
-}
-
-function defaultRun(executable, args) {
-  return execFileSync(executable, args, {
-    encoding: 'utf8', timeout: 3000, env: { PATH: '/usr/sbin:/usr/bin:/bin:/sbin' },
-  });
-}
-
 // The Claude Code session this process runs inside, found by walking the
 // process ancestry to the first pid that owns a session metadata record. The
 // record must carry a Remote Control bridge id, which is the only public
 // address a follow-up can be sent to. Anything else is `none` with a reason.
 function discoverClaudeWake(options = {}, env = process.env) {
-  const run = options.run || defaultRun;
   // The CLI keeps its session records under CLAUDE_CONFIG_DIR when set.
   const configDir = options.configDir || env.CLAUDE_CONFIG_DIR || path.join(env.HOME || os.homedir(), '.claude');
-  let pid = options.startPid ?? process.ppid;
-  for (let depth = 0; depth < MAX_ANCESTRY_DEPTH && pid > 1; depth += 1) {
+  const ancestry = walkProcessAncestry({
+    run: options.run,
+    startPid: options.startPid ?? process.ppid,
+    maxDepth: MAX_ANCESTRY_DEPTH,
+  });
+  for (const { pid, depth } of ancestry) {
     const file = path.join(configDir, 'sessions', `${pid}.json`);
     const read = readOwnedJson(file, { maxBytes: MAX_METADATA_BYTES, modeMask: 0o022 });
     if (read.status === 'ok') {
@@ -82,7 +74,6 @@ function discoverClaudeWake(options = {}, env = process.env) {
     if (read.status === 'unsafe' || read.status === 'invalid') {
       return { channel: 'none', reason: `session-metadata-${read.status}` };
     }
-    pid = parentPidOf(pid, run);
   }
   return { channel: 'none', reason: 'no-claude-session-in-ancestry' };
 }

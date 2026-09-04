@@ -12,6 +12,10 @@
   probes are named, and setup advice never proposes a downgrade. The doctor
   also caches required Codex app-server method probes by runtime version and
   inventories the PATH, Desktop-bundled, and explicitly selected Codex CLIs.
+- Detect whether setup is running in a desktop app, terminal, IDE, or plain
+  shell from environment markers and shared process ancestry, and let
+  `doctor --explain` describe one ordered setup plan for both lane hosts in
+  plain language without changing the doctor's existing owner actions.
 - The Codex runtime is accepted by version, 0.151.0 or newer, whatever
   product name it reports: the managed daemon names itself after the
   originator of its first client. The client's handshake no longer offers
