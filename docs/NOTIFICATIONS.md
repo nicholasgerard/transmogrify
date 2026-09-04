@@ -68,9 +68,11 @@ through the provider before any event exists.
 
 An observation that only confirms the parent's own completed command (the
 lane's newest journal is a `retire`, `stop`, or `interrupt` finished within
-the last two minutes) is recorded already acknowledged: the command's own
-result was the parent's receipt, and waking it again for the same fact
-would cost a model turn for nothing. Every other event waits for the
+the last two minutes, or a completed `retire` or `stop` of any age when the
+event is the matching `child.retired` or `child.stopped`, since those happen
+only through the parent's command) is recorded already acknowledged: the
+command's own result was the parent's receipt, and waking it again for the
+same fact would cost a model turn for nothing. Every other event waits for the
 parent's `ack`, one at a time or `--through` the highest sequence a wake
 named.
 

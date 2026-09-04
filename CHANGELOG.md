@@ -2,6 +2,12 @@
 
 ## 0.6.0 (in progress)
 
+- A lane's own completed retirement or stop no longer wakes the parent when
+  the watcher records the terminal event late: `child.retired` after a
+  completed `retire`, and `child.stopped` after a completed `stop`, are
+  acknowledged at observation whatever their age, because neither can happen
+  without the parent's command (measured 2026-09-04: three retirements woke
+  the parent once each, four minutes after the fact).
 - Prefer Codex's installer-managed app-server daemon and reach its Unix control
   socket directly from Transmogrify or through an owned loopback TCP relay for
   Desktop. `runtime-up.sh` now returns the relay URL, socket, and daemon version

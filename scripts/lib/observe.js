@@ -46,14 +46,22 @@ const SETTLED_LANE_STATES = new Set(['archivedVerified', 'cleanupEligible', 'wor
 const OWN_COMMAND_WINDOW_MS = 2 * 60 * 1000;
 const OWN_COMMAND_TYPES = new Set(['retire', 'stop', 'interrupt']);
 const OWN_COMMAND_EVENTS = new Set(['child.retired', 'child.stopped', 'child.turn-completed', 'child.idle-observed']);
+// A retirement or a whole-session stop happens only through the parent's own
+// command, so its terminal event confirms that command however late the
+// observation lands: a settled lane leaves the outstanding set before the
+// watcher reads it again, and the read that finally records the event may
+// come minutes later. Every other own-command event keeps the window.
+const ALWAYS_OWN_EVENTS = new Map([['child.retired', 'retire'], ['child.stopped', 'stop']]);
 
 // The lane's newest journal when it is a completed retire, stop, or interrupt
-// younger than the own-command window; null otherwise.
-function recentOwnCommand(repoRoot, laneId, env, now = Date.now()) {
+// younger than the own-command window, or a completed retire or stop that the
+// event type can only confirm; null otherwise.
+function recentOwnCommand(repoRoot, laneId, env, now = Date.now(), eventType = null) {
   const newest = listOperations(repoRoot, env)
     .filter((operation) => operation.laneId === laneId)
     .sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0))[0];
   if (!newest || !OWN_COMMAND_TYPES.has(newest.type) || newest.state !== 'complete') return null;
+  if (ALWAYS_OWN_EVENTS.get(eventType) === newest.type) return newest;
   const ageMs = now - Date.parse(newest.updatedAt || 0);
   return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= OWN_COMMAND_WINDOW_MS ? newest : null;
 }
@@ -423,7 +431,7 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
 function ownCommandResult(dispatch, lane, event, phase, env) {
   const result = { lane, event, phase };
   if (!event || !OWN_COMMAND_EVENTS.has(event.type)) return result;
-  const own = recentOwnCommand(dispatch.child.repoRoot, lane.laneId, env);
+  const own = recentOwnCommand(dispatch.child.repoRoot, lane.laneId, env, Date.now(), event.type);
   return own ? { ...result, ownCommand: { type: own.type, operationId: own.operationId } } : result;
 }
 
