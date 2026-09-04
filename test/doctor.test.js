@@ -113,6 +113,7 @@ test('doctor reuses only read-only provider surfaces and emits aggregate ownersh
   assert.deepEqual(result.providers.codex.nativeVisibility, {
     verified: false,
     nativeDispatchReady: false,
+    persisted: false,
     evidence: 'desktop-attachment:disabled',
     nextAction: 'use-allow-protocol-only',
   });
@@ -245,6 +246,7 @@ test('doctor turns a measured Desktop attachment into the native-visibility rece
   assert.deepEqual(attached.providers.codex.nativeVisibility, {
     verified: true,
     nativeDispatchReady: true,
+    persisted: false,
     evidence: 'codex-desktop-attached-to-selected-runtime',
     receipt: {
       clientPid: 96049,
@@ -274,6 +276,7 @@ test('doctor turns a measured Desktop attachment into the native-visibility rece
   assert.deepEqual(unattached.providers.codex.nativeVisibility, {
     verified: false,
     nativeDispatchReady: false,
+    persisted: false,
     evidence: 'desktop-attachment:unattached',
     nextAction: 'run-desktop-attach-ensure',
   });
@@ -287,6 +290,83 @@ test('doctor turns a measured Desktop attachment into the native-visibility rece
   });
   assert.equal(failing.providers.codex.nativeVisibility.evidence, 'desktop-attachment:toolUnavailable');
   assert.equal(failing.providers.codex.reusable, true);
+});
+
+test('doctor selects the live relay record for both its protocol and attachment reads', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const relay = {
+    url: 'ws://127.0.0.1:8844/',
+    socketPath: '/private/tmp/codex-daemon.sock',
+  };
+  const probes = [];
+  const result = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'codex',
+  ], fixture.env, {
+    runningRelay: () => relay,
+    createAppServerClient(options) {
+      probes.push(['runtime', options.url]);
+      return {
+        verifiedRuntime: true,
+        async connect() { return { userAgent: 'codex_cli_rs/0.151.0' }; },
+        close() {},
+      };
+    },
+    measureCodexCompatibility: async () => ({ result: 'good', probes: [] }),
+    desktopAttachment: async (options) => {
+      probes.push(['desktop', options.url]);
+      return {
+        persisted: true,
+        attachment: {
+          state: 'attached',
+          evidence: 'lsof-established-loopback-connection',
+          clientPid: 96049,
+          connection: '127.0.0.1:53519->127.0.0.1:8844',
+          observedAt: '2026-09-04T12:00:00.000Z',
+          relay,
+        },
+        desktop: {
+          bundleId: 'com.openai.codex', version: '26.901.20858', build: '7658', buildTested: true,
+        },
+        nextAction: 'none',
+      };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(probes, [
+    ['runtime', relay.url],
+    ['desktop', relay.url],
+  ]);
+  assert.equal(result.providers.codex.nativeVisibility.verified, true);
+  assert.equal(result.providers.codex.nativeVisibility.persisted, true);
+});
+
+test('every Desktop setup reason explains the visibility benefit and protocol-only choice', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  for (const state of [
+    'unattached', 'notRunning', 'notInstalled', 'attachedElsewhere',
+    'unsupportedPlatform', 'disabled', 'toolUnavailable',
+  ]) {
+    const result = await main([
+      '--repo-root', fixture.repoRoot,
+      '--target', 'codex',
+      '--url', 'ws://127.0.0.1:8844',
+    ], fixture.env, {
+      createAppServerClient: () => ({
+        verifiedRuntime: true,
+        async connect() { return { userAgent: 'codex_cli_rs/0.151.0' }; },
+        close() {},
+      }),
+      measureCodexCompatibility: async () => ({ result: 'good', probes: [] }),
+      desktopAttachment: async () => ({
+        persisted: false,
+        attachment: { state },
+        nextAction: 'repair-desktop-attachment',
+      }),
+    });
+    assert.match(result.providers.codex.setup.ownerAction, /appear and stream live|live-visible/);
+    assert.match(result.providers.codex.setup.ownerAction, /protocol-only/);
+  }
 });
 
 test('doctor maintenance command reuses PATH discovery without an undeclared Claude binding', async (t) => {

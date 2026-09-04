@@ -76,9 +76,9 @@ verified builds and receipts are in the
 - Git, Bash, `ps`, and `lsof`. Confirm them with `node --version`,
   `npm --version`, `git --version`, and `lsof -v`.
 - Codex CLI/app-server `0.151.0` or newer for Codex targets, verified with `0.151.0`.
-  Attached live visibility is verified with Codex Desktop `26.901.20858`
-  (`7658`) and `26.825.51511` (`7377`), and mobile visibility with ChatGPT for
-  iOS `1.2026.230` (`32543289983`). Install and sign in using the
+  Attached live visibility is verified with Codex Desktop `26.901.22334`
+  (`7746`), `26.901.20858` (`7658`), and `26.825.51511` (`7377`), and mobile
+  visibility with ChatGPT for iOS `1.2026.230` (`32543289983`). Install and sign in using the
   [official Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
 - Standalone Codex tools are CI-tested on macOS and Linux; Windows is not a
   supported host in this release.
@@ -196,6 +196,8 @@ observed and the next action, normally `desktop-attach.js ensure`. After a
 Desktop restart or update, rerun the doctor: a surviving independent runtime
 shows as unattached until Desktop is relaunched against it, while exact-owned
 recovery and retirement on that runtime remain available.
+Runtime selection is the same here and in `desktop-attach.js`: explicit
+`--url`, `TRANSMOGRIFY_URL`, the live relay record, then legacy port 8843.
 
 The doctor also prints `setup.ownerActions`: every precondition only the owner
 can satisfy, each with the exact command and a `blocking` flag. A blocking
@@ -249,12 +251,20 @@ Codex Desktop adopts that runtime when the app is launched with
 attachment, including one another operator set up, launches Desktop attached
 when it is not running, and quits and relaunches a running unattached Desktop
 only after the owner agrees (`--relaunch-desktop` for one run, or the standing
-`TRANSMOGRIFY_DESKTOP_RELAUNCH=auto`). It never relaunches from a session
-hosted inside the app and never touches the runtime. The variable is an
+`TRANSMOGRIFY_DESKTOP_RELAUNCH=auto`). If no selected listener exists, it asks
+`runtime-up` to ensure the daemon and relay before launching the app. It never
+relaunches from a session hosted inside the app. The variable is an
 observed launcher behavior on the tested Desktop builds, not a documented
 OpenAI contract; because the receipt is measured on every check and every
 spawn, a build that ignores it fails closed. OpenAI's Desktop-owned SSH
 daemon/proxy surface is the roadmap candidate to replace this mechanism.
+
+`desktop-attach.js persist --dry-run` shows the exact login environment and
+per-user LaunchAgent it would install. After owner review,
+`persist --authorize` sets the login-session URL and writes
+`~/Library/LaunchAgents/sh.transmogrify.attach.plist`; the agent ensures the
+daemon and relay before reapplying the URL at login. `unpersist --authorize`
+removes both changes. Persistence never relaunches a running Desktop app.
 
 ## Quick start
 
@@ -400,7 +410,7 @@ a complete packet, handback, digest, and retirement walkthrough in
 | `scripts/maintain.js` | Bounded maintenance: the read-only doctor plus each available provider's exact-owned reconcile; `--retention` moves aged, worktree-released operation journals and superseded install backups into recoverable trash |
 | `scripts/runtime-up.sh` | Ensure the managed Codex daemon and loopback relay, or report the standalone fallback as JSON |
 | `scripts/lib/relay.js` | Own the loopback TCP-to-daemon-socket relay by pid and process birth |
-| `scripts/desktop-attach.js` | Measure, launch, or (with owner authorization) relaunch Codex Desktop as a client of the shared runtime |
+| `scripts/desktop-attach.js` | Measure or ensure Desktop attachment, and persist or remove the owner-approved login environment and LaunchAgent |
 | `scripts/lane-status-listen.js` | Listen for state transitions on exact owned Codex lanes |
 | `scripts/watch.js` | Per-parent watcher, started by `spawn`: reads a working child every few seconds and an idle one only when nudged (by the parent's own commands, a Claude child's session hook, or a Codex runtime notification), records the durable events, and wakes the parent once per round through its recorded channel ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)) |
 | `scripts/rpc.js` | Default-deny, read-only Codex diagnostics |

@@ -5,10 +5,10 @@ license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
   version: "0.5.0"
-  verified_date: "2026-09-02"
+  verified_date: "2026-09-04"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server >=0.151.0"
-  verified_codex_desktop: "26.901.20858 (7658)"
+  verified_codex_desktop: "26.901.22334 (7746)"
   verified_codex_mobile: "ChatGPT for iOS 1.2026.230 (32543289983)"
   verified_claude_cli: "2.1.258"
   supported_claude_cli: ">=2.1.258"
@@ -120,7 +120,8 @@ node "$SKILL_ROOT/scripts/desktop-attach.js" ensure
 
 `check` is read-only and exits 0 only with a live attachment receipt.
 `ensure` reuses an existing attachment, including one another operator set
-up, and launches Desktop attached when it is not running. A running
+up. If the selected listener is absent, it uses `runtime-up` to ensure the
+daemon and relay before launching Desktop. A running
 unattached Desktop must be quit and relaunched, which ends whatever its
 private runtime was doing, so `ensure` stops with `DESKTOP_RELAUNCH_REQUIRED`
 until the owner agrees.
@@ -131,8 +132,11 @@ until the owner agrees.
 | Codex host | Your session runs inside the app; never relaunch it (`ensure` refuses with `DESKTOP_HOST_SESSION`). `attached` means the shared runtime is already the app's control plane. Otherwise use Codex's native collaboration for Codex children, spawn Claude lanes, which need no attachment, or ask the owner to attach from outside the app. |
 | `ATTACHED_ELSEWHERE` | Desktop streams another loopback runtime: point `TRANSMOGRIFY_URL` at the reported endpoint and rerun the doctor. |
 | `RUNTIME_UNAVAILABLE` | Nothing listens yet: start or reuse a runtime first. |
+| Persist across Dock launches and updates | Inspect `persist --dry-run`; after owner consent run `persist --authorize`. It sets the login environment and writes `~/Library/LaunchAgents/sh.transmogrify.attach.plist`, whose login run ensures the daemon and relay before reapplying the URL. Reverse it with `unpersist --authorize`. Neither command relaunches Desktop. |
 
-The receipt is measured on every check and every Codex spawn, so a Desktop
+Runtime selection is `--url`, `TRANSMOGRIFY_URL`, the live relay record, then
+legacy port 8843. A relay receipt includes its daemon socket as well as the
+Desktop TCP connection. The receipt is measured on every check and every Codex spawn, so a Desktop
 build that ignores the mechanism fails closed to protocol-only lanes. The
 mechanism itself is described in
 [docs/PROTOCOL.md](docs/PROTOCOL.md#native-app-visibility).

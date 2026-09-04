@@ -52,6 +52,15 @@ Every lane-bound operation (`spawn`, `status`, `steer`, `interrupt`, `stop`,
   with `runtimeUrl`, `evidence`, `connection`, `observedAt`, `bundleId`,
   `desktopVersion`, `desktopBuild`, `buildTested`, `clientPid`.
 
+The read-only `desktop-attach.js check` receipt includes `runtimeUrl`,
+`runtimeSource`, and the explicit boolean `persisted`. `persisted:true` means
+the selected endpoint is a live relay, `launchctl getenv
+CODEX_APP_SERVER_WS_URL` equals that relay URL, and
+`~/Library/LaunchAgents/sh.transmogrify.attach.plist` exists; any missing or
+unreadable evidence is `false`. An attached relay receipt also includes
+`attachment.relay.url` and `attachment.relay.socketPath`. The doctor's
+`nativeVisibility` copies `persisted` as the same boolean for guided setup.
+
 ## Operations
 
 ### `setup`

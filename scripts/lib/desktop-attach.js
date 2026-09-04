@@ -11,15 +11,24 @@
 // lsof. A Desktop build that ignores the variable never produces that receipt,
 // so every consumer fails closed to the protocol-only path.
 //
-// This module never kills a process, never touches the runtime, and only ever
-// quits the Desktop app through its own application quit after explicit owner
-// authorization.
+// This module never kills a process. It delegates runtime startup to the
+// runtime launcher and only ever quits Desktop through its own application
+// quit after explicit owner authorization.
 
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { validateUrl } = require('./app-server');
 const { inspectListeners } = require('./listeners');
 const { sleep: delay } = require('./async');
+const {
+  DEFAULT_RELAY_HOST,
+  DEFAULT_RELAY_PORT,
+  relayUrl,
+  runningRelay,
+} = require('./relay');
 
 const ATTACH_ENV = 'CODEX_APP_SERVER_WS_URL';
 const DISABLE_ENV = 'TRANSMOGRIFY_DESKTOP_ATTACH';
@@ -34,6 +43,9 @@ const MAX_ATTACH_TIMEOUT_MS = 120_000;
 const QUIT_TIMEOUT_MS = 30_000;
 const POLL_MS = 500;
 const MAX_ELSEWHERE_PORTS = 8;
+const LAUNCH_AGENT_LABEL = 'sh.transmogrify.attach';
+const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`;
+const LAUNCH_AGENT_MARKER = 'Managed by Transmogrify desktop-attach.js';
 
 // Desktop builds on which an attached launch was observed to render and stream
 // Transmogrify lanes live. Documentation for the operator, not a gate: the
@@ -41,6 +53,7 @@ const MAX_ELSEWHERE_PORTS = 8;
 const TESTED_DESKTOP_BUILDS = Object.freeze([
   Object.freeze({ version: '26.825.51511', build: '7377', observedOn: '2026-09-01' }),
   Object.freeze({ version: '26.901.20858', build: '7658', observedOn: '2026-09-02' }),
+  Object.freeze({ version: '26.901.22334', build: '7746', observedOn: '2026-09-04' }),
 ]);
 
 // Attachment failure carrying a stable code. Every code names the Desktop state
@@ -63,13 +76,7 @@ function usage(message) {
 // directories so a same-user entry cannot substitute the tool.
 function execFileResult(executable, args, options = {}) {
   return new Promise((resolve) => {
-    execFile(executable, args, {
-      encoding: 'utf8',
-      maxBuffer: MAX_CAPTURE_BYTES,
-      timeout: options.timeoutMs || 5000,
-      killSignal: 'SIGKILL',
-      env: { ...(options.env || process.env), PATH: SYSTEM_TOOL_PATH },
-    }, (error, stdout, stderr) => {
+    const finished = (error, stdout = '', stderr = '') => {
       if (error && typeof error.code !== 'number') {
         resolve({
           code: null,
@@ -80,16 +87,53 @@ function execFileResult(executable, args, options = {}) {
         return;
       }
       resolve({ code: error ? error.code : 0, stdout: String(stdout || ''), stderr: String(stderr || '') });
-    });
+    };
+    try {
+      execFile(executable, args, {
+        encoding: 'utf8',
+        maxBuffer: MAX_CAPTURE_BYTES,
+        timeout: options.timeoutMs || 5000,
+        killSignal: 'SIGKILL',
+        env: { ...(options.env || process.env), PATH: SYSTEM_TOOL_PATH },
+      }, finished);
+    } catch (error) {
+      finished(error);
+    }
   });
 }
 
 
-// The runtime this check is about: explicit option, then TRANSMOGRIFY_URL, then
-// the default loopback port, always through the loopback URL validator.
-function resolveRuntimeUrl(options, env) {
-  return validateUrl(options.url || env.TRANSMOGRIFY_URL ||
-    `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
+// The runtime this check is about: explicit option, TRANSMOGRIFY_URL, a live
+// managed-daemon relay record, then the legacy standalone endpoint. Returning
+// the relay record with the URL lets an attachment receipt prove both the
+// Desktop TCP connection and the daemon socket behind that relay.
+function resolveRuntimeTarget(options = {}, env = process.env, dependencies = {}) {
+  const readRelay = dependencies.runningRelay || runningRelay;
+  let relay = null;
+  if (!options.url && !env.TRANSMOGRIFY_URL) {
+    relay = readRelay(env, dependencies.relayDependencies || dependencies);
+  }
+  const rawUrl = options.url || env.TRANSMOGRIFY_URL || relay?.url ||
+    `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`;
+  const url = validateUrl(rawUrl);
+  if (!relay) {
+    try {
+      const candidate = readRelay(env, dependencies.relayDependencies || dependencies);
+      if (candidate && validateUrl(candidate.url) === url) relay = candidate;
+    } catch {
+      // An explicit runtime remains usable even when unrelated relay state is
+      // unreadable. A relay is claimed only from a valid live record.
+    }
+  }
+  return {
+    url,
+    source: options.url ? 'option' : env.TRANSMOGRIFY_URL ? 'environment' : relay ? 'liveRelay' : 'legacyDefault',
+    relay: relay && validateUrl(relay.url) === url ? relay : null,
+  };
+}
+
+function resolveRuntimeUrl(options = {}, env = process.env, dependencies = {}) {
+  return resolveRuntimeTarget(options, env, dependencies).url;
 }
 
 function runtimePort(runtimeUrl) {
@@ -178,7 +222,7 @@ async function requireTool(run, executable, args, env, timeoutMs = 5000) {
 
 // The first installed Desktop application among the accepted bundle identifiers,
 // with its path, version, and build. Null when none is installed.
-async function resolveDesktopApp(run, env) {
+async function resolveDesktopApp(run, env, dependencies = {}) {
   for (const bundleId of bundleCandidates(env)) {
     const located = await requireTool(run, 'osascript', [
       '-e', `POSIX path of (path to application id "${bundleId}")`,
@@ -189,6 +233,40 @@ async function resolveDesktopApp(run, env) {
     const plist = path.join(appPath, 'Contents', 'Info.plist');
     const version = await run('defaults', ['read', plist, 'CFBundleShortVersionString'], { timeoutMs: 5000, env });
     const build = await run('defaults', ['read', plist, 'CFBundleVersion'], { timeoutMs: 5000, env });
+    return {
+      bundleId,
+      appPath,
+      version: version.code === 0 ? version.stdout.trim() : null,
+      build: build.code === 0 ? build.stdout.trim() : null,
+    };
+  }
+  // LaunchServices lookup can be denied inside a sandbox even though the app
+  // bundle is readable. Fall back to the two standard per-machine and per-user
+  // locations, but accept a bundle only after its plist names an allowed id.
+  const homes = env.HOME && path.isAbsolute(env.HOME) ? [env.HOME] : [];
+  const candidates = [
+    '/Applications/ChatGPT.app',
+    '/Applications/Codex.app',
+    ...homes.flatMap((home) => [
+      path.join(home, 'Applications', 'ChatGPT.app'),
+      path.join(home, 'Applications', 'Codex.app'),
+    ]),
+  ];
+  const exists = dependencies.existsSync || fs.existsSync;
+  for (const appPath of candidates) {
+    const plist = path.join(appPath, 'Contents', 'Info.plist');
+    if (!exists(plist)) continue;
+    const identifier = await run('plutil', ['-extract', 'CFBundleIdentifier', 'raw', plist], {
+      timeoutMs: 5000, env,
+    });
+    const bundleId = identifier.code === 0 ? identifier.stdout.trim() : null;
+    if (!bundleCandidates(env).includes(bundleId)) continue;
+    const version = await run('plutil', ['-extract', 'CFBundleShortVersionString', 'raw', plist], {
+      timeoutMs: 5000, env,
+    });
+    const build = await run('plutil', ['-extract', 'CFBundleVersion', 'raw', plist], {
+      timeoutMs: 5000, env,
+    });
     return {
       bundleId,
       appPath,
@@ -294,6 +372,27 @@ function buildTested(app) {
     tested.version === app.version && tested.build === app.build);
 }
 
+// Persistence is a two-part receipt: the login launch environment names the
+// selected live relay and the per-user LaunchAgent exists to reapply it. Any
+// missing or unreadable evidence is false, never an inferred success.
+async function attachmentPersisted(target, run, env, dependencies) {
+  if (!target.relay) return false;
+  try {
+    const inspect = dependencies.launchctlGetenv || (dependencies.launchctl
+      ? async (name) => dependencies.launchctl(['getenv', name], env)
+      : async (name) => run('/bin/launchctl', ['getenv', name], { timeoutMs: 5000, env }));
+    const observed = await inspect(ATTACH_ENV, env);
+    const value = typeof observed === 'string'
+      ? observed.trim()
+      : observed?.code === 0 ? String(observed.stdout || '').trim() : '';
+    const expected = target.relay.url;
+    const exists = dependencies.plistExists || dependencies.plistWriter?.exists || fs.existsSync;
+    return value === expected && exists(persistencePath(env, dependencies));
+  } catch {
+    return false;
+  }
+}
+
 // Read-only attachment receipt. It reports exactly one state: attached with the
 // observed connection, or disabled, unsupportedPlatform, notInstalled,
 // notRunning, attachedElsewhere, unattached, or toolUnavailable when inspection
@@ -303,12 +402,18 @@ async function check(options = {}, env = process.env, dependencies = {}) {
   const platform = dependencies.platform || process.platform;
   const now = dependencies.now || (() => new Date().toISOString());
   const selfPid = dependencies.pid || process.pid;
-  const runtimeUrl = resolveRuntimeUrl(options, env);
+  const target = resolveRuntimeTarget(options, env, dependencies);
+  const runtimeUrl = target.url;
   const port = runtimePort(runtimeUrl);
+  const persisted = platform === 'darwin' && env[DISABLE_ENV] !== 'off'
+    ? await attachmentPersisted(target, run, env, dependencies)
+    : false;
   const base = {
     version: 1,
     operation: 'check',
     runtimeUrl,
+    runtimeSource: target.source,
+    persisted,
     platform,
     mechanism: {
       attachEnv: ATTACH_ENV,
@@ -333,7 +438,7 @@ async function check(options = {}, env = process.env, dependencies = {}) {
   let clients;
   let desktopHostsSession = false;
   try {
-    app = await resolveDesktopApp(run, env);
+    app = await resolveDesktopApp(run, env, dependencies);
     if (!app) {
       return unattached({ installed: false }, {
         state: 'notInstalled',
@@ -379,6 +484,12 @@ async function check(options = {}, env = process.env, dependencies = {}) {
         clientPid: match.pid,
         connection: `${match.local.host}:${match.local.port}->${match.remote.host}:${match.remote.port}`,
         observedAt: now(),
+        ...(target.relay ? {
+          relay: {
+            url: target.relay.url,
+            socketPath: target.relay.socketPath,
+          },
+        } : {}),
       },
       nextAction: 'none',
     };
@@ -447,6 +558,32 @@ async function launchDesktopAttached(run, desktop, runtimeUrl, env) {
   }
 }
 
+// Ask the runtime module to establish its preferred managed-daemon/relay path.
+// Desktop attachment owns no runtime process lifecycle itself.
+async function runtimeUp(options, env, dependencies) {
+  const ensureRuntime = dependencies.runtimeUp || (async (runtimeOptions) => {
+    const { ensurePreferredRuntime } = require('../runtime-launch');
+    return ensurePreferredRuntime(runtimeOptions, {
+      env,
+      ...(dependencies.runtimeDependencies || {}),
+    });
+  });
+  const result = await ensureRuntime({
+    url: options.url,
+    probe: path.join(__dirname, '..', 'runtime-probe.js'),
+    relayPort: env.TRANSMOGRIFY_RELAY_PORT || DEFAULT_RELAY_PORT,
+  }, env);
+  if (!result || typeof result.url !== 'string') {
+    throw new DesktopAttachError('runtime-up did not return a selected runtime URL', 'RUNTIME_LAUNCH_FAILED');
+  }
+  return { ...result, url: validateUrl(result.url) };
+}
+
+async function runtimeListeners(run, runtimeUrl, env, dependencies) {
+  const inspect = dependencies.inspectListeners || inspectListeners;
+  return inspect(runtimePort(runtimeUrl), { execFileResult: run, env });
+}
+
 // Bring Desktop to an attached state and prove it with a fresh check. An
 // already-attached app is reused and a stopped app is launched attached.
 // Relaunching a running unattached app quits it, so it requires explicit or
@@ -461,7 +598,8 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
   const authorization = options.relaunch === true
     ? 'flag'
     : env[RELAUNCH_ENV] === 'auto' ? 'standing-env' : 'none';
-  const initial = await check(options, env, dependencies);
+  let selectedOptions = options;
+  let initial = await check(selectedOptions, env, dependencies);
   const finished = (action, receipt, warnings = []) => ({
     version: 1,
     ok: receipt.attachment.state === 'attached',
@@ -492,14 +630,6 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
       { suggestedRuntimeUrl: initial.attachment.elsewhere[0].url },
     );
   }
-  const port = runtimePort(initial.runtimeUrl);
-  const listeners = await inspectListeners(port, { execFileResult: run, env });
-  if (!listeners.length) {
-    throw new DesktopAttachError(
-      `no loopback listener on ${initial.runtimeUrl}; reuse or start a runtime before attaching Desktop`,
-      'RUNTIME_UNAVAILABLE',
-    );
-  }
   const warnings = [];
   let action;
   if (state === 'unattached') {
@@ -518,17 +648,33 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
       );
     }
     warnings.push('the private Desktop runtime could not be inspected for in-flight work before the quit');
-    await quitDesktop(run, initial.desktop, env, dependencies);
     action = 'relaunched';
   } else {
     action = 'launched';
   }
+
+  // A Desktop launch against an absent relay does not recover after the relay
+  // appears. Establish the selected runtime first, and adopt runtime-up's relay
+  // URL before any quit or launch.
+  if (!(await runtimeListeners(run, initial.runtimeUrl, env, dependencies)).length) {
+    const runtime = await runtimeUp({ url: options.url || env.TRANSMOGRIFY_URL || initial.runtimeUrl }, env, dependencies);
+    selectedOptions = { ...options, url: runtime.url };
+    initial = await check(selectedOptions, env, dependencies);
+    if (initial.attachment.state === 'attached') return finished('reused', initial, warnings);
+    if (!(await runtimeListeners(run, initial.runtimeUrl, env, dependencies)).length) {
+      throw new DesktopAttachError(
+        `runtime-up did not establish a loopback listener on ${initial.runtimeUrl}`,
+        'RUNTIME_UNAVAILABLE',
+      );
+    }
+  }
+  if (action === 'relaunched') await quitDesktop(run, initial.desktop, env, dependencies);
   await launchDesktopAttached(run, initial.desktop, initial.runtimeUrl, env);
   const deadline = clock() + timeoutMs;
   let latest = initial;
   for (;;) {
     await sleep(POLL_MS);
-    latest = await check(options, env, dependencies);
+    latest = await check(selectedOptions, env, dependencies);
     if (latest.attachment.state === 'attached') return finished(action, latest, warnings);
     if (clock() >= deadline) break;
   }
@@ -539,6 +685,212 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
   );
 }
 
+function persistencePath(env = process.env, dependencies = {}) {
+  const home = dependencies.home || env.HOME || os.homedir();
+  if (!path.isAbsolute(home) || path.normalize(home) !== home) {
+    usage('HOME must be a normalized absolute path for Desktop attachment persistence');
+  }
+  return path.join(home, 'Library', 'LaunchAgents', LAUNCH_AGENT_FILE);
+}
+
+function xmlEscape(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+function launchAgentContents(runtimeUrl, dependencies = {}) {
+  const nodePath = dependencies.nodePath || process.execPath;
+  const scriptPath = dependencies.scriptPath || path.join(__dirname, '..', 'desktop-attach.js');
+  for (const [name, value] of [['Node executable', nodePath], ['desktop-attach script', scriptPath]]) {
+    if (!path.isAbsolute(value) || path.normalize(value) !== value) {
+      usage(`${name} must be a normalized absolute path`);
+    }
+  }
+  const argumentsXml = [nodePath, scriptPath, 'apply-persisted', '--url', runtimeUrl]
+    .map((argument) => `    <string>${xmlEscape(argument)}</string>`)
+    .join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ${LAUNCH_AGENT_MARKER} -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LAUNCH_AGENT_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+${argumentsXml}
+  </array>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+`;
+}
+
+function assertManagedLaunchAgent(file) {
+  if (!fs.existsSync(file)) return false;
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() ||
+      (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+    usage(`refusing an unowned or non-regular LaunchAgent at ${file}`);
+  }
+  const contents = fs.readFileSync(file, 'utf8');
+  if (!contents.includes(`<!-- ${LAUNCH_AGENT_MARKER} -->`) ||
+      !contents.includes(`<string>${LAUNCH_AGENT_LABEL}</string>`)) {
+    usage(`refusing to replace a LaunchAgent not owned by Transmogrify at ${file}`);
+  }
+  return true;
+}
+
+function writeLaunchAgent(file, contents) {
+  assertManagedLaunchAgent(file);
+  const directory = path.dirname(file);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const directoryStat = fs.lstatSync(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() ||
+      fs.realpathSync(directory) !== directory ||
+      (typeof process.getuid === 'function' && directoryStat.uid !== process.getuid()) ||
+      (directoryStat.mode & 0o022) !== 0) {
+    usage(`refusing an unsafe LaunchAgents directory at ${directory}`);
+  }
+  const temporary = path.join(directory, `.${LAUNCH_AGENT_FILE}.${crypto.randomUUID()}.tmp`);
+  const descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT |
+    fs.constants.O_EXCL, 0o600);
+  try {
+    fs.writeFileSync(descriptor, contents, 'utf8');
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  fs.renameSync(temporary, file);
+}
+
+function removeLaunchAgent(file) {
+  if (!assertManagedLaunchAgent(file)) return false;
+  fs.unlinkSync(file);
+  return true;
+}
+
+async function launchctl(args, env, dependencies) {
+  const invoke = dependencies.launchctl || (async (launchctlArgs) =>
+    requireTool(dependencies.execFileResult || execFileResult, '/bin/launchctl', launchctlArgs, env));
+  const result = await invoke(args, env);
+  if (result && result.code !== undefined && result.code !== 0) {
+    throw new DesktopAttachError(`launchctl ${args[0]} failed`, 'TOOL_FAILED');
+  }
+}
+
+function persistencePlan(runtimeUrl, env, dependencies) {
+  const file = persistencePath(env, dependencies);
+  return {
+    runtimeUrl,
+    launchctl: ['launchctl', 'setenv', ATTACH_ENV, runtimeUrl],
+    launchAgent: {
+      path: file,
+      contents: launchAgentContents(runtimeUrl, dependencies),
+    },
+  };
+}
+
+function requireAuthorizedPersistence(options) {
+  if (options.dryRun !== true && options.authorize !== true) {
+    usage('persist and unpersist require --authorize for real changes; inspect them first with --dry-run');
+  }
+}
+
+function plannedPersistentUrl(options, env, dependencies) {
+  const target = resolveRuntimeTarget(options, env, dependencies);
+  if (target.source !== 'legacyDefault') return target.url;
+  const port = env.TRANSMOGRIFY_RELAY_PORT || DEFAULT_RELAY_PORT;
+  return validateUrl(relayUrl(DEFAULT_RELAY_HOST, port));
+}
+
+// Install the login-session setting now and a per-user LaunchAgent that asks
+// runtime-up to establish the daemon/relay before reapplying it at each login.
+async function persist(options = {}, env = process.env, dependencies = {}) {
+  if ((dependencies.platform || process.platform) !== 'darwin') {
+    throw new DesktopAttachError('Codex Desktop attachment persistence is available on macOS only', 'UNSUPPORTED_PLATFORM');
+  }
+  requireAuthorizedPersistence(options);
+  if (options.dryRun === true) {
+    const plan = persistencePlan(plannedPersistentUrl(options, env, dependencies), env, dependencies);
+    return { version: 1, ok: true, operation: 'persist', dryRun: true, ...plan };
+  }
+  const selected = resolveRuntimeUrl(options, env, dependencies);
+  const runtime = await runtimeUp({ url: selected }, env, dependencies);
+  const plan = persistencePlan(runtime.url, env, dependencies);
+  await launchctl(['setenv', ATTACH_ENV, runtime.url], env, dependencies);
+  try {
+    const write = typeof dependencies.plistWriter === 'function'
+      ? dependencies.plistWriter
+      : dependencies.plistWriter?.write || writeLaunchAgent;
+    await write(plan.launchAgent.path, plan.launchAgent.contents);
+  } catch (error) {
+    try { await launchctl(['unsetenv', ATTACH_ENV], env, dependencies); } catch {}
+    throw error;
+  }
+  return {
+    version: 1,
+    ok: true,
+    operation: 'persist',
+    dryRun: false,
+    runtimeUrl: runtime.url,
+    launchctl: plan.launchctl,
+    launchAgent: { path: plan.launchAgent.path, written: true },
+  };
+}
+
+// Remove only the exact managed plist, then clear the login-session setting.
+async function unpersist(options = {}, env = process.env, dependencies = {}) {
+  if ((dependencies.platform || process.platform) !== 'darwin') {
+    throw new DesktopAttachError('Codex Desktop attachment persistence is available on macOS only', 'UNSUPPORTED_PLATFORM');
+  }
+  requireAuthorizedPersistence(options);
+  const file = persistencePath(env, dependencies);
+  if (options.dryRun === true) {
+    return {
+      version: 1,
+      ok: true,
+      operation: 'unpersist',
+      dryRun: true,
+      launchctl: ['launchctl', 'unsetenv', ATTACH_ENV],
+      launchAgent: { path: file, remove: true },
+    };
+  }
+  const remove = dependencies.plistRemover || dependencies.plistWriter?.remove || removeLaunchAgent;
+  const removed = await remove(file);
+  await launchctl(['unsetenv', ATTACH_ENV], env, dependencies);
+  return {
+    version: 1,
+    ok: true,
+    operation: 'unpersist',
+    dryRun: false,
+    launchctl: ['launchctl', 'unsetenv', ATTACH_ENV],
+    launchAgent: { path: file, removed: removed !== false },
+  };
+}
+
+// Private LaunchAgent entrypoint. Its order is the contract: the runtime and
+// relay are verified before the GUI environment can point Desktop at them.
+async function applyPersisted(options = {}, env = process.env, dependencies = {}) {
+  const selected = resolveRuntimeUrl(options, env, dependencies);
+  const runtime = await runtimeUp({ url: selected }, env, dependencies);
+  await launchctl(['setenv', ATTACH_ENV, runtime.url], env, dependencies);
+  return {
+    version: 1,
+    ok: true,
+    operation: 'apply-persisted',
+    runtimeUrl: runtime.url,
+    runtimeReadyBeforeEnvironment: true,
+  };
+}
+
 module.exports = {
   ATTACH_ENV,
   BUNDLE_ENV,
@@ -547,9 +899,16 @@ module.exports = {
   DesktopAttachError,
   RELAUNCH_ENV,
   TESTED_DESKTOP_BUILDS,
+  applyPersisted,
   check,
   clientConnections,
   ensure,
   hostedByDesktop,
+  launchAgentContents,
   parseEstablishedConnections,
+  persist,
+  persistencePath,
+  resolveRuntimeTarget,
+  resolveRuntimeUrl,
+  unpersist,
 };
