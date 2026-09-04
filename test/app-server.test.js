@@ -39,6 +39,11 @@ test('app-server client connects over a canonical unix-socket endpoint', async (
 
   await client.connect();
   assert.equal(client.runtimeIdentity.endpoint, `ws+unix:${socketPath}`);
+  // The initialized notification is sent after connect resolves; give the
+  // mock a moment to record it.
+  for (let attempt = 0; attempt < 50 && server.requests.length < 2; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.deepEqual(server.requests.slice(0, 2).map((request) => request.method), [
     'initialize', 'initialized',
   ]);
