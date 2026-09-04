@@ -682,3 +682,19 @@ test('parent-init reports the wake channel it could verify and never prints its 
   ], env), /--wake must be auto or none/);
   assert.equal(JSON.stringify(publicSuccess(created)).includes('session_'), false);
 });
+
+test('TRANSMOGRIFY_DEBUG_STACK=1 prints an uncoded failure\'s stack to stderr without changing the public body', () => {
+  const { execFileSync, spawnSync } = require('node:child_process');
+  const script = require('node:path').join(__dirname, '..', 'scripts', 'lane.js');
+  const run = (env) => spawnSync(process.execPath, [script, 'status', '--repo-root', '/nonexistent-repo-root-for-test', '--lane', 'x'], {
+    env: { ...process.env, ...env }, encoding: 'utf8',
+  });
+  const quiet = run({ TRANSMOGRIFY_DEBUG_STACK: '' });
+  const loud = run({ TRANSMOGRIFY_DEBUG_STACK: '1' });
+  assert.equal(quiet.status, loud.status);
+  assert.equal(quiet.stderr.includes('[transmogrify debug]'), false);
+  assert.equal(loud.stderr.includes('[transmogrify debug]'), true);
+  const body = (text) => JSON.parse(text.slice(text.indexOf('{')));
+  assert.deepEqual(body(quiet.stderr), body(loud.stderr.slice(loud.stderr.indexOf('{'))));
+  void execFileSync;
+});

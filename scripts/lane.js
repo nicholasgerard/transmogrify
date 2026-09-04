@@ -794,6 +794,9 @@ if (require.main === module) {
     process.exitCode = resultExitCode(result);
   }).catch((error) => {
     const code = error.code || 'OPERATOR_ERROR';
+    // An uncoded failure is projected as OPERATOR_ERROR with no detail; a
+    // maintainer can ask for the stack on stderr without changing the output.
+    if (process.env.TRANSMOGRIFY_DEBUG_STACK === '1') process.stderr.write(`[transmogrify debug] ${error?.stack || error}\n`);
     const effect = errorEffect(code, error.details);
     const stageUnknown = Object.values(effect).includes('unknown');
     const body = failureBody(error, {

@@ -181,7 +181,9 @@ listener keeps its own configuration.
 Use `TRANSMOGRIFY_BIN` for an absolute Codex executable when it is not on
 `PATH`, `TRANSMOGRIFY_URL` or `TRANSMOGRIFY_PORT` for the loopback endpoint, and
 `TRANSMOGRIFY_LOG` for an absolute owned-runtime log path. A command-line
-`--url` takes precedence over the URL environment variables. Two switches
+`--url` takes precedence over the URL environment variables. `TRANSMOGRIFY_DEBUG_STACK=1`
+makes `lane.js` print the stack of an uncoded failure (`OPERATOR_ERROR`) to
+stderr before its fixed public body, for maintainers. Two switches
 turn off turnkey notification mechanisms for a run: `TRANSMOGRIFY_WATCH=off`
 makes `spawn` skip starting the parent's watcher, and
 `TRANSMOGRIFY_CHILD_HOOKS=off` launches Claude children without the session
