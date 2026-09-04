@@ -208,6 +208,34 @@ version rather than the product name; and a daemon started from the
 managed install reports its own version (0.151.0 here) independently of
 the CLI on `PATH`.
 
+## The 0.6.0 wave
+
+Goal: a runtime that survives relaunches, app updates, and logins, and an
+onboarding that works from any first entry point. Six lane packets, each
+with disjoint files, dispatched to Codex lanes on the managed daemon and
+reviewed before merge into `wave/0.6`:
+
+1. Runtime daemon: the managed daemon as the shared runtime, reached over
+   its unix socket by Transmogrify and over a loopback relay by Codex
+   Desktop; `runtime-up.sh` ensures both and falls back to today's
+   standalone launch.
+2. Desktop attach through the daemon: attachment measured against the
+   relay, a Codex host inside an attached app counted as attached, and an
+   owner-consented, reversible `persist` that keeps Dock launches attached
+   across logins.
+3. Compatibility by range and measurement (docs/ONBOARDING.md, section 1).
+4. Host context detection and the explaining doctor (sections 2 and 3).
+5. Guided setup with consent and one install for both hosts (sections 4
+   and 5).
+6. The start handoff and skill bootstrap rewritten around the above
+   (sections 6 and 7).
+
+Already on the branch: the Codex runtime is accepted by version (0.151.0
+or newer) whatever product name it reports, and the client's handshake
+offers no per-message deflate, both required by the daemon. Release when
+the live acceptance matrix in docs/ONBOARDING.md passes on this machine
+and one machine that has never seen Transmogrify.
+
 ## Priority 1: compatibility and acceptance hardening
 
 - Onboarding that works wherever the start prompt lands: compatibility by

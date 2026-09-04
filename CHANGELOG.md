@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 (in progress)
+
+- The Codex runtime is accepted by version, 0.151.0 or newer, whatever
+  product name it reports: the managed daemon names itself after the
+  originator of its first client. The client's handshake no longer offers
+  per-message deflate, which the daemon refuses.
+
 ## 0.5.0
 
 - Wake economy ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md#cost-model)):
