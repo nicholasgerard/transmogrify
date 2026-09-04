@@ -4,9 +4,9 @@
 // Detect, launch, or relaunch Codex Desktop as a client of the selected shared
 // app-server runtime so lanes render and stream live in the app. This file is
 // only the CLI surface over scripts/lib/desktop-attach.js: it parses arguments,
-// prints one JSON result, and maps outcomes to exit codes. It never touches the
-// runtime, and it quits a running Desktop only through the app's own
-// application quit after explicit or standing owner authorization.
+// prints one JSON result, and maps outcomes to exit codes. Runtime startup is
+// delegated to runtime-up, and a running Desktop is quit only through the
+// app's own quit after explicit or standing owner authorization.
 
 const { parseArgs } = require('node:util');
 const { exitCodeForError, isUsageCode } = require('./lib/public-error');
@@ -15,25 +15,35 @@ const {
   DISABLE_ENV,
   DesktopAttachError,
   RELAUNCH_ENV,
+  applyPersisted,
   check,
   ensure,
+  persist,
+  unpersist,
 } = require('./lib/desktop-attach');
 
-const HELP = `usage: desktop-attach.js <check|ensure> [options]
+const HELP = `usage: desktop-attach.js <check|ensure|persist|unpersist> [options]
 
 operations:
   check     read-only: report whether Codex Desktop holds a live connection to
             the runtime (exit 0 attached, 3 otherwise)
   ensure    reuse an existing attachment; launch Desktop attached when it is
             not running; relaunch it only with authorization
+  persist   set the login-session runtime URL and write the per-user
+            LaunchAgent that ensures the runtime before reapplying it at login
+  unpersist remove the managed LaunchAgent and login-session runtime URL
 
 options:
   --url <loopback-ws-url>   runtime endpoint (default: TRANSMOGRIFY_URL or
-                            ws://127.0.0.1:\${TRANSMOGRIFY_PORT:-8843})
+                            live relay record, then legacy port 8843)
   --relaunch-desktop        authorize quitting a running unattached Desktop
                             for this run (or set ${RELAUNCH_ENV}=auto)
   --timeout-ms <ms>         attachment wait after a launch
                             (default ${DEFAULT_ATTACH_TIMEOUT_MS})
+  --dry-run                 show the exact persistence write and environment
+                            change without performing either
+  --authorize               confirm the owner approved a real persist or
+                            unpersist operation
 
 environment:
   ${DISABLE_ENV}=off   report the check as disabled without probing
@@ -65,15 +75,25 @@ function parseCli(argv) {
       url: { type: 'string' },
       'relaunch-desktop': { type: 'boolean' },
       'timeout-ms': { type: 'string' },
+      'dry-run': { type: 'boolean' },
+      authorize: { type: 'boolean' },
     },
   });
-  if (parsed.positionals.length !== 1 || !['check', 'ensure'].includes(parsed.positionals[0])) {
-    usage('the operation must be check or ensure');
+  const operations = ['check', 'ensure', 'persist', 'unpersist', 'apply-persisted'];
+  if (parsed.positionals.length !== 1 || !operations.includes(parsed.positionals[0])) {
+    usage('the operation must be check, ensure, persist, or unpersist');
   }
   const operation = parsed.positionals[0];
-  if (operation === 'check' &&
+  if (operation !== 'ensure' &&
       (parsed.values['relaunch-desktop'] !== undefined || parsed.values['timeout-ms'] !== undefined)) {
     usage('--relaunch-desktop and --timeout-ms apply to ensure only');
+  }
+  if (!['persist', 'unpersist'].includes(operation) &&
+      (parsed.values['dry-run'] !== undefined || parsed.values.authorize !== undefined)) {
+    usage('--dry-run and --authorize apply to persist and unpersist only');
+  }
+  if (operation === 'unpersist' && parsed.values.url !== undefined) {
+    usage('--url does not apply to unpersist');
   }
   let timeoutMs;
   if (parsed.values['timeout-ms'] !== undefined) {
@@ -87,6 +107,8 @@ function parseCli(argv) {
     url: parsed.values.url,
     relaunch: parsed.values['relaunch-desktop'] === true,
     timeoutMs,
+    dryRun: parsed.values['dry-run'] === true,
+    authorize: parsed.values.authorize === true,
   };
 }
 
@@ -96,7 +118,10 @@ async function main(argv = process.argv.slice(2), env = process.env, dependencie
   const options = parseCli(argv);
   if (options.help) return options;
   if (options.operation === 'check') return check(options, env, dependencies);
-  return ensure(options, env, dependencies);
+  if (options.operation === 'ensure') return ensure(options, env, dependencies);
+  if (options.operation === 'persist') return persist(options, env, dependencies);
+  if (options.operation === 'unpersist') return unpersist(options, env, dependencies);
+  return applyPersisted(options, env, dependencies);
 }
 
 // An unattached observation is a result, not an exception: it prints as JSON and

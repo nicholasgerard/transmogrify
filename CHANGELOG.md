@@ -7,6 +7,11 @@
   Desktop. `runtime-up.sh` now returns the relay URL, socket, and daemon version
   as JSON, and explicitly reports its legacy standalone fallback. Runtime URL
   selection reads the live relay record before falling back to port 8843.
+- Make Desktop attachment use that same runtime precedence in both `check` and
+  the doctor, receipt the relay's daemon socket, and ensure a missing relay via
+  `runtime-up` before launching Desktop. Add reversible, owner-authorized
+  `persist`/`unpersist` commands for the login environment and per-user
+  LaunchAgent so Dock launches stay on the shared daemon across app updates.
 - Claude Code CLI compatibility now has a measured minimum of 2.1.258 with no
   maximum: newer builds are probed once and cached by executable digest, failed
   probes are named, and setup advice never proposes a downgrade. The doctor

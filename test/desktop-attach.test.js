@@ -7,10 +7,14 @@ const { execFile } = require('node:child_process');
 const {
   DesktopAttachError,
   TESTED_DESKTOP_BUILDS,
+  applyPersisted,
   check,
   clientConnections,
   ensure,
   parseEstablishedConnections,
+  persist,
+  resolveRuntimeUrl,
+  unpersist,
 } = require('../scripts/lib/desktop-attach');
 const { main, parseCli } = require('../scripts/desktop-attach');
 
@@ -21,10 +25,14 @@ const SELF_PID = 4242;
 function scenario(overrides = {}) {
   const state = {
     installed: true,
+    launchServices: true,
+    diskInstalled: false,
     running: true,
     attached: false,
     attachOnLaunch: true,
     runtimeListening: true,
+    runtimePort: 8843,
+    relayRecord: null,
     elsewherePort: null,
     hostedByDesktop: false,
     quitRequested: false,
@@ -38,7 +46,8 @@ function scenario(overrides = {}) {
   async function run(executable, args) {
     calls.push([executable, ...args]);
     if (executable === 'osascript' && args[1].startsWith('POSIX path')) {
-      return state.installed && args[1].includes('com.openai.codex') ? ok(`${APP}\n`) : fail('not found');
+      return state.installed && state.launchServices && args[1].includes('com.openai.codex')
+        ? ok(`${APP}\n`) : fail('not found');
     }
     if (executable === 'osascript' && args[1].endsWith('to quit')) {
       state.quitRequested = true;
@@ -46,6 +55,10 @@ function scenario(overrides = {}) {
     }
     if (executable === 'defaults') {
       return ok(args[2] === 'CFBundleShortVersionString' ? '26.901.20858\n' : '7658\n');
+    }
+    if (executable === 'plutil') {
+      if (args[1] === 'CFBundleIdentifier') return ok('com.openai.codex\n');
+      return ok(args[1] === 'CFBundleShortVersionString' ? '26.901.22334\n' : '7746\n');
     }
     if (executable === 'ps' && args[0] === '-axo') {
       if (state.quitRequested) {
@@ -77,12 +90,15 @@ function scenario(overrides = {}) {
       if (args.includes('-iTCP') && args.includes('-sTCP:LISTEN')) {
         return ok(`p777\nccodex\nn127.0.0.1:${state.elsewherePort}\np778\ncnode\nn127.0.0.1:3000\n`);
       }
-      if (args.includes('-iTCP:8843') && args.includes('-sTCP:LISTEN')) {
-        return state.runtimeListening ? ok('p83538\nccodex\nn127.0.0.1:8843\n') : fail();
+      const portOption = args.find((argument) => argument.startsWith('-iTCP:'));
+      const selectedPort = Number(portOption?.slice('-iTCP:'.length));
+      if (selectedPort && args.includes('-sTCP:LISTEN')) {
+        return state.runtimeListening && selectedPort === state.runtimePort
+          ? ok(`p83538\nccodex\nn127.0.0.1:${selectedPort}\n`) : fail();
       }
-      if (args.includes('-iTCP:8843') && args.includes('-sTCP:ESTABLISHED')) {
-        return state.attached
-          ? ok(`p${DESKTOP_PID}\ncChatGPT\nn127.0.0.1:53519->127.0.0.1:8843\np83538\nccodex\nn127.0.0.1:8843->127.0.0.1:53519\n`)
+      if (selectedPort && args.includes('-sTCP:ESTABLISHED')) {
+        return state.attached && selectedPort === state.runtimePort
+          ? ok(`p${DESKTOP_PID}\ncChatGPT\nn127.0.0.1:53519->127.0.0.1:${selectedPort}\np83538\nccodex\nn127.0.0.1:${selectedPort}->127.0.0.1:53519\n`)
           : fail();
       }
     }
@@ -96,17 +112,46 @@ function scenario(overrides = {}) {
     now: () => '2026-09-02T22:00:00.000Z',
     sleep: async (milliseconds) => { clock += milliseconds; },
     clock: () => clock,
+    existsSync: () => state.diskInstalled,
+    runningRelay: () => state.relayRecord,
+    launchctlGetenv: async () => state.persistedUrl || '',
+    plistExists: () => state.plistExists === true,
+    runtimeUp: async () => {
+      calls.push(['runtime-up']);
+      state.runtimeListening = true;
+      state.runtimePort = 8844;
+      state.relayRecord = {
+        url: 'ws://127.0.0.1:8844/',
+        socketPath: '/private/tmp/codex-daemon.sock',
+      };
+      return { runtime: 'managed-daemon', url: state.relayRecord.url };
+    },
   };
   return { state, calls, dependencies };
 }
 
 const ENV = { TRANSMOGRIFY_PORT: '8843' };
 
+test('runtime selection is option, environment, live relay, then legacy endpoint', () => {
+  const liveRelay = () => ({
+    url: 'ws://127.0.0.1:8844/', socketPath: '/private/tmp/codex-daemon.sock',
+  });
+  assert.equal(resolveRuntimeUrl({ url: 'ws://127.0.0.1:9001' }, {
+    TRANSMOGRIFY_URL: 'ws://127.0.0.1:9002',
+  }, { runningRelay: liveRelay }), 'ws://127.0.0.1:9001/');
+  assert.equal(resolveRuntimeUrl({}, { TRANSMOGRIFY_URL: 'ws://127.0.0.1:9002' }, {
+    runningRelay: liveRelay,
+  }), 'ws://127.0.0.1:9002/');
+  assert.equal(resolveRuntimeUrl({}, {}, { runningRelay: liveRelay }), 'ws://127.0.0.1:8844/');
+  assert.equal(resolveRuntimeUrl({}, {}, { runningRelay: () => null }), 'ws://127.0.0.1:8843/');
+});
+
 test('check reports an attached Desktop with a tested build and no host-session risk', async () => {
   const { dependencies } = scenario({ attached: true });
   const receipt = await check({}, ENV, dependencies);
   assert.equal(receipt.ok, true);
   assert.equal(receipt.runtimeUrl, 'ws://127.0.0.1:8843/');
+  assert.equal(receipt.persisted, false);
   assert.deepEqual(receipt.attachment, {
     state: 'attached',
     evidence: 'lsof-established-loopback-connection',
@@ -124,6 +169,45 @@ test('check reports an attached Desktop with a tested build and no host-session 
   assert.ok(TESTED_DESKTOP_BUILDS.some((build) => build.version === '26.901.20858'));
 });
 
+test('check selects a live relay record and receipts its daemon socket', async () => {
+  const relayRecord = {
+    url: 'ws://127.0.0.1:8844/',
+    socketPath: '/private/tmp/codex-daemon.sock',
+  };
+  const { dependencies } = scenario({
+    attached: true,
+    runtimePort: 8844,
+    relayRecord,
+    hostedByDesktop: true,
+    persistedUrl: 'ws://127.0.0.1:8844/',
+    plistExists: true,
+  });
+  const receipt = await check({}, {}, dependencies);
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.runtimeUrl, relayRecord.url);
+  assert.equal(receipt.runtimeSource, 'liveRelay');
+  assert.equal(receipt.persisted, true);
+  assert.equal(receipt.desktop.hostedByDesktop, true);
+  assert.deepEqual(receipt.attachment.relay, relayRecord);
+});
+
+test('check reports persistence false unless both login environment and plist match', async () => {
+  const relayRecord = {
+    url: 'ws://127.0.0.1:8844/',
+    socketPath: '/private/tmp/codex-daemon.sock',
+  };
+  const wrongUrl = await check({}, {}, scenario({
+    attached: true, runtimePort: 8844, relayRecord,
+    persistedUrl: 'ws://127.0.0.1:8843', plistExists: true,
+  }).dependencies);
+  assert.equal(wrongUrl.persisted, false);
+  const noPlist = await check({}, {}, scenario({
+    attached: true, runtimePort: 8844, relayRecord,
+    persistedUrl: 'ws://127.0.0.1:8844/', plistExists: false,
+  }).dependencies);
+  assert.equal(noPlist.persisted, false);
+});
+
 test('check distinguishes unattached, not running, and not installed', async () => {
   const unattached = await check({}, ENV, scenario().dependencies);
   assert.equal(unattached.ok, false);
@@ -137,6 +221,18 @@ test('check distinguishes unattached, not running, and not installed', async () 
   const notInstalled = await check({}, ENV, scenario({ installed: false }).dependencies);
   assert.equal(notInstalled.attachment.state, 'notInstalled');
   assert.deepEqual(notInstalled.desktop, { installed: false });
+});
+
+test('check verifies the standard app path when LaunchServices lookup is sandboxed', async () => {
+  const receipt = await check({}, ENV, scenario({
+    launchServices: false,
+    diskInstalled: true,
+    attached: true,
+  }).dependencies);
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.desktop.appPath, APP);
+  assert.equal(receipt.desktop.version, '26.901.22334');
+  assert.equal(receipt.desktop.buildTested, true);
 });
 
 test('check honours the disable switch and non-macOS hosts without probing', async () => {
@@ -240,13 +336,32 @@ test('ensure never relaunches from a session hosted by the Desktop app itself', 
   assert.equal(state.quitRequested, false);
 });
 
-test('ensure requires a listening runtime before launching the app', async () => {
-  const { state, dependencies } = scenario({ running: false, runtimeListening: false });
+test('ensure asks runtime-up for the relay before launching against an absent listener', async () => {
+  const { state, calls, dependencies } = scenario({ running: false, runtimeListening: false });
+  const result = await ensure({}, ENV, dependencies);
+  const runtimeIndex = calls.findIndex(([executable]) => executable === 'runtime-up');
+  const launchIndex = calls.findIndex(([executable]) => executable === 'open');
+  assert.ok(runtimeIndex >= 0 && launchIndex > runtimeIndex);
+  assert.equal(result.receipt.runtimeUrl, 'ws://127.0.0.1:8844/');
+  assert.deepEqual(result.receipt.attachment.relay, {
+    url: 'ws://127.0.0.1:8844/',
+    socketPath: '/private/tmp/codex-daemon.sock',
+  });
+  assert.deepEqual(state.launches, [[
+    '-b', 'com.openai.codex', '--env', 'CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:8844',
+  ]]);
+});
+
+test('ensure refuses when runtime-up returns an endpoint without a listener', async () => {
+  const fixture = scenario({ running: false, runtimeListening: false });
+  fixture.dependencies.runtimeUp = async () => ({
+    runtime: 'managed-daemon', url: 'ws://127.0.0.1:8844/',
+  });
   await assert.rejects(
-    () => ensure({}, ENV, dependencies),
+    () => ensure({}, ENV, fixture.dependencies),
     (error) => error.code === 'RUNTIME_UNAVAILABLE',
   );
-  assert.deepEqual(state.launches, []);
+  assert.deepEqual(fixture.state.launches, []);
 });
 
 test('ensure fails closed when Desktop never attaches or never quits', async () => {
@@ -288,9 +403,15 @@ test('lsof parsing keeps client-side loopback rows only and rejects a bad proces
 
 test('the CLI parses operations strictly and reports the disabled state with exit 3', async () => {
   assert.equal(parseCli(['--help']).help.startsWith('usage: desktop-attach.js'), true);
-  assert.throws(() => parseCli(['attach']), /check or ensure/);
+  assert.throws(() => parseCli(['attach']), /check, ensure, persist, or unpersist/);
   assert.throws(() => parseCli(['check', '--relaunch-desktop']), /ensure only/);
   assert.throws(() => parseCli(['ensure', '--timeout-ms', '0']), /positive integer/);
+  assert.deepEqual(parseCli(['persist', '--dry-run']), {
+    operation: 'persist', url: undefined, relaunch: false, timeoutMs: undefined,
+    dryRun: true, authorize: false,
+  });
+  assert.throws(() => parseCli(['ensure', '--dry-run']), /persist and unpersist only/);
+  assert.throws(() => parseCli(['unpersist', '--url', 'ws://127.0.0.1:8844']), /does not apply/);
   const disabled = await main(['check'], { TRANSMOGRIFY_DESKTOP_ATTACH: 'off' }, scenario().dependencies);
   assert.equal(disabled.attachment.state, 'disabled');
 
@@ -311,4 +432,83 @@ test('the CLI parses operations strictly and reports the disabled state with exi
   });
   assert.equal(usage.code, 2);
   assert.equal(JSON.parse(usage.stdout).code, 'USAGE_ERROR');
+});
+
+test('persist dry-run prints the exact LaunchAgent and launchctl setting without mutation', async () => {
+  const calls = [];
+  const dependencies = {
+    platform: 'darwin',
+    home: '/Users/tester',
+    nodePath: '/opt/node/bin/node',
+    scriptPath: '/opt/transmogrify/scripts/desktop-attach.js',
+    runningRelay: () => ({
+      url: 'ws://127.0.0.1:8844/',
+      socketPath: '/private/tmp/codex-daemon.sock',
+    }),
+    runtimeUp: async () => { calls.push('runtime-up'); },
+    launchctl: async () => { calls.push('launchctl'); },
+    plistWriter: async () => { calls.push('write'); },
+  };
+  const result = await persist({ dryRun: true }, {}, dependencies);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(result.launchctl, [
+    'launchctl', 'setenv', 'CODEX_APP_SERVER_WS_URL', 'ws://127.0.0.1:8844/',
+  ]);
+  assert.equal(result.launchAgent.path,
+    '/Users/tester/Library/LaunchAgents/sh.transmogrify.attach.plist');
+  assert.match(result.launchAgent.contents, /<string>apply-persisted<\/string>/);
+  assert.match(result.launchAgent.contents, /<string>ws:\/\/127\.0\.0\.1:8844\/<\/string>/);
+});
+
+test('persist and its login apply ensure the runtime before setting the environment', async () => {
+  const calls = [];
+  const dependencies = {
+    platform: 'darwin',
+    home: '/Users/tester',
+    nodePath: '/opt/node/bin/node',
+    scriptPath: '/opt/transmogrify/scripts/desktop-attach.js',
+    runningRelay: () => null,
+    runtimeUp: async () => {
+      calls.push('runtime-up');
+      return { runtime: 'managed-daemon', url: 'ws://127.0.0.1:8844/' };
+    },
+    launchctl: async (args) => { calls.push(`launchctl:${args.join(' ')}`); },
+    plistWriter: async (file, contents) => {
+      calls.push(`write:${file}`);
+      assert.match(contents, /runtime-up|apply-persisted/);
+    },
+  };
+  await assert.rejects(() => persist({}, {}, dependencies), /require --authorize/);
+  const result = await persist({ authorize: true }, {}, dependencies);
+  assert.equal(result.launchAgent.written, true);
+  assert.deepEqual(calls.slice(0, 3), [
+    'runtime-up',
+    'launchctl:setenv CODEX_APP_SERVER_WS_URL ws://127.0.0.1:8844/',
+    'write:/Users/tester/Library/LaunchAgents/sh.transmogrify.attach.plist',
+  ]);
+
+  calls.length = 0;
+  const applied = await applyPersisted({ url: 'ws://127.0.0.1:8844/' }, {}, dependencies);
+  assert.equal(applied.runtimeReadyBeforeEnvironment, true);
+  assert.deepEqual(calls, [
+    'runtime-up',
+    'launchctl:setenv CODEX_APP_SERVER_WS_URL ws://127.0.0.1:8844/',
+  ]);
+});
+
+test('unpersist removes the managed plist before unsetting the login environment', async () => {
+  const calls = [];
+  const dependencies = {
+    platform: 'darwin',
+    home: '/Users/tester',
+    plistRemover: async (file) => { calls.push(`remove:${file}`); return true; },
+    launchctl: async (args) => { calls.push(`launchctl:${args.join(' ')}`); },
+  };
+  await assert.rejects(() => unpersist({}, {}, dependencies), /require --authorize/);
+  const result = await unpersist({ authorize: true }, {}, dependencies);
+  assert.equal(result.launchAgent.removed, true);
+  assert.deepEqual(calls, [
+    'remove:/Users/tester/Library/LaunchAgents/sh.transmogrify.attach.plist',
+    'launchctl:unsetenv CODEX_APP_SERVER_WS_URL',
+  ]);
 });

@@ -21,8 +21,9 @@ node "$SKILL_ROOT/scripts/doctor.js" --repo-root /absolute/path/to/repository --
 node "$SKILL_ROOT/scripts/doctor.js" --repo-root /absolute/path/to/repository --target claude
 ```
 
-Add `--url` only to Codex commands when the runtime is not the default
-`ws://127.0.0.1:8843`.
+Codex commands select an explicit `--url`, then `TRANSMOGRIFY_URL`, then the
+live managed-relay record, and only then the legacy `ws://127.0.0.1:8843`
+endpoint. Add `--url` only to override that selection.
 
 ## Symptom index
 
@@ -251,13 +252,44 @@ launches Desktop attached when it is not running; and quits and relaunches a
 running unattached Desktop only after the owner authorizes it. A relaunch ends
 whatever the app's private runtime was doing, so ask first.
 
+When the selected URL is the managed relay, the receipt includes both the
+Desktop connection to the relay port and the live relay record's daemon socket.
+`check` and the doctor use the same URL precedence as every Codex lifecycle
+command, so an active relay on 8844 cannot be mistaken for the legacy endpoint
+on 8843.
+
+**Live-verified, 2026-09-04, Desktop 26.901.22334 (7746).** Launching Desktop
+with `CODEX_APP_SERVER_WS_URL` pointed at a relay port that had no listener did
+not produce an attachment, and bringing the relay up afterward did not turn
+that launch into a verified attachment. A fresh launch with the relay already
+listening attached normally. `ensure` therefore delegates to `runtime-up`
+before it launches or, with owner approval, relaunches Desktop; it never starts
+the daemon or relay by itself.
+
+To keep Dock launches attached across logins and Desktop updates, inspect and
+then authorize the reversible per-user setup:
+
+```bash
+node "$SKILL_ROOT/scripts/desktop-attach.js" persist --dry-run
+node "$SKILL_ROOT/scripts/desktop-attach.js" persist --authorize
+node "$SKILL_ROOT/scripts/desktop-attach.js" unpersist --dry-run
+node "$SKILL_ROOT/scripts/desktop-attach.js" unpersist --authorize
+```
+
+`persist` sets `CODEX_APP_SERVER_WS_URL` in the login launch environment and
+writes `~/Library/LaunchAgents/sh.transmogrify.attach.plist`. At login that job
+uses `runtime-up` to ensure the daemon and relay first, then reapplies the
+environment variable. `unpersist` removes only that marked LaunchAgent and
+unsets the variable. Neither command relaunches Desktop; a running app keeps
+its current runtime until the owner separately authorizes a relaunch.
+
 | Code | Meaning | Repair |
 | --- | --- | --- |
 | `NATIVE_VISIBILITY_REQUIRED` | Codex spawn found no attachment receipt | Attach, or pass `--allow-protocol-only` for a deliberately unattached lane |
 | `DESKTOP_RELAUNCH_REQUIRED` | Desktop is running unattached and the repair quits it | Run `ensure --relaunch-desktop` after the owner agrees, or set the standing `TRANSMOGRIFY_DESKTOP_RELAUNCH=auto` |
 | `DESKTOP_HOST_SESSION` | The command runs inside a Desktop-hosted session, so the relaunch would end it | Attach from a session outside the app, or spawn Claude lanes and `--allow-protocol-only` Codex lanes |
 | `ATTACHED_ELSEWHERE` | Desktop already streams another loopback Codex runtime | Point `TRANSMOGRIFY_URL` at the reported endpoint instead of competing with it |
-| `RUNTIME_UNAVAILABLE` | Nothing listens on the selected endpoint yet | Reuse or start a runtime first |
+| `RUNTIME_UNAVAILABLE` | `runtime-up` could not establish a listener on the selected endpoint | Repair the daemon, relay, or standalone runtime, then retry |
 | `ATTACH_TIMEOUT` | Desktop launched but no connection appeared inside the wait window | Re-run `check`; raise `--timeout-ms` if the host is slow to start the app |
 | `DESKTOP_QUIT_TIMEOUT` | Desktop did not exit after its own quit request | Finish or discard the app's open work, then retry |
 
@@ -272,12 +304,11 @@ either process. Until the attachment receipt is verified, exact-owned recovery
 and retirement on the recorded runtime remain available and a new Codex lane
 needs `--allow-protocol-only`.
 
-OpenAI's CLI-exposed `app-server daemon`/`app-server proxy` surface remains the
-candidate replacement for this mechanism. It is observed in local CLI help but
-not documented in the official app-server reference, so it stays on the roadmap
-until its launcher behavior, control socket, and safe multi-client semantics
-pass a disposable live acceptance test. A private Desktop IPC or app-tools
-socket is not an alternative.
+The app's own local-daemon switch is not a replacement on Desktop 26.901: the
+app supplies config overrides that keep it unreachable. A `ws+unix://` attach
+URL is not a Desktop path either; the app routes its non-loopback host through
+the configured SOCKS path and fails to start. The owned loopback relay keeps
+the Desktop transport local while the daemon remains on its Unix socket.
 
 ## Codex lane and native row symptoms
 

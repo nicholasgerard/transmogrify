@@ -13,7 +13,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { parseArgs } = require('node:util');
-const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
+const { AppServerClient, validateTimeout } = require('./lib/app-server');
 const {
   MINIMUM_CLI_VERSION,
   PINNED_CLI_SHA256,
@@ -22,7 +22,10 @@ const {
   parseAgents,
 } = require('./lib/claude-surface');
 const { measureCodexCompatibility } = require('./lib/codex-compat');
-const { check: desktopAttachCheck } = require('./lib/desktop-attach');
+const {
+  check: desktopAttachCheck,
+  resolveRuntimeUrl: resolveDesktopRuntimeUrl,
+} = require('./lib/desktop-attach');
 const { detectHostContext } = require('./lib/host-context');
 const { computeSetupPlan } = require('./lib/setup-plan');
 const { ensureRegistry, readRegistry } = require('./lib/state');
@@ -54,13 +57,13 @@ const CLAUDE_SETUP_FALLBACK = 'Run \`claude --version\` and \`claude auth status
 const CODEX_SETUP_ACTIONS = new Map([
   ['runtime-unavailable', { blocking: true, ownerAction: 'Reuse an existing Codex app-server runtime through TRANSMOGRIFY_URL, or authorize this installation to start one with \`runtime-up.sh\`, then rerun the doctor.' }],
   ['sandbox-loopback-denied', { blocking: true, ownerAction: 'Grant the doctor and lane commands loopback access on this host, then rerun the doctor.' }],
-  ['desktop-unattached', { blocking: false, ownerAction: 'Allow Transmogrify to relaunch Codex Desktop attached to the runtime (\`desktop-attach.js ensure --relaunch-desktop\`), or set TRANSMOGRIFY_DESKTOP_RELAUNCH=auto; otherwise Codex lanes are protocol-only.' }],
-  ['desktop-not-running', { blocking: false, ownerAction: 'Run \`desktop-attach.js ensure\` to launch Codex Desktop attached to the runtime; otherwise Codex lanes are protocol-only.' }],
-  ['desktop-not-installed', { blocking: false, ownerAction: 'Install Codex Desktop, or use \`--allow-protocol-only\` for lanes that need no native visibility.' }],
-  ['desktop-attached-elsewhere', { blocking: false, ownerAction: 'Point TRANSMOGRIFY_URL at the runtime Codex Desktop is already attached to (see nativeVisibility.nextAction).' }],
-  ['desktop-unsupported-platform', { blocking: false, ownerAction: 'Codex Desktop attachment is macOS-only; Codex lanes on this host need \`--allow-protocol-only\`.' }],
-  ['desktop-attach-disabled', { blocking: false, ownerAction: 'Unset TRANSMOGRIFY_DESKTOP_ATTACH=off for live-visible Codex lanes; otherwise use \`--allow-protocol-only\`.' }],
-  ['desktop-tool-unavailable', { blocking: false, ownerAction: 'Restore lsof, ps, and osascript on this host so the attachment can be measured; until then use \`--allow-protocol-only\`.' }],
+  ['desktop-unattached', { blocking: false, ownerAction: 'Allow Transmogrify to relaunch Codex Desktop attached to the runtime (\`desktop-attach.js ensure --relaunch-desktop\`), or set TRANSMOGRIFY_DESKTOP_RELAUNCH=auto. Attachment makes Codex lanes appear and stream live in Desktop; declining leaves them protocol-only and not live-visible there.' }],
+  ['desktop-not-running', { blocking: false, ownerAction: 'Run \`desktop-attach.js ensure\` to launch Codex Desktop attached to the runtime. Attachment makes Codex lanes appear and stream live in Desktop; declining leaves them protocol-only and not live-visible there.' }],
+  ['desktop-not-installed', { blocking: false, ownerAction: 'Install Codex Desktop if Codex lanes should appear and stream live there. Declining means using \`--allow-protocol-only\`; those lanes will not be live-visible in Desktop.' }],
+  ['desktop-attached-elsewhere', { blocking: false, ownerAction: 'Point TRANSMOGRIFY_URL at the runtime Codex Desktop already uses (see nativeVisibility.nextAction) so lanes appear and stream live there. Declining leaves lanes on the selected runtime protocol-only and not live-visible in Desktop.' }],
+  ['desktop-unsupported-platform', { blocking: false, ownerAction: 'Codex Desktop attachment is macOS-only. Attachment would make lanes appear and stream live in Desktop; on this host use \`--allow-protocol-only\`, where they will not be live-visible there.' }],
+  ['desktop-attach-disabled', { blocking: false, ownerAction: 'Unset TRANSMOGRIFY_DESKTOP_ATTACH=off if Codex lanes should appear and stream live in Desktop. Leaving it disabled requires \`--allow-protocol-only\`, and those lanes will not be live-visible there.' }],
+  ['desktop-tool-unavailable', { blocking: false, ownerAction: 'Restore lsof, ps, and osascript so attachment can be measured and Codex lanes can be proved live-visible in Desktop. Until then use \`--allow-protocol-only\`; those lanes will not be live-visible there.' }],
 ]);
 
 function claudeSetup(error) {
@@ -179,7 +182,7 @@ function usage(message) {
 // Strict option parsing with per-target grammar: --url is Codex-only and
 // --claude-bin is Claude-only, so a flag is never silently ignored. Every
 // failure is USAGE_ERROR.
-function parseDoctorArgs(argv, env = process.env) {
+function parseDoctorArgs(argv, env = process.env, dependencies = {}) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) {
     return { help: HELP };
   }
@@ -223,8 +226,7 @@ function parseDoctorArgs(argv, env = process.env) {
   let url;
   if (target !== 'claude') {
     try {
-      url = validateUrl(parsed.values.url || env.TRANSMOGRIFY_URL ||
-        `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
+      url = resolveDesktopRuntimeUrl({ url: parsed.values.url }, env, dependencies);
     } catch (error) {
       usage(error.message);
     }
@@ -287,7 +289,8 @@ function notRequested(provider, pinned, probe) {
 async function inspectDesktopAttachment(options, env, dependencies) {
   const inspect = dependencies.desktopAttachment || desktopAttachCheck;
   try {
-    return await inspect({ url: options.url }, env);
+    return await inspect({ url: options.url }, env,
+      dependencies.desktopAttachmentDependencies || dependencies);
   } catch (error) {
     return {
       attachment: {
@@ -311,6 +314,7 @@ function nativeVisibilityFor(receipt) {
     return {
       verified: true,
       nativeDispatchReady: true,
+      persisted: receipt?.persisted === true,
       evidence: 'codex-desktop-attached-to-selected-runtime',
       receipt: {
         clientPid: attachment.clientPid,
@@ -330,6 +334,7 @@ function nativeVisibilityFor(receipt) {
   return {
     verified: false,
     nativeDispatchReady: false,
+    persisted: receipt?.persisted === true,
     evidence: `desktop-attachment:${attachment.state}`,
     nextAction: receipt?.nextAction || 'run-desktop-attach-ensure',
   };
@@ -415,6 +420,7 @@ async function probeCodex(options, env, dependencies) {
       nativeVisibility: {
         verified: false,
         nativeDispatchReady: false,
+        persisted: false,
         evidence: 'provider-unavailable',
         nextAction: 'restore-compatible-protocol-runtime-before-visibility-check',
       },
@@ -594,7 +600,7 @@ function renderSetupSummary(result) {
 }
 
 async function main(argv = process.argv.slice(2), env = process.env, dependencies = {}) {
-  const options = parseDoctorArgs(argv, env);
+  const options = parseDoctorArgs(argv, env, dependencies);
   return options.help ? options : doctor(options, env, dependencies);
 }
 
