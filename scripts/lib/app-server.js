@@ -71,11 +71,35 @@ function validateTimeout(timeoutMs) {
 // Reduce the initialize user-agent to its bounded product/version form. Anything
 // oversized, control-bearing, or unrecognized returns null and fails the
 // handshake.
+// The runtime names itself as "<product>/<version> ..." where the product is
+// codex_cli_rs for a standalone app-server, Codex Desktop for the app's
+// private runtime, and, for the managed daemon, the originator of whichever
+// client connected first. Only the version decides support, so the product
+// token is kept as an identifier and never matched against a name.
 function canonicalCodexUserAgent(value) {
   if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 512 ||
       /[\u0000-\u001f\u007f\u2028\u2029]/u.test(value)) return null;
-  const match = /^(codex_cli_rs|Codex Desktop)\/(\d+\.\d+\.\d+)(?: [^\r\n]*)?$/.exec(value);
+  const match = /^([A-Za-z0-9][A-Za-z0-9 _.-]{0,63}?)\/(\d+\.\d+\.\d+)(?:[ (-][^\r\n]*)?$/.exec(value);
   return match ? `${match[1]}/${match[2]}` : null;
+}
+
+// The oldest app-server line every method this tree relies on was measured
+// against. Newer lines are accepted; the doctor reports the exact version.
+const MINIMUM_APP_SERVER_VERSION = '0.151.0';
+
+function appServerVersion(canonicalUserAgent) {
+  const match = /\/(\d+)\.(\d+)\.(\d+)$/.exec(canonicalUserAgent || '');
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function supportedAppServerVersion(canonicalUserAgent) {
+  const version = appServerVersion(canonicalUserAgent);
+  if (!version) return false;
+  const minimum = MINIMUM_APP_SERVER_VERSION.split('.').map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    if (version[i] !== minimum[i]) return version[i] > minimum[i];
+  }
+  return true;
 }
 
 // The reported Codex home must be a bounded, normalized, absolute, control-free
@@ -172,7 +196,7 @@ class AppServerClient extends EventEmitter {
       platformFamily: initialized.platformFamily,
       platformOs: initialized.platformOs,
     };
-    this.verifiedRuntime = /^(?:codex_cli_rs|Codex Desktop)\/0\.151\./.test(canonicalUserAgent);
+    this.verifiedRuntime = supportedAppServerVersion(canonicalUserAgent);
     this.notify('initialized');
     return {
       codexHome: initialized.codexHome,
@@ -389,6 +413,9 @@ class AppServerClient extends EventEmitter {
 }
 
 module.exports = {
+  MINIMUM_APP_SERVER_VERSION,
+  canonicalCodexUserAgent,
+  supportedAppServerVersion,
   AppServerClient,
   AppServerError,
   MAX_INBOUND_MESSAGE_BYTES,

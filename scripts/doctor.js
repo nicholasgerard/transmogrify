@@ -303,7 +303,7 @@ async function probeCodex(options, env, dependencies) {
       nativeVisibility: nativeVisibilityFor(attachment),
       ...(attachmentSetup ? { setup: attachmentSetup } : {}),
       pinned: {
-        userAgentVersionLine: '0.151.x',
+        userAgentVersionLine: '>=0.151.0',
         verifiedDate: VERIFIED_DATE,
       },
       observed: {
@@ -328,7 +328,7 @@ async function probeCodex(options, env, dependencies) {
         nextAction: 'restore-compatible-protocol-runtime-before-visibility-check',
       },
       pinned: {
-        userAgentVersionLine: '0.151.x',
+        userAgentVersionLine: '>=0.151.0',
         verifiedDate: VERIFIED_DATE,
       },
       error: {
@@ -435,7 +435,7 @@ async function doctor(options, env = process.env, dependencies = {}) {
   const { registry } = read(options.repoRoot, env);
   const ownership = ownershipSummary(registry);
   const codexPinned = {
-    userAgentVersionLine: '0.151.x',
+    userAgentVersionLine: '>=0.151.0',
     verifiedDate: VERIFIED_DATE,
   };
   const claudePinned = {

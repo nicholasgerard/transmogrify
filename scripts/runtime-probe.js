@@ -3,7 +3,7 @@
 
 // Read-only identity and compatibility probe for a loopback Codex app-server.
 // It completes the initialize handshake, prints the returned user-agent, and
-// exits 3 when the handshake or the verified 0.151.x line check fails, 2 on a
+// exits 3 when the handshake or the supported-version check (0.151.0 or newer) fails, 2 on a
 // usage error, matching the exit table every Transmogrify command shares. It sends no other request and never mutates provider state.
 
 const { AppServerClient, validateTimeout, validateUrl } = require('./lib/app-server');
@@ -59,7 +59,7 @@ try {
   try {
     const initialized = await client.connect();
     if (!client.verifiedRuntime) {
-      throw new Error(`unsupported Codex app-server ${initialized.userAgent}; verified line is 0.151.x`);
+      throw new Error(`unsupported Codex app-server ${initialized.userAgent}; supported line is 0.151.0 or newer`);
     }
     console.log(`Codex app-server protocol verified: ${initialized.userAgent}`);
   } catch (error) {

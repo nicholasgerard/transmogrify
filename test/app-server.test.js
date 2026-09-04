@@ -315,3 +315,29 @@ test('app-server client closes cleanly on malformed JSON-RPC frames', async (t) 
     );
   }
 });
+
+test('app-server client judges the runtime by version, not by product name', async (t) => {
+  const { canonicalCodexUserAgent, supportedAppServerVersion, MINIMUM_APP_SERVER_VERSION } = require('../scripts/lib/app-server');
+  assert.equal(MINIMUM_APP_SERVER_VERSION, '0.151.0');
+  // The managed daemon reports the originator of its first client.
+  assert.equal(canonicalCodexUserAgent('relay-probe/0.151.0 (Mac OS 15.7.8; arm64) unknown (probe; 0)'), 'relay-probe/0.151.0');
+  assert.equal(canonicalCodexUserAgent('Codex Desktop/0.153.0 (test)'), 'Codex Desktop/0.153.0');
+  assert.equal(canonicalCodexUserAgent('codex_cli_rs/0.151.0'), 'codex_cli_rs/0.151.0');
+  assert.equal(canonicalCodexUserAgent('nope'), null);
+  assert.equal(canonicalCodexUserAgent('bad\nname/0.151.0'), null);
+  assert.equal(supportedAppServerVersion('codex_cli_rs/0.151.0'), true);
+  assert.equal(supportedAppServerVersion('anything/0.160.2'), true);
+  assert.equal(supportedAppServerVersion('codex_cli_rs/0.148.0'), false);
+  assert.equal(supportedAppServerVersion('codex_cli_rs/0.150.9'), false);
+  assert.equal(supportedAppServerVersion(null), false);
+
+  const server = await startMockAppServer(undefined, {
+    initializeResult: { codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'macos', userAgent: 'codex_cli_rs/0.148.0 (test)' },
+  });
+  t.after(() => server.close());
+  const client = new AppServerClient({ url: server.url });
+  t.after(() => client.close());
+  const initialized = await client.connect();
+  assert.equal(initialized.userAgent, 'codex_cli_rs/0.148.0');
+  assert.equal(client.verifiedRuntime, false, 'below the minimum line is connected but not supported');
+});

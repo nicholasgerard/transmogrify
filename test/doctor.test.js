@@ -375,7 +375,7 @@ test('doctor detects but will not recommend reusing an unverified Codex version'
       codexHome: '/tmp/private-codex-home',
       platformFamily: 'unix',
       platformOs: 'macos',
-      userAgent: 'Codex Desktop/0.152.0 (private suffix)',
+      userAgent: 'Codex Desktop/0.148.0 (private suffix)',
     },
   });
   t.after(() => server.close());
@@ -392,7 +392,7 @@ test('doctor detects but will not recommend reusing an unverified Codex version'
   assert.equal(result.providers.codex.reuse, 'blocked-unverified-runtime');
   assert.deepEqual(result.providers.codex.observed, {
     userAgentFamily: 'Codex Desktop',
-    version: '0.152.0',
+    version: '0.148.0',
     pinnedVersionLine: false,
   });
   assert.deepEqual(result.nextSafeMaintenanceCommands, []);

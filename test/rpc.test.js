@@ -201,7 +201,7 @@ test('rpc fails closed before requests or output against an unverified runtime',
       codexHome: '/tmp/codex-home',
       platformFamily: 'unix',
       platformOs: 'test',
-      userAgent: `Codex Desktop/0.152.0 ${secret}`,
+      userAgent: `Codex Desktop/0.148.0 ${secret}`,
     },
   });
   t.after(() => server.close());
