@@ -78,6 +78,7 @@ const SETUP_PLAN = {
   context: true,
   steps: { what: true, why: true, consent: true, command: true },
 };
+const SETUP_STEP = { what: true, consent: true, outcome: true };
 
 function laneShape(receipt, extra = {}) {
   return {
@@ -91,6 +92,12 @@ function laneShape(receipt, extra = {}) {
 
 // `true` admits a scalar or an array of scalars; an object admits those keys.
 const SCHEMAS = Object.freeze({
+  setup: {
+    version: true, ok: true, operation: true, dryRun: true, ready: true,
+    code: true, message: true, plan: SETUP_PLAN, completed: SETUP_STEP,
+    refusal: { what: true, consent: true, reason: true },
+    apps: { claude: true, codex: true, nextSession: true },
+  },
   spawn: laneShape({
     acknowledgedBy: true, inputReceiptSource: true, completedStatus: true, presentation: true,
     requestedModelSelector: true, bridgeIdSha256: true, executionProfile: true,

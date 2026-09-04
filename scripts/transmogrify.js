@@ -13,6 +13,7 @@ const { VERSION } = require('./lib/version');
 
 const COMMANDS = new Map([
   ['doctor', { file: 'doctor.js', summary: 'read-only provider discovery and setup check' }],
+  ['setup', { file: 'setup.js', summary: 'guided setup for both lane hosts' }],
   ['attach', { file: 'desktop-attach.js', summary: 'measure or ensure Codex Desktop attachment (macOS)' }],
   ['runtime', { file: 'runtime-up.sh', shell: true, summary: 'reuse or launch the detached Codex app-server' }],
   ['probe', { file: 'runtime-probe.js', summary: 'verify the app-server handshake and version line' }],

@@ -408,7 +408,12 @@ function install(options, hooks = {}) {
     console.log(`installed skill + tools -> ${entry.target}`);
   }
   console.log(`verified dependency: ws ${wsVersion}`);
-  console.log('open a new host session, then run Transmogrify bootstrap/doctor');
+  if (options.target === 'all') {
+    console.log('Claude Desktop and the ChatGPT app are ready to load Transmogrify; a new session in the other app picks it up.');
+  } else {
+    const ready = options.target === 'claude' ? 'Claude Desktop' : 'the ChatGPT app';
+    console.log(`${ready} is ready to load Transmogrify; this single-host install did not change the other app.`);
+  }
 }
 
 if (require.main === module) {

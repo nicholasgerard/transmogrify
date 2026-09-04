@@ -128,12 +128,31 @@ options. Existing install ancestors must belong to the current user and must
 not be group/world writable; the installer refuses unsafe parents before
 staging or replacing a target.
 
+A successful default install leaves both Claude Desktop and the ChatGPT app
+ready to load Transmogrify. Start a new session in either app to pick up the
+skill installed from the other one. Then inspect the measured machine-wide
+setup without changing anything:
+
+```bash
+node "$HOME/.agents/skills/transmogrify/scripts/setup.js" \
+  --repo-root /absolute/path/to/repository --dry-run
+```
+
+Run the same command without `--dry-run` for guided setup. On a terminal it
+asks one plain-language consent question at a time. In a non-interactive host,
+authorize only the next measured action with `--install-claude-cli`,
+`--install-codex-cli`, `--sign-in`, `--start-runtime`,
+`--relaunch-desktop`, or `--persist-attach`. The CLI installers are the
+vendors' current recommended standalone installers from the
+[Claude Code setup guide](https://code.claude.com/docs/en/getting-started) and
+[Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
+
 The supported distribution path is a Git checkout followed by `npm ci` and
 `install.sh`. The package is not published to npm; `npm pack --dry-run` is an
 inclusion audit, not a self-installing distribution artifact.
 
-Open a new host session after first installation, then invoke the skill by its
-stable command:
+Open a new host session after first installation or setup, then invoke the
+skill by its stable command:
 
 ```text
 Codex:       $transmogrify operate this repository

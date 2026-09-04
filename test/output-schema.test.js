@@ -138,3 +138,22 @@ test('the setup plan schema exposes only the documented explanation fields', () 
     steps: [{ what: 'Do one thing.', why: 'It is needed.', consent: 'none', command: 'do-it' }],
   });
 });
+
+test('setup output keeps receipts and refusals but drops runner internals', () => {
+  assert.deepEqual(publicResult({
+    version: 1, ok: false, operation: 'setup', dryRun: false, ready: false,
+    code: 'POLICY_REFUSAL', message: 'method refused by read-only policy',
+    plan: { context: 'A host.', steps: [{ what: 'Install.', why: 'Needed.', consent: 'install', command: 'fixed' }] },
+    completed: [{ what: 'Checked.', consent: 'none', outcome: 'confirmed', private: 'hidden' }],
+    refusal: { what: 'Install.', consent: 'install', reason: 'consent-required', private: 'hidden' },
+    apps: { claude: 'needs setup', codex: 'ready', nextSession: 'Open the other app.', private: 'hidden' },
+    childProcess: { pid: 1234 },
+  }), {
+    version: 1, ok: false, operation: 'setup', dryRun: false, ready: false,
+    code: 'POLICY_REFUSAL', message: 'method refused by read-only policy',
+    plan: { context: 'A host.', steps: [{ what: 'Install.', why: 'Needed.', consent: 'install', command: 'fixed' }] },
+    completed: [{ what: 'Checked.', consent: 'none', outcome: 'confirmed' }],
+    refusal: { what: 'Install.', consent: 'install', reason: 'consent-required' },
+    apps: { claude: 'needs setup', codex: 'ready', nextSession: 'Open the other app.' },
+  });
+});

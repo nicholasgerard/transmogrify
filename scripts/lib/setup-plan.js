@@ -15,6 +15,7 @@ const COMMANDS = Object.freeze({
   startRuntime: '"$SKILL_ROOT/scripts/runtime-up.sh"',
   attachDesktop: 'node "$SKILL_ROOT/scripts/desktop-attach.js" ensure',
   relaunchDesktop: 'node "$SKILL_ROOT/scripts/desktop-attach.js" ensure --relaunch-desktop',
+  persistAttach: 'node "$SKILL_ROOT/scripts/desktop-attach.js" persist',
 });
 
 function step(order, what, why, consent, command) {
@@ -163,7 +164,16 @@ function computeSetupPlan(doctorResult, hostContext) {
     actions.push(measuredAttachment);
   }
   const seen = new Set();
-  const steps = actions.flatMap((action) => stepsForAction(action, doctorResult, hostContext))
+  const persistence = doctorResult?.providers?.codex?.nativeVisibility?.receipt?.persisted === false
+    ? [step(
+      80,
+      'Keep the Codex app connected to the shared runtime after login.',
+      'Persistent attachment makes new Codex app sessions reuse the measured shared runtime automatically.',
+      'persist-attach',
+      COMMANDS.persistAttach,
+    )]
+    : [];
+  const steps = [...actions.flatMap((action) => stepsForAction(action, doctorResult, hostContext)), ...persistence]
     .sort((left, right) => left.order - right.order)
     .filter((entry) => {
       const key = `${entry.what}\0${entry.command}`;
