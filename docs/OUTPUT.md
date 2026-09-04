@@ -54,6 +54,20 @@ Every lane-bound operation (`spawn`, `status`, `steer`, `interrupt`, `stop`,
 
 ## Operations
 
+### `setup`
+
+The guided setup runner reports `dryRun`, `ready`, the doctor's current
+`plan`, `completed` step receipts, and an `apps` summary for Claude Desktop
+and the ChatGPT app. Each completed receipt contains only `what`, `consent`,
+and `outcome`. When setup stops safely, `code`, `message`, and `refusal`
+identify the pending step and one plain reason such as `consent-required`,
+`hosting-cli-protected`, `foreign-runtime`, or `manual-action-required`.
+
+The `plan` remains measured rather than inferred: setup reruns the doctor after
+every action. `apps.nextSession` explains that a new session in the other app
+picks up the machine-wide installation. `--dry-run` returns this shape without
+running an installer, sign-in, runtime ensure, attachment, or persistence step.
+
 ### `spawn`
 
 Lane envelope plus `watcher` (`running`, `started`, `pid`) and `nextAction`,
@@ -176,10 +190,13 @@ name, or path ever appears in this output.
 `doctor.js --explain` adds `setup.plan`. The plan has `context`, a sentence
 for the current terminal, IDE, or unsupported host when one applies, and
 ordered `steps`. Every step has `what`, `why`, `consent`, and `command`.
-`consent` is one of `none`, `install`, `sign-in`, `start-runtime`, or
-`relaunch-desktop`. The existing `setup.ownerActions` remain unchanged beside
-the plan. On a terminal, the doctor also prints a short `Found`, `Ready`,
-`Needed`, `Next` summary before the JSON document.
+`consent` is one of `none`, `install`, `sign-in`, `start-runtime`,
+`relaunch-desktop`, or `persist-attach`. The existing `setup.ownerActions`
+remain unchanged beside the plan. On a terminal, the doctor also prints a
+short `Found`, `Ready`, `Needed`, `Next` summary before the JSON document.
+The doctor adds `persist-attach` only after Codex Desktop attachment is
+verified and its receipt explicitly reports `persisted: false`. Older or
+partial receipts with no `persisted` field do not imply that action.
 
 With `--retention`, the result carries `retention` instead of
 `providers`/`counts`/`setup`: `dryRun`, `keepDays`, `keepBackups`,

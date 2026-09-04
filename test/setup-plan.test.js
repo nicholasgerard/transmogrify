@@ -109,3 +109,44 @@ test('the measured attachment state contributes a plan without rewriting owner a
   assert.equal(plan.steps[0].command, COMMANDS.attachDesktop);
   assert.deepEqual(doctorResult.setup.ownerActions, before);
 });
+
+test('an explicitly non-persistent attachment adds one final consented persistence step', () => {
+  const doctorResult = result([], {
+    verified: true,
+    evidence: 'codex-desktop-attached-to-selected-runtime',
+    receipt: { persisted: false },
+  });
+  const plan = computeSetupPlan(doctorResult, host('claude-desktop', 'desktop'));
+  assert.deepEqual(plan.steps, [{
+    what: 'Keep the Codex app connected to the shared runtime after login.',
+    why: 'Persistent attachment makes new Codex app sessions reuse the measured shared runtime automatically.',
+    consent: 'persist-attach',
+    command: COMMANDS.persistAttach,
+  }]);
+});
+
+test('persistence is ordered after a required Desktop relaunch', () => {
+  const doctorResult = result([
+    { provider: 'codex', reason: 'desktop-unattached', blocking: false, ownerAction: 'relaunch' },
+  ], {
+    evidence: 'desktop-attachment:unattached',
+    receipt: { persisted: false },
+  });
+  const plan = computeSetupPlan(doctorResult, host('claude-desktop', 'desktop'));
+  assert.deepEqual(plan.steps.map((entry) => entry.consent), ['relaunch-desktop', 'persist-attach']);
+});
+
+test('an absent or true persistence receipt adds no persistence step', () => {
+  const absent = result([], {
+    verified: true,
+    evidence: 'codex-desktop-attached-to-selected-runtime',
+    receipt: {},
+  });
+  const persisted = result([], {
+    verified: true,
+    evidence: 'codex-desktop-attached-to-selected-runtime',
+    receipt: { persisted: true },
+  });
+  assert.deepEqual(computeSetupPlan(absent, host('shell')).steps, []);
+  assert.deepEqual(computeSetupPlan(persisted, host('shell')).steps, []);
+});

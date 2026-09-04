@@ -62,6 +62,32 @@ sentinel. Install a single host from the source checkout with:
 ./install.sh --target claude
 ```
 
+The default install covers both hosts. Its final line tells you that Claude
+Desktop and the ChatGPT app can load the skill, and a new session in the other
+app picks it up. Inspect the remaining machine setup without changing it:
+
+```bash
+node "$HOME/.agents/skills/transmogrify/scripts/setup.js" \
+  --repo-root /absolute/path/to/repository --dry-run
+```
+
+For guided setup, remove `--dry-run`. A TTY asks before each consented step.
+A non-interactive run needs the exact flag printed by `setup.js --help` for
+the next step. `consent-required` means no matching flag or interactive yes
+was supplied. `hosting-cli-protected` means the requested installer would
+replace the Claude or Codex CLI running the current session; open the other
+host or a plain terminal and retry there. `foreign-runtime` means a compatible
+standalone runtime appeared during setup but was not started by this run;
+rerun the doctor and reuse it explicitly instead of adopting or replacing it.
+`manual-action-required` means the doctor described a safe manual repair that
+is not on setup's fixed execution allowlist.
+
+Setup reruns the doctor after every successful action. If it reports
+`step-not-verified`, the action returned but the machine still measures the
+same unmet requirement. Fix that provider directly, then start a fresh setup
+run; do not blindly repeat an installer, sign-in, app relaunch, or runtime
+start.
+
 To upgrade, update a trusted source checkout, reinstall its exact dependency
 lock, inspect the dry run, and install:
 

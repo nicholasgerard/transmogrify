@@ -148,21 +148,30 @@ test covers it.
 
 ### 4. Guided setup
 
+**Implemented for 0.6.** `scripts/setup.js` and `transmogrify.js setup` now
+execute the measured plan through fixed injected runners, print each reason
+before consent, and rerun the doctor after every completed step. Dry runs and
+the refusal paths are covered without invoking a live installer, sign-in,
+runtime, or Desktop action.
+
 New `scripts/setup.js` (also `transmogrify.js setup`): runs the doctor's
 plan step by step. Each step that needs consent is executed only with its
 explicit flag (`--install-claude-cli`, `--install-codex-cli`,
-`--start-runtime`, `--relaunch-desktop`) or an interactive yes when a TTY
-is present; the agent asks the user one step at a time with the `why`
-text. Installation uses the vendors' documented installers (verify the
-current commands in the official docs at implementation time; do not
-hardcode from memory), sign-in uses `claude auth login` and `codex login`
-and waits for the user, the runtime uses `runtime-up.sh`, and Desktop
-attachment uses `desktop-attach.js ensure --relaunch-desktop`. Setup never
-modifies the CLI hosting the current session, never touches a foreign
-runtime or lane, and reruns the doctor after each step so the summary is
-always measured, never assumed.
+`--sign-in`, `--start-runtime`, `--relaunch-desktop`, `--persist-attach`) or
+an interactive yes when a TTY is present; the agent asks the user one step at
+a time with the `why` text. Installation uses the vendors' documented
+standalone installers, verified from their official docs on 2026-09-04;
+sign-in uses `claude auth login` and `codex login` and waits for the user. The
+runtime uses `ensurePreferredRuntime`, and Desktop attachment uses
+`desktop-attach.js ensure --relaunch-desktop` and `persist`. Setup never
+modifies the CLI hosting the current session, never adopts a foreign runtime,
+and reruns the doctor after each step so the summary is always measured, never
+assumed.
 
 ### 5. One install for the whole machine
+
+**Implemented for 0.6.** The default installer still targets both skill roots
+and now ends with the readiness and next-session handoff in plain words.
 
 `install.sh` installs both hosts by default already; the start handoff
 must stop selecting one. The state root, the runtime, the parent contexts,

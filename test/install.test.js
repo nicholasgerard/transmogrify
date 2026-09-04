@@ -58,6 +58,8 @@ test('installer stages complete fresh installs for Claude and Codex', async (t) 
 
   const result = await runInstaller({ HOME: home });
   assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /Claude Desktop and the ChatGPT app are ready to load Transmogrify/);
+  assert.match(result.stdout, /new session in the other app picks it up/);
 
   for (const target of [
     path.join(home, '.claude', 'skills', 'transmogrify'),
