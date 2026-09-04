@@ -208,10 +208,30 @@ version rather than the product name; and a daemon started from the
 managed install reports its own version (0.151.0 here) independently of
 the CLI on `PATH`.
 
+2026-09-04, wave 0.6 first harvest, unattended maintainer run on the managed
+daemon. Three Codex lanes (runtime daemon, compatibility by range, host
+context) ran in parallel on the daemon through the relay, each in its own
+managed worktree, with the parent watcher delivering completion wakes into
+this session; all three were reviewed, merged into `wave/0.6` (suite 523
+green), and retired. Measured in the process: a lane under the default
+`workspace-write` sandbox can write only its worktree and `/tmp`; the
+shared git directory, the state root, `ps`, loopback and unix sockets, and
+the keychain are denied, so two lanes could not write the handback the packet
+asked for and did not commit, and the third lane's commit succeeded only
+because the owner's personal Codex rules run `git add` and `git commit`
+outside the sandbox. Every lane copied `ws` into its seat to run tests, which
+the retirement census counts as dirt, so cleanup was finished through the
+manual-removal acknowledgement. The exchange contract moves into the
+worktree (packet 7 below). Also verified live after the merge: the runtime
+probe over the daemon's unix socket and over the relay, `runtime-up.sh`
+reusing both without starting anything, the doctor reaching the runtime
+through the relay record, the Claude build measurement cached by digest, and
+the Codex method probe cached by runtime version.
+
 ## The 0.6.0 wave
 
 Goal: a runtime that survives relaunches, app updates, and logins, and an
-onboarding that works from any first entry point. Six lane packets, each
+onboarding that works from any first entry point. Seven lane packets, each
 with disjoint files, dispatched to Codex lanes on the managed daemon and
 reviewed before merge into `wave/0.6`:
 
@@ -229,6 +249,11 @@ reviewed before merge into `wave/0.6`:
    and 5).
 6. The start handoff and skill bootstrap rewritten around the above
    (sections 6 and 7).
+7. Lane exchange under the default sandbox: the child hands back inside
+   its own worktree, the operator commits with the handed-back title and
+   body (`harvest --commit`), and seat provisioning (dependencies, the
+   exchange directory) is recorded so retirement cleanup stays clean by
+   construction.
 
 Already on the branch: the Codex runtime is accepted by version (0.151.0
 or newer) whatever product name it reports, and the client's handshake
