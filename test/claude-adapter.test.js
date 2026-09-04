@@ -24,6 +24,7 @@ const {
   beginLaneOperation, completeLaneOperation, listLanes, listOperations,
   pendingOperationForLane, projectPaths, reserveSpawn, updatePendingLaneOperation, observeLaneStopped,
 } = require('../scripts/lib/state');
+const { publicRuntime } = require('../scripts/lib/claude-runtime');
 const { removeManagedSeat, verifySeat } = require('../scripts/lib/worktree');
 const { exchangePreamble } = require('../scripts/lib/exchange');
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
@@ -54,6 +55,7 @@ function fakeRuntime() {
     projectsDevice: 1,
     projectsInode: 3,
     accountFingerprint: 'b'.repeat(64),
+    cliMeasurement: { result: 'good', source: 'verified-build-fast-path', measuredAt: '2026-09-04T00:00:00.000Z' },
     orgId: 'org-test',
     cleanEnv: { PATH: '/bin' },
   };
@@ -946,9 +948,8 @@ function reserveUnstartedClaudeLane(fixture, operationState = 'planned') {
   const spawnNonce = require('node:crypto').randomUUID();
   const name = '::: unstarted Claude recovery';
   const paths = projectPaths(fixture.repoRoot, fixture.env);
-  const runtime = fakeRuntime();
-  delete runtime.cleanEnv;
-  delete runtime.orgId;
+  // Persist exactly what the spawn path persists: the public tuple.
+  const runtime = publicRuntime(fakeRuntime());
   reserveSpawn(fixture.repoRoot, {
     operation: {
       operationId,

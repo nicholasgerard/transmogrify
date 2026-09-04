@@ -157,10 +157,13 @@ function remainingCommandMs(deadline, minimum = 1) {
   return remaining;
 }
 
-// The runtime tuple with the prepared environment and org id stripped, so no
-// durable record carries account or environment material.
+// The runtime tuple with the prepared environment, org id, and the build
+// measurement receipt stripped: no durable record carries account or
+// environment material, and the receipt (which build probe admitted this CLI,
+// and when) is diagnostic output for the doctor, not part of the identity that
+// every later command must reproduce exactly.
 function publicRuntime(runtime) {
-  const { cleanEnv: _cleanEnv, orgId: _orgId, ...persisted } = runtime;
+  const { cleanEnv: _cleanEnv, orgId: _orgId, cliMeasurement: _cliMeasurement, ...persisted } = runtime;
   return persisted;
 }
 
