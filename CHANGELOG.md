@@ -1,7 +1,12 @@
 # Changelog
 
-## 0.6.0 (in progress)
+## 0.6.0
 
+- A Claude lane spawned by a measured CLI persists the same exact runtime
+  tuple as before: preflight's build-measurement receipt is diagnostic output
+  for the doctor and is stripped before any registry write or identity
+  comparison. Found in the release smoke, where every Claude spawn had failed
+  registry validation on the new field.
 - Guided setup selects the Codex runtime with the same precedence as every
   other command (`TRANSMOGRIFY_URL`, the live relay record, then the legacy
   port), and the attachment LaunchAgent names a stable Node alias when one

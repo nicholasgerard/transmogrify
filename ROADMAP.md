@@ -244,6 +244,31 @@ the attached Desktop with `persisted: false`, the doctor's plan is empty on
 this machine, `persist --dry-run` prints the exact login-session change and
 LaunchAgent, and `setup --dry-run` performs nothing.
 
+2026-09-04, release 0.6.0, unattended maintainer run with two disposable
+probe lanes. Live on this machine with the merged tree: `runtime-up.sh`
+reused the managed daemon and the relay; the explaining doctor reported both
+providers ready with no plan steps (and, on a terminal, the Ready, Needed,
+and Next lines); the attachment check selected the relay from its record and
+reported Desktop attached with `persisted: false`; `setup --dry-run`
+performed nothing and reported both apps ready; `persist --dry-run` printed
+the login-session change and a LaunchAgent naming the stable Node alias;
+`install.sh --dry-run` listed both host copies and the bundled dependency;
+the site built the 0.6.0 start handoff with the three context sentences and
+passed its verify chain. Two disposable probe lanes, one Codex and one Claude
+Code, ran the exchange end to end: provisioned seats, handbacks written inside
+the worktree, `harvest --commit`, and retirement with clean cleanup (the
+Claude lane with private archive). Found and fixed during the run: the
+persisted Claude runtime tuple carried preflight's new build-measurement
+receipt and failed the registry's exact-key validation, so every Claude spawn
+had been refused; the public tuple now strips the receipt. Acceptance matrix
+rows exercised live here: the measured CLI at the minimum (no action, no
+version talk) and an attached Codex Desktop (nothing offered). Rows covered by
+tests with fakes: the fresh machine, newer and older CLIs, the bundled Codex
+CLI, an absent runtime, an unattached Desktop from a Claude host, a Codex
+Desktop host, terminal, IDE, and unsupported platforms. Not exercised live:
+`persist --authorize` (an owner decision), a machine that has never seen
+Transmogrify, and mobile reattachment after a Desktop restart.
+
 ## The 0.6.0 wave
 
 Goal: a runtime that survives relaunches, app updates, and logins, and an
