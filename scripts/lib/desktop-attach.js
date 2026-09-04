@@ -702,8 +702,24 @@ function xmlEscape(value) {
     .replaceAll("'", '&apos;');
 }
 
+// A LaunchAgent that names a versioned Node install path breaks silently when
+// Node is upgraded and that path disappears. Prefer a stable alias (Homebrew's
+// bin/node link, /usr/local/bin/node) when it resolves to the same file as the
+// running executable; otherwise keep the exact executable.
+const STABLE_NODE_ALIASES = Object.freeze(['/opt/homebrew/bin/node', '/usr/local/bin/node']);
+
+function stableNodePath(execPath, dependencies = {}) {
+  const realpath = dependencies.realpath || ((target) => fs.realpathSync(target));
+  let actual;
+  try { actual = realpath(execPath); } catch { return execPath; }
+  for (const alias of dependencies.nodeAliases || STABLE_NODE_ALIASES) {
+    try { if (realpath(alias) === actual) return alias; } catch {}
+  }
+  return execPath;
+}
+
 function launchAgentContents(runtimeUrl, dependencies = {}) {
-  const nodePath = dependencies.nodePath || process.execPath;
+  const nodePath = dependencies.nodePath || stableNodePath(process.execPath, dependencies);
   const scriptPath = dependencies.scriptPath || path.join(__dirname, '..', 'desktop-attach.js');
   for (const [name, value] of [['Node executable', nodePath], ['desktop-attach script', scriptPath]]) {
     if (!path.isAbsolute(value) || path.normalize(value) !== value) {
@@ -910,5 +926,6 @@ module.exports = {
   persistencePath,
   resolveRuntimeTarget,
   resolveRuntimeUrl,
+  stableNodePath,
   unpersist,
 };

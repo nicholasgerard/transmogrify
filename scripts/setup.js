@@ -14,6 +14,7 @@ const { createInterface } = require('node:readline/promises');
 const { parseArgs } = require('node:util');
 const { doctor, parseDoctorArgs } = require('./doctor');
 const { detectHostContext } = require('./lib/host-context');
+const { runtimeUrl } = require('./lib/codex-runtime');
 const { publicResult } = require('./lib/output-schema');
 const {
   PUBLIC_ERROR_MESSAGES, exitCodeForError, publicErrorMessage,
@@ -161,7 +162,9 @@ function executableOnPath(name, env = process.env) {
 }
 
 function runtimeOptions(env = process.env) {
-  const url = env.TRANSMOGRIFY_URL || `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`;
+  // The same precedence every Codex command uses: TRANSMOGRIFY_URL, the live
+  // relay record, then the legacy loopback port.
+  const url = runtimeUrl({}, env);
   const managedFallback = path.join(env.CODEX_HOME || path.join(env.HOME || os.homedir(), '.codex'),
     'packages', 'standalone', 'current', 'codex');
   let bin = env.TRANSMOGRIFY_BIN || executableOnPath('codex', env);

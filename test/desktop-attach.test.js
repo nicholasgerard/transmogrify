@@ -14,6 +14,8 @@ const {
   parseEstablishedConnections,
   persist,
   resolveRuntimeUrl,
+  launchAgentContents,
+  stableNodePath,
   unpersist,
 } = require('../scripts/lib/desktop-attach');
 const { main, parseCli } = require('../scripts/desktop-attach');
@@ -511,4 +513,28 @@ test('unpersist removes the managed plist before unsetting the login environment
     'remove:/Users/tester/Library/LaunchAgents/sh.transmogrify.attach.plist',
     'launchctl:unsetenv CODEX_APP_SERVER_WS_URL',
   ]);
+});
+
+test('the LaunchAgent prefers a stable Node alias that resolves to the running executable', () => {
+  const versioned = '/opt/homebrew/Cellar/node/24.8.0/bin/node';
+  const real = new Map([
+    [versioned, versioned],
+    ['/opt/homebrew/bin/node', versioned],
+    ['/usr/local/bin/node', '/usr/local/Cellar/node/22.0.0/bin/node'],
+    [process.execPath, versioned],
+  ]);
+  const realpath = (target) => {
+    if (!real.has(target)) throw Object.assign(new Error(`ENOENT: ${target}`), { code: 'ENOENT' });
+    return real.get(target);
+  };
+  assert.equal(stableNodePath(versioned, { realpath }), '/opt/homebrew/bin/node');
+  // No alias names this executable: keep the exact path.
+  const nvm = '/Users/me/.nvm/versions/node/v24.8.0/bin/node';
+  assert.equal(stableNodePath(nvm, { realpath: (target) => (target === nvm ? nvm : realpath(target)) }), nvm);
+  // An unreadable executable path is returned unchanged rather than guessed.
+  assert.equal(stableNodePath('/missing/node', { realpath }), '/missing/node');
+  const contents = launchAgentContents('ws://127.0.0.1:8844/', { realpath, scriptPath: '/skill/scripts/desktop-attach.js' });
+  assert.match(contents, /<string>\/opt\/homebrew\/bin\/node<\/string>/);
+  // An explicit nodePath still wins.
+  assert.match(launchAgentContents('ws://127.0.0.1:8844/', { nodePath: '/exact/node', scriptPath: '/skill/scripts/desktop-attach.js' }), /<string>\/exact\/node<\/string>/);
 });

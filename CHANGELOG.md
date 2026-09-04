@@ -2,6 +2,11 @@
 
 ## 0.6.0 (in progress)
 
+- Guided setup selects the Codex runtime with the same precedence as every
+  other command (`TRANSMOGRIFY_URL`, the live relay record, then the legacy
+  port), and the attachment LaunchAgent names a stable Node alias when one
+  resolves to the running executable, so a Node upgrade does not break login
+  persistence.
 - A lane's own completed retirement or stop no longer wakes the parent when
   the watcher records the terminal event late: `child.retired` after a
   completed `retire`, and `child.stopped` after a completed `stop`, are
