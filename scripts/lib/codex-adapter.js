@@ -32,7 +32,12 @@ const {
 const {
   CODEX_GUIDANCE, CODEX_SELECTION_GUIDE, INTENT_DESCRIPTORS,
 } = require('./execution-guidance');
-const { materializeManagedSeat, planManagedSeat, verifySeat } = require('./worktree');
+const {
+  materializeManagedSeat, planManagedSeat, plannedProvisionedEntries, verifySeat,
+} = require('./worktree');
+const {
+  prependExchangePreamble, writePacket,
+} = require('./exchange');
 const {
   canonicalLaneName, laneNameError, normalizeThreadStatus, ownedLaneNameError,
 } = require('./validation');
@@ -187,6 +192,7 @@ async function resolveSpawnVisibility(options, endpoint, env) {
 // lane from what was actually dispatched.
 async function spawn(options, env = process.env) {
   options = validateSpawnRequest(options);
+  const packet = options.input;
   const receiptVerification = turnReceiptVerificationBounds(options);
   const endpoint = validateUrl(runtimeUrl(options, env));
   const visibility = await resolveSpawnVisibility(options, endpoint, env);
@@ -215,7 +221,7 @@ async function spawn(options, env = process.env) {
   }
   ensureRegistry(options.repoRoot, env);
   const ctx = {
-    options, env, laneId, operationId, endpoint, visibility, dispatchEnvelope, receiptVerification,
+    options, env, laneId, operationId, endpoint, visibility, dispatchEnvelope, receiptVerification, packet,
     lane: undefined, seat: undefined, operation: undefined,
     providerRequestDispatched: false, spawnVerified: false, providerId: null,
   };
@@ -232,6 +238,7 @@ async function spawn(options, env = process.env) {
       const observedStatus = await verifyThreadName(ctx, client, started.threadId, first.turn);
       completeSpawn(ctx, observedStatus, started.threadId);
       const launched = laneResult('spawn', ctx.lane, {
+        exchange: ctx.exchange,
         receipt: {
           providerId: started.threadId,
           turnId: first.turn.id,
@@ -276,8 +283,13 @@ function reserveSpawnLane(ctx) {
       baseRef: options.baseRef,
     });
   ctx.seat = options.cwd
-    ? verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env))
+    ? {
+      ...verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)),
+      provisioned: plannedProvisionedEntries(options.repoRoot),
+    }
     : null;
+  const seatPath = ctx.seat?.path || seatIntent.path;
+  options.input = prependExchangePreamble(seatPath, options.input);
   const operationDetails = {
     target: 'codex',
     name: options.name,
@@ -319,6 +331,8 @@ function reserveSpawnLane(ctx) {
     ctx.lane = bindLaneSeat(options.repoRoot, laneId, operationId, ctx.seat, env);
     ctx.operation = pendingOperationForLane(options.repoRoot, laneId, env);
   }
+  const written = writePacket(options.repoRoot, ctx.seat, ctx.packet);
+  ctx.exchange = written.exchange;
 }
 
 // A resolved execution profile was computed against one catalog; the launch
@@ -590,6 +604,7 @@ async function awaitFirstTurnCompletion(ctx, completion, threadId, turn, launche
   }
   return laneResult('spawn', ctx.lane, {
     operationId: ctx.operation.operationId,
+    exchange: ctx.exchange,
     receipt: { ...launched.receipt, completedTurnId: completed.turn.id, completedStatus: completed.turn.status },
   });
 }

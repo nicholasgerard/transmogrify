@@ -2,6 +2,11 @@
 
 ## 0.6.0 (in progress)
 
+- Add a sandbox-true lane exchange: every child receives a worktree-local
+  packet and handback contract, managed seats share the project's existing
+  `node_modules` by symlink, and the operator-side journaled `harvest` command
+  validates and preserves the handback, optionally commits the reviewed diff,
+  removes recorded provisions, and prints the exact retirement command.
 - Prefer Codex's installer-managed app-server daemon and reach its Unix control
   socket directly from Transmogrify or through an owned loopback TCP relay for
   Desktop. `runtime-up.sh` now returns the relay URL, socket, and daemon version

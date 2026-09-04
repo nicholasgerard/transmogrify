@@ -25,7 +25,10 @@ const {
 } = require('./execution-profile');
 const { CLAUDE_GUIDANCE } = require('./execution-guidance');
 const { canonicalLaneName, laneNameError, ownedLaneNameError } = require('./validation');
-const { materializeManagedSeat, planManagedSeat, verifySeat } = require('./worktree');
+const {
+  materializeManagedSeat, planManagedSeat, plannedProvisionedEntries, verifySeat,
+} = require('./worktree');
+const { prependExchangePreamble, writePacket } = require('./exchange');
 const {
   BACKEND, ClaudeTransmogrifyError, RETRYABLE_SPAWN_RECEIPT_CODES, SPAWN_ABSENCE_GRACE_MS,
   SPAWN_VERIFY_DELAY_MS, SPAWN_VERIFY_TIMEOUT_MS, capabilities, childHooksEnabled, claudeCatalogSource,
@@ -196,6 +199,7 @@ async function finalizeSpawn(options, env, surface, runtime, lane, operation, jo
 // attribution failure is SPAWN_UNCERTAIN and the launch is never repeated.
 async function spawnLane(options, env = process.env) {
   options = validateClaudeSpawnRequest(options);
+  const packet = options.input;
   const surface = surfaceFor(options);
   const runtime = preflight(options, env, surface);
   if (options.parentContext || options.executionProfile !== undefined) {
@@ -222,7 +226,7 @@ async function spawnLane(options, env = process.env) {
   }
   ensureRegistry(options.repoRoot, env);
   const ctx = {
-    options, env, surface, runtime, laneId, dispatchEnvelope,
+    options, env, surface, runtime, laneId, dispatchEnvelope, packet,
     operationId: crypto.randomUUID(), lane: null, operation: null, argv: null, stdoutPath: null, stderrPath: null,
   };
   await reserveClaudeSpawn(ctx);
@@ -232,6 +236,7 @@ async function spawnLane(options, env = process.env) {
   recordSpawnedEvent(ctx, finalized);
   return laneResult('spawn', finalized.lane, {
     operationId: ctx.operation.operationId,
+    exchange: ctx.exchange,
     receipt: {
       jobId, sessionId: finalized.lane.providerId,
       bridgeIdSha256: sha256(finalized.lane.providerIdentity.bridgeId),
@@ -272,15 +277,10 @@ async function reserveClaudeSpawn(ctx) {
   }
   const spawnNonce = crypto.randomUUID();
   const marker = `[transmogrify spawn ${spawnNonce}]`;
-  const prompt = `${options.input}\n\n${marker}`;
   const execution = options.executionProfile ? executionArgs(options.executionProfile) : { model: options.model };
   const settingsFile = (dispatchEnvelope && childHooksEnabled(env)
     ? writeChildHooksSettings(laneId, dispatchEnvelope.dispatch.parentRef, execution, env)
     : null) || undefined;
-  ctx.argv = claudeSpawnArgs(options.name, prompt, {
-    ...execution,
-    ...(settingsFile ? { fastMode: undefined, settingsFile } : {}),
-  });
   const paths = projectPaths(options.repoRoot, env);
   ctx.stdoutPath = path.join(paths.operations, `${operationId}.spawn.stdout`);
   ctx.stderrPath = path.join(paths.operations, `${operationId}.spawn.stderr`);
@@ -292,11 +292,23 @@ async function reserveClaudeSpawn(ctx) {
       { branchName: options.branchName, baseRef: options.baseRef },
     );
     externalSeat = options.cwd
-      ? verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)) : null;
+      ? {
+        ...verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)),
+        provisioned: plannedProvisionedEntries(options.repoRoot),
+      } : null;
   } catch (error) {
     failReservedDispatch(dispatchEnvelope, env);
     throw error;
   }
+  options.input = prependExchangePreamble(
+    (externalSeat || seatIntent).path,
+    options.input,
+  );
+  const prompt = `${options.input}\n\n${marker}`;
+  ctx.argv = claudeSpawnArgs(options.name, prompt, {
+    ...execution,
+    ...(settingsFile ? { fastMode: undefined, settingsFile } : {}),
+  });
   const modelSelector = options.executionProfile?.resolved.model.selector ?? options.model;
   const spawnIntent = {
     operationId, spawnNonce, displayName: options.name, promptSha256: sha256(options.input),
@@ -345,6 +357,7 @@ async function reserveClaudeSpawn(ctx) {
     ctx.lane = bindLaneSeat(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, seat, env);
     ctx.operation = pendingOperationForLane(options.repoRoot, ctx.lane.laneId, env);
   }
+  ctx.exchange = writePacket(options.repoRoot, ctx.lane.seat, ctx.packet).exchange;
 }
 
 // Launch the background session with the journal in dispatching. A launch

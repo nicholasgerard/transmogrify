@@ -80,6 +80,11 @@ argument, so it can be visible briefly to same-user process inspection.
 Follow-up steering does not share this limitation, because that content goes
 to the public `--cloud` command through stdin.
 
+Before the prompt and unique marker, Transmogrify prepends the same portable
+exchange preamble used for Codex lanes. The caller's original packet is
+written verbatim to `<seat>/.transmogrify/packet.md`; the Claude child writes
+its structured handback beside it and does not commit.
+
 Model, effort, and speed follow Anthropic's documented `--model`, `--effort`,
 and `--settings` surfaces. Every request is resolved before provider access,
 with requested and resolved values journaled separately. Aliases are retained
@@ -225,7 +230,8 @@ endpoint shape, or ambiguous resource ID stops retirement.
 
 Retirement order is:
 
-1. durable output harvest and seat receipt;
+1. operator-side `harvest` of the worktree handback, including the optional
+   operator commit and durable owner-only copy, then the seat receipt;
 2. exact whole-session stop and verification;
 3. exact remote archive and verification;
 4. for an external or explicitly deferred seat, preserve the seat, never

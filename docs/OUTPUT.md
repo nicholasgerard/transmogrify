@@ -58,6 +58,7 @@ Every lane-bound operation (`spawn`, `status`, `steer`, `interrupt`, `stop`,
 
 Lane envelope plus `watcher` (`running`, `started`, `pid`) and `nextAction`,
 the sentence telling the parent how it will learn about this child.
+`exchange` carries the absolute worktree-local `packet` and `handback` paths.
 `receipt`: `acknowledgedBy`, `inputReceiptSource`, `completedStatus`,
 `presentation`, `requestedModelSelector`, `bridgeIdSha256`,
 `executionProfile`.
@@ -87,6 +88,14 @@ Lane envelope. `receipt`: `mode`, `alreadyStopped`.
 Lane envelope. `receipt`: `acknowledgedBy`, `inputReceiptSource` (Codex
 boundary resume); `sameSessionId`, `sameJobId`, `sameBridgeId`,
 `executionEpoch`, `presentation` (Claude).
+
+### `harvest`
+
+`operationId`, `laneId`, `adapter`, `handback` (`present` or `missing`),
+`changedFiles` (seat-relative paths excluding recorded provisions and the
+exchange directory), `head`, `handbackSha256`, and `retireCommand`. A missing
+handback has a null digest and retire command. A present handback is copied to
+the private harvest store before the journal completes.
 
 ### `retire`
 

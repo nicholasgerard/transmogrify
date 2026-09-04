@@ -94,7 +94,10 @@ const SCHEMAS = Object.freeze({
   spawn: laneShape({
     acknowledgedBy: true, inputReceiptSource: true, completedStatus: true, presentation: true,
     requestedModelSelector: true, bridgeIdSha256: true, executionProfile: true,
-  }, { watcher: { running: true, started: true, pid: true }, nextAction: true }),
+  }, {
+    exchange: { packet: true, handback: true },
+    watcher: { running: true, started: true, pid: true }, nextAction: true,
+  }),
   status: laneShape({
     exactSession: true, executionEpoch: true, durableLifecycle: true, providerInspectionDeferred: true,
   }, { turn: { status: true }, rawState: { type: true, activeFlags: true }, waiting: true }),
@@ -108,6 +111,10 @@ const SCHEMAS = Object.freeze({
     acknowledgedBy: true, inputReceiptSource: true, sameSessionId: true, sameJobId: true,
     sameBridgeId: true, executionEpoch: true, presentation: true,
   }),
+  harvest: {
+    version: true, ok: true, operation: true, operationId: true, laneId: true, adapter: true,
+    handback: true, changedFiles: true, head: true, handbackSha256: true, retireCommand: true,
+  },
   retire: laneShape({
     archived: true, alreadyRetired: true, worktreeRemoved: true, reconciled: true, retired: true,
     harvestedOutputSha256: true, remoteArchived: true, localJobRemoved: true, localRemovalDeferred: true,

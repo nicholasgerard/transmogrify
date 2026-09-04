@@ -38,6 +38,7 @@ const {
   SAFE_REFUSALS, exitCodeForError, failureBody, publicErrorMessage, safeDetails, safeString,
 } = require('./lib/public-error');
 const { describeSchema, publicResult } = require('./lib/output-schema');
+const { harvestLane } = require('./lib/exchange');
 const {
   ABANDONABLE_OPERATION_TYPES, abandonPendingLaneOperation,
   listOperations, pendingOperationForLane, requireOwnedLane, resolveProject,
@@ -80,6 +81,8 @@ operations:
   stop       --lane <lane-id>                         Claude only
   recover    --lane <lane-id> [--input <text> | --input-file <absolute|->]
              Codex input starts one boundary turn; Claude recovery accepts no input
+  harvest    --lane <lane-id> [--commit] [--no-provisioned-cleanup]
+             copy the bounded handback durably and optionally commit seat changes
   retire     --lane <lane-id> --harvested-output-sha256 <sha256>
              [--private-archive] [--no-cleanup-worktree]
              [--accept-manual-seat-removal]   after an owner-removed blocked seat
@@ -118,6 +121,7 @@ const OPERATIONS = new Set([
   'interrupt',
   'stop',
   'recover',
+  'harvest',
   'retire',
   'reconcile',
   'abandon',
@@ -147,6 +151,9 @@ const OPERATION_OPTIONS = {
   stop: new Set(['repo-root', 'lane', 'claude-bin', 'timeout-ms',
   ]),
   recover: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin', 'timeout-ms',
+  ]),
+  harvest: new Set([
+    'repo-root', 'lane', 'url', 'claude-bin', 'timeout-ms', 'commit', 'no-provisioned-cleanup',
   ]),
   retire: new Set([
     'repo-root', 'lane', 'url', 'claude-bin', 'private-archive',
@@ -682,6 +689,8 @@ async function main(argv, env = process.env) {
       'accept-manual-seat-removal': { type: 'boolean' },
       'finish-retirements': { type: 'boolean' },
       'no-cleanup-worktree': { type: 'boolean' },
+      commit: { type: 'boolean' },
+      'no-provisioned-cleanup': { type: 'boolean' },
       'harvested-output-sha256': { type: 'string' },
     },
   });
@@ -735,6 +744,8 @@ async function main(argv, env = process.env) {
     finishRetirements: values['finish-retirements'],
     cleanupWorktree: !values['no-cleanup-worktree'],
     harvestedOutputSha256: values['harvested-output-sha256'],
+    commit: values.commit === true,
+    cleanupProvisioned: values['no-provisioned-cleanup'] !== true,
   };
 
   if (operation === 'spawn') {
@@ -763,6 +774,15 @@ async function main(argv, env = process.env) {
   const provider = providerForLane(repoRoot, values.lane, env);
   rejectForeignFlags(provider, values, 'lanes');
   if (operation === 'abandon') return abandonLaneOperation(repoRoot, values, env);
+  if (operation === 'harvest') {
+    const result = await harvestLane(options, env, {
+      observe: (lane) => lane.providerId
+        ? provider.adapter.status(options, env)
+        : Promise.resolve({ phase: lane.state === 'active' ? 'executing' : 'idle' }),
+    });
+    nudgeParentWatcher(repoRoot, values.lane, env);
+    return result;
+  }
   if (!provider.operations.has(operation)) usage(`${operation} is not supported by ${provider.target} lanes`);
   if (operation === 'recover' && input !== undefined && !provider.recoverAcceptsInput) {
     usage(`--input is not accepted by ${provider.target} recovery`);

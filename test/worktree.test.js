@@ -11,6 +11,7 @@ const { registerLane, updateLane } = require('../scripts/lib/state');
 const {
   containsPath,
   captureHarvestReceipt,
+  cleanupStatus,
   createManagedSeat,
   isPermanentCleanupError,
   materializeManagedSeat,
@@ -148,6 +149,35 @@ test('managed seats are created with exact identity and clean seats are removabl
   assert.equal(removed.lane.state, 'worktreeRemoved');
   assert.equal(fs.existsSync(seat.path), false);
   execFileSync('git', ['-C', fixture.repoRoot, 'show-ref', '--verify', '--quiet', seat.branchRef]);
+});
+
+test('managed seats provision exchange and shared dependencies without census dirt', (t) => {
+  const fixture = createRepoWithSeat(t);
+  fs.writeFileSync(path.join(fixture.repoRoot, 'package.json'), '{}\n');
+  execFileSync('git', ['-C', fixture.repoRoot, 'add', 'package.json']);
+  execFileSync('git', ['-C', fixture.repoRoot, 'commit', '-qm', 'add package manifest']);
+  const dependencies = path.join(fixture.repoRoot, 'node_modules');
+  fs.mkdirSync(dependencies);
+  fs.writeFileSync(path.join(dependencies, 'shared.txt'), 'shared dependency\n');
+  const publicIgnore = fs.readFileSync(path.join(fixture.repoRoot, '.gitignore'), 'utf8');
+
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
+  assert.deepEqual(seat.provisioned, ['.transmogrify', 'node_modules']);
+  assert.throws(
+    () => verifyRecordedSeat(fixture.repoRoot, { ...seat, provisioned: ['../escape'] }),
+    /safe top-level relative paths/,
+  );
+  assert.equal(fs.lstatSync(path.join(seat.path, 'node_modules')).isSymbolicLink(), true);
+  assert.equal(fs.realpathSync(path.join(seat.path, 'node_modules')), fs.realpathSync(dependencies));
+  assert.equal(cleanupStatus(seat.path, seat.provisioned).clean, true);
+  assert.equal(cleanupStatus(seat.path).clean, false, 'older records keep counting ignored files as dirt');
+
+  const exclude = fs.readFileSync(path.join(fixture.repoRoot, '.git', 'info', 'exclude'), 'utf8');
+  assert.equal(exclude.split(/\r?\n/u).filter((line) => line === '.transmogrify/').length, 1);
+  createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
+  const repeated = fs.readFileSync(path.join(fixture.repoRoot, '.git', 'info', 'exclude'), 'utf8');
+  assert.equal(repeated.split(/\r?\n/u).filter((line) => line === '.transmogrify/').length, 1);
+  assert.equal(fs.readFileSync(path.join(fixture.repoRoot, '.gitignore'), 'utf8'), publicIgnore);
 });
 
 test('managed seat mutation ignores ambient Git repository redirection', (t) => {
