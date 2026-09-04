@@ -162,6 +162,15 @@ still used the pre-unification reconcile shape, and a scratch `pkill`
 during the test-runner investigation stopped a test run from another
 project on the same machine (reported to the owner).
 
+2026-09-04, Dock-launch attachment, owner present. With
+`launchctl setenv CODEX_APP_SERVER_WS_URL ws://127.0.0.1:8843` in the GUI
+environment and the shared runtime listening, Codex Desktop launched through
+LaunchServices without any per-launch environment attached to the shared
+runtime by itself (attach receipt `attached`, one socket to 8843, no
+private app-server child). The setting lasts until logout; persistence
+across logins and the app's behavior when the runtime is not listening at
+launch are not yet measured.
+
 ## Priority 1: compatibility and acceptance hardening
 
 - Onboarding that works wherever the start prompt lands: compatibility by
