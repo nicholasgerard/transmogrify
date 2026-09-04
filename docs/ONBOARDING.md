@@ -182,6 +182,8 @@ without more work (a skill installed under `~/.claude/skills` and
 
 ### 6. The start handoff
 
+**Implemented for 0.6.**
+
 `site/scripts/build-start.mjs` is rewritten around the flow above:
 fetch and verify the release (unchanged), install both hosts, run
 `doctor --explain`, then follow the narration rules. It carries the
@@ -190,7 +192,8 @@ machine notice) verbatim so every agent says the same thing.
 
 ### 7. Narration rules
 
-Written once in `SKILL.md` section 1 and repeated in the handoff:
+**Implemented for 0.6.** These rules now appear in both `SKILL.md` section 1
+and the generated start handoff:
 
 - Run the checks before saying anything. Then one short block: found,
   ready, needed, next.
@@ -210,7 +213,7 @@ Written once in `SKILL.md` section 1 and repeated in the handoff:
 | 2. Host context | `scripts/lib/host-context.js` | one test per row of the context table with fake env and ancestry |
 | 3. Doctor plan | `scripts/doctor.js` (`--explain`, `setup.plan`), `scripts/lib/output-schema.js`, `docs/OUTPUT.md` | golden plans for the states in the acceptance matrix |
 | 4. Guided setup | `scripts/setup.js`, `scripts/transmogrify.js`, `scripts/runtime-up.sh` (binary selection), `scripts/lib/desktop-attach.js` (reasons in plain words) | setup tests with injected installers and a fake TTY; refusal tests (foreign runtime, session's own CLI) |
-| 5. Start handoff and docs | `site/scripts/build-start.mjs`, `site/src/lib/start-prompt.ts`, `SKILL.md` section 1, `README.md` install and quick start, `docs/TROUBLESHOOTING.md` | `site/test/build-start.test.ts` for each context sentence; the SKILL token budget check |
+| 5. Start handoff and docs (**implemented for 0.6**) | `site/scripts/build-start.mjs`, `site/src/lib/start-prompt.ts`, `SKILL.md` section 1, `README.md` install and quick start, `docs/TROUBLESHOOTING.md` | `site/test/build-start.test.ts` for each context sentence; the SKILL token budget check |
 | 6. Acceptance | `ROADMAP.md` run record | the matrix below, run with fakes in CI and once for real with the owner on a machine that has never seen Transmogrify |
 
 Order matters: 1 removes the false blockers, 2 and 3 make the doctor able
@@ -243,12 +246,12 @@ which are the same checks that caught the 2.1.258 acknowledgement change);
 Desktop's bundled CLI may not support `app-server --listen` on every
 version (probe before use).
 
-## Open questions for the owner
+## Resolved decisions for 0.6
 
-- Which install path to recommend for each CLI when it is missing (the
-  vendor's shell installer, Homebrew, npm), and whether Transmogrify may
-  run it with consent or should only print it.
-- The minimum supported versions to start from: `2.1.258` for Claude Code
-  and `0.151` for the Codex app-server are proposed.
-- Whether an IDE agent context should also offer to open the desktop app
-  for the user, or only tell them where to go.
+- Missing CLIs use the vendors' documented standalone installers, and guided
+  setup runs one only after consent for that step.
+- The minimums are `2.1.258` for Claude Code and `0.151` for the Codex
+  app-server; newer builds are measured.
+- An IDE agent installs and verifies both hosts, then tells the user to open
+  Claude Desktop or the ChatGPT app. It does not start lane work or open the
+  app itself.

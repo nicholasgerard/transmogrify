@@ -128,22 +128,30 @@ options. Existing install ancestors must belong to the current user and must
 not be group/world writable; the installer refuses unsafe parents before
 staging or replacing a target.
 
-A successful default install leaves both Claude Desktop and the ChatGPT app
-ready to load Transmogrify. Start a new session in either app to pick up the
-skill installed from the other one. Then inspect the measured machine-wide
-setup without changing anything:
+A successful default install writes both host copies. The one-line handoff does
+not select a host: a new session in Claude Desktop or the ChatGPT app can load
+the same Transmogrify setup. Inspect both hosts without changing anything:
 
 ```bash
-node "$HOME/.agents/skills/transmogrify/scripts/setup.js" \
-  --repo-root /absolute/path/to/repository --dry-run
+export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
+node "$SKILL_ROOT/scripts/doctor.js" \
+  --repo-root /absolute/path/to/repository --target all --explain
 ```
 
-Run the same command without `--dry-run` for guided setup. On a terminal it
-asks one plain-language consent question at a time. In a non-interactive host,
-authorize only the next measured action with `--install-claude-cli`,
-`--install-codex-cli`, `--sign-in`, `--start-runtime`,
-`--relaunch-desktop`, or `--persist-attach`. The CLI installers are the
-vendors' current recommended standalone installers from the
+The doctor first reports what it found, what is ready, what is needed, and what
+happens next. Then guided setup handles the first needed step and measures the
+machine again. On a terminal it asks one plain-language consent question at a
+time:
+
+```bash
+node "$SKILL_ROOT/scripts/setup.js" --repo-root /absolute/path/to/repository
+```
+
+In a non-interactive host, ask the user about the first step and authorize only
+that step with the matching `--install-claude-cli`, `--install-codex-cli`,
+`--sign-in`, `--start-runtime`, `--relaunch-desktop`, or `--persist-attach`
+flag. Rerun the explaining doctor before moving to the next step. The CLI
+installers are the vendors' current recommended standalone installers from the
 [Claude Code setup guide](https://code.claude.com/docs/en/getting-started) and
 [Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
 
@@ -268,14 +276,27 @@ removes both changes. Persistence never relaunches a running Desktop app.
 
 ## Quick start
 
-Every command is independently runnable. Use an absolute repository root and
-pass prompt text to the operator through stdin so it does not appear in the
-operator command's arguments. The Claude CLI currently requires the initial
-background-session prompt as its documented positional argument; see the local
-process-list boundary in [Security](SECURITY.md#input-and-output-handling).
+First verify both hosts and finish the measured setup. The explaining doctor
+should be run before any readiness claim. Guided setup asks about one needed
+step at a time and reruns the checks after every completed action:
 
 ```bash
 export REPO_ROOT=/absolute/path/to/repository
+export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
+node "$SKILL_ROOT/scripts/doctor.js" \
+  --repo-root "$REPO_ROOT" --target all --explain
+node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT"
+```
+
+In a non-interactive host, do not run the second command until the user agrees
+to the plan's first step; add only its matching consent flag. Once the doctor
+shows the requested hosts ready, use an absolute repository root and pass
+prompt text through stdin so it does not appear in the operator command's
+arguments. The Claude CLI currently requires the initial background-session
+prompt as its documented positional argument; see the local process-list
+boundary in [Security](SECURITY.md#input-and-output-handling).
+
+```bash
 export WORKTREES="$HOME/.local/share/transmogrify/worktrees/example-repository"
 export HOST_PROVIDER=codex       # or: claude
 export HOST_APP=codex-desktop    # or: claude-desktop
@@ -470,8 +491,8 @@ local record removal then continues.
   provenance, durable child events, waiting, acknowledgement, and restart.
 - [Child notifications](docs/NOTIFICATIONS.md): the watcher, wake channels,
   event kinds, and the cost model.
-- [Onboarding brief](docs/ONBOARDING.md): the specification and implementation
-  plan for setup that works wherever the start prompt lands (queued).
+- [Onboarding brief](docs/ONBOARDING.md): the implemented setup contract for a
+  start prompt that works wherever it lands.
 - [Troubleshooting](docs/TROUBLESHOOTING.md): setup failures, runtime safety,
   upgrade/rollback, and cleanup recovery.
 - [Roadmap](ROADMAP.md): launch gate and forward priorities.

@@ -33,10 +33,10 @@ outcome is unknown.
 
 ## The happy path
 
-1. `doctor.js --repo-root "$REPO_ROOT" --target all`, then satisfy its
-   `setup.ownerActions` (section 1).
-2. On macOS with Codex lanes, `desktop-attach.js check`, then `ensure`
-   (section 1, per-host rules).
+1. Run `doctor.js --repo-root "$REPO_ROOT" --target all --explain` quietly,
+   then follow its measured setup plan one consented step at a time (section 1).
+2. Report what was found, ready, needed, and next in plain words; continue only
+   when the explaining doctor shows the requested hosts are ready.
 3. `lane.js parent-init` once per orchestrating task; keep the `contextFile`.
    It records how this session can be woken (`wake`).
 4. `lane.js spawn` per lane (section 3); keep each `laneId` and `dispatchId`.
@@ -81,23 +81,59 @@ Host slugs for `parent-init`: `--host-provider codex|claude` and
 ## 1. Bootstrap every operator session
 
 ```bash
-node "$SKILL_ROOT/scripts/doctor.js" --repo-root "$REPO_ROOT" --target all
+node "$SKILL_ROOT/scripts/doctor.js" \
+  --repo-root "$REPO_ROOT" --target all --explain
 ```
 
 The doctor is a read-only provider probe: it may create the empty registry,
 initialize a short-lived Codex client, test required methods against the nil
 thread ID, measure a Claude CLI build, and list Claude agents. It never starts,
 kills, restarts, steers a real turn, archives a real thread, removes, or adopts
-a session. Use `--target codex|claude` for a single-provider session.
+a session. Inspect both hosts after installation; use `--target codex|claude`
+only when the user's requested operation is deliberately single-provider.
 
-| Doctor result | What to do |
-| --- | --- |
-| `setup.ready:true`, provider `available:true` | Reuse the provider. Run only the doctor's printed maintenance commands, or an equally narrow exact-lane command. |
-| `setup.ownerActions[]` with `blocking:true` (Claude CLI logged out, below the minimum, or failed measurement; runtime needs authorization; sandbox denies loopback) | Do what the operator may do itself; ask the owner once, quoting the exact `ownerAction`; rerun the doctor until `setup.ready`. Never work around it through a private path. |
-| Advisory action (Codex Desktop not attached, not installed, unsupported platform) | Only native visibility is withheld. Ask the owner once whether to attach Desktop; if declined or impossible, spawn Codex lanes with `--allow-protocol-only` and say so. |
-| No Codex runtime, owner has authorized this installation to own one | `"$SKILL_ROOT/scripts/runtime-up.sh"` ensures the managed daemon and relay, or explicitly reports its fallback to the detached standalone runtime. Never kill, restart, or reconfigure a runtime that may host another orchestrator's lanes. |
-| `boundary:sandbox-loopback-denied` | Obtain one scoped host authorization for the doctor and the exact provider-control commands; do not report the provider ready until the probe succeeds. |
-| Pending operations reported | Reconcile them (section 6) before creating new work. |
+Read `setup.plan.context` and `setup.plan.steps`; do not narrate the raw JSON.
+Follow this flow:
+
+1. Run the doctor before saying anything about machine readiness. If
+   `setup.plan.context` is present, say that sentence exactly.
+2. Give one short block in this order: what was found, what is ready, what is
+   needed and why, and what happens next.
+3. Take only the first remaining plan step. Say its `what` and `why`. If it
+   needs consent, ask one yes-or-no question and wait. Never ask the owner to
+   authorize a step the plan already shows cannot work.
+4. After consent, run setup with only the flag for that step. Do not grant
+   permission for later steps:
+
+   ```bash
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --install-claude-cli
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --install-codex-cli
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --sign-in
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --start-runtime
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --relaunch-desktop
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --persist-attach
+   ```
+
+   These lines are alternatives. For a step with `consent: none`, run
+   `setup.js` with no consent flag. Setup executes only allowlisted actions and
+   reruns the doctor after each completed step.
+5. Run the explaining doctor again, report the new short block, and repeat for
+   only the new first step. If the owner declines, explain what remains
+   available and stop asking about that step. Reconcile pending exact-owned
+   operations before any spawn.
+
+Narrate in plain words. Do not expose ids, paths, ports, process details,
+command names, or error codes unless the owner asks. Explain more on request.
+For example: "the Codex app is not connected to the shared runtime, so new
+lanes would not show up in it; connecting means restarting the app, which ends
+what it is doing now." Do not substitute the internal refusal code.
+
+The context sentence comes from the measured host context. Terminal sessions
+say: "This is built for the desktop apps; live streaming shows there,
+everything else works here." IDE agents say: "Install both hosts, then open
+Claude Desktop or the ChatGPT app; Cursor support is not available yet."
+Unsupported machines say: "Claude lanes require Apple Silicon macOS; Codex
+lanes still work here in protocol-only mode."
 
 Codex `ok:true` proves the protocol runtime; `nativeVisibility.verified:true`
 is the separate measured receipt that Codex Desktop is a client of that
@@ -119,20 +155,18 @@ node "$SKILL_ROOT/scripts/desktop-attach.js" ensure
 ```
 
 `check` is read-only and exits 0 only with a live attachment receipt.
-`ensure` reuses an existing attachment, including one another operator set
-up. If the selected listener is absent, it uses `runtime-up` to ensure the
-daemon and relay before launching Desktop. A running
-unattached Desktop must be quit and relaunched, which ends whatever its
-private runtime was doing, so `ensure` stops with `DESKTOP_RELAUNCH_REQUIRED`
-until the owner agrees.
+`ensure` reuses an existing attachment and can open Desktop after ensuring the
+selected runtime. A running unattached app must be restarted, which ends what
+it is doing; let the setup plan explain that and obtain explicit consent. If
+the owner declines, say live app updates will not work and use
+`--allow-protocol-only`. Never relaunch from a Codex Desktop host; use native
+Codex collaboration, Claude lanes, or attach from outside the app. If Desktop
+is attached elsewhere, select that reported endpoint and rerun the doctor.
 
-| Host | Rule |
-| --- | --- |
-| Claude Code host | When `check` is not attached, ask the owner once, in plain words, whether you may relaunch Codex Desktop so lanes stream live. Yes: `ensure --relaunch-desktop`, confirm the receipt. No: say real-time visibility will not work and spawn only with `--allow-protocol-only`. `TRANSMOGRIFY_DESKTOP_RELAUNCH=auto` in the host environment is standing approval. Say when you launched the app because it was not running. |
-| Codex host | Your session runs inside the app; never relaunch it (`ensure` refuses with `DESKTOP_HOST_SESSION`). `attached` means the shared runtime is already the app's control plane. Otherwise use Codex's native collaboration for Codex children, spawn Claude lanes, which need no attachment, or ask the owner to attach from outside the app. |
-| `ATTACHED_ELSEWHERE` | Desktop streams another loopback runtime: point `TRANSMOGRIFY_URL` at the reported endpoint and rerun the doctor. |
-| `RUNTIME_UNAVAILABLE` | Nothing listens yet: start or reuse a runtime first. |
-| Persist across Dock launches and updates | Inspect `persist --dry-run`; after owner consent run `persist --authorize`. It sets the login environment and writes `~/Library/LaunchAgents/sh.transmogrify.attach.plist`, whose login run ensures the daemon and relay before reapplying the URL. Reverse it with `unpersist --authorize`. Neither command relaunches Desktop. |
+To persist attachment across Dock launches and updates, inspect `persist
+--dry-run`, then let guided setup request consent for `--persist-attach`.
+`unpersist --authorize` reverses the marked login environment and LaunchAgent.
+Persistence never relaunches Desktop.
 
 Runtime selection is `--url`, `TRANSMOGRIFY_URL`, the live relay record, then
 legacy port 8843. A relay receipt includes its daemon socket as well as the

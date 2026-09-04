@@ -1,6 +1,9 @@
 /** Generate the remote agent bootstrap after the static site build. */
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import setupPlan from '../../scripts/lib/setup-plan.js';
+
+const { IDE_CONTEXT, TERMINAL_CONTEXT, UNSUPPORTED_CONTEXT } = setupPlan;
 
 export const RELEASE_COMMIT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
@@ -66,87 +69,80 @@ replace it with a branch, tag, or different revision.
 
    Report the verified version and commit before installation. If either check
    fails, stop; never fall back to the repository default branch.
-3. Select exactly one current-host profile. A Codex host uses:
-
-   \`\`\`bash
-   export TRANSMOGRIFY_INSTALL_TARGET=codex
-   export TRANSMOGRIFY_HOST_PROVIDER=codex
-   export TRANSMOGRIFY_HOST_APP=codex-desktop
-   export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
-   \`\`\`
-
-   A Claude Code host uses:
-
-   \`\`\`bash
-   export TRANSMOGRIFY_INSTALL_TARGET=claude
-   export TRANSMOGRIFY_HOST_PROVIDER=claude
-   export TRANSMOGRIFY_HOST_APP=claude-desktop
-   export SKILL_ROOT="$HOME/.claude/skills/transmogrify"
-   \`\`\`
-
-   Do not select a provider merely because its desktop app is installed. Install
-   dependencies and run the installer by absolute path inside the verified
-   scratch checkout, then remove that checkout:
+3. Install for both Claude and Codex. Install dependencies and preview the
+   change before running the installer by absolute path inside the verified
+   scratch checkout:
 
    \`\`\`bash
    npm --prefix "$TRANSMOGRIFY_SCRATCH" ci --ignore-scripts
-   "$TRANSMOGRIFY_SCRATCH/install.sh" --target "$TRANSMOGRIFY_INSTALL_TARGET" --dry-run
-   "$TRANSMOGRIFY_SCRATCH/install.sh" --target "$TRANSMOGRIFY_INSTALL_TARGET"
+   "$TRANSMOGRIFY_SCRATCH/install.sh" --dry-run
+   "$TRANSMOGRIFY_SCRATCH/install.sh"
    cleanup_transmogrify_scratch
    trap - EXIT HUP INT TERM
    unset -f cleanup_transmogrify_scratch
    unset TRANSMOGRIFY_SCRATCH
    \`\`\`
 
-   Do not replace an unrelated occupied skill directory. On a deliberately
-   dual-host machine, update the other host only after this current-host check
-   passes; \`--target all\` is the explicit dual-install option.
-4. Open and follow the installed \`SKILL.md\` completely. Treat its ownership,
-   runtime, worktree, receipt, and recovery rules as the operating contract.
-   Use the external \`WORKTREES\` root established above instead of the
-   inside-repository default.
-5. Choose target providers independently from the host installation. For
-   bidirectional operation on a compatible Apple Silicon macOS host, inspect
-   both providers. A deliberately single-provider host may select only the
-   target it can satisfy:
+   Do not pass a host-selection option. The default installs both copies so a
+   new session in either desktop app can use the same setup. Do not replace an
+   unrelated occupied skill directory.
+4. Use either installed copy as the command root, then open and follow its
+   \`SKILL.md\` completely. Use the external \`WORKTREES\` root established
+   above instead of the inside-repository default.
 
    \`\`\`bash
-   export TRANSMOGRIFY_DOCTOR_TARGET=all  # or: codex | claude
+   export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
+   test -f "$SKILL_ROOT/SKILL.md" || export SKILL_ROOT="$HOME/.claude/skills/transmogrify"
    \`\`\`
-
-   Use the selected installation as the command root, then run the read-only
-   doctor against the target repository and selected providers:
+5. Run the read-only explaining doctor for both hosts before describing the
+   machine or asking the user for anything:
 
    \`\`\`bash
    node "$SKILL_ROOT/scripts/doctor.js" \\
      --repo-root "$REPO_ROOT" \\
-     --target "$TRANSMOGRIFY_DOCTOR_TARGET"
+     --target all \\
+     --explain
    \`\`\`
 
-6. Reuse a compatible runtime that the doctor verifies. Never kill, restart,
-   reconfigure, steer, interrupt, archive, or adopt a runtime or lane that this
-   Transmogrify installation does not exactly own. If no compatible Codex
-   runtime is available, ask before starting one. If the doctor reports
-   \`setup.ownerActions\`, ask the user to complete each blocking action (for
-   example \`claude auth login\`) and rerun the doctor before any spawn; an
-   advisory action only withholds native visibility for Codex lanes.
-7. When Codex is a target on macOS, run
-   \`node "$SKILL_ROOT/scripts/desktop-attach.js" check\`. Codex lanes stream
-   live only while Codex Desktop is a client of the shared runtime. If the
-   check is not attached and this session is not itself running inside Codex
-   Desktop, ask the user whether you may relaunch Codex Desktop attached; on
-   yes run \`desktop-attach.js ensure --relaunch-desktop\`, on no say that
-   real-time visibility will not work and use \`--allow-protocol-only\` for
-   Codex lanes. Never relaunch the app from a Codex host session.
-8. Reconcile only exact-owned pending operations. Before the first managed
-   spawn, create or recover the current task's durable parent context, passing
-   \`TRANSMOGRIFY_HOST_PROVIDER\` and \`TRANSMOGRIFY_HOST_APP\` as the
-   \`--host-provider\` and \`--host-app\` values that \`SKILL.md\` specifies;
-   pass its absolute context file to every spawn and
-   remain in the documented bounded wait/acknowledgement loop until all of its
-   children are handled. Report the doctor result and any release-gate
-   limitation, then continue with the user's requested work through the
-   installed skill.
+6. Read the doctor's setup plan, but do not paste its JSON into the
+   conversation. If its context sentence is present, say it exactly. The
+   expected context sentences are:
+
+   - Terminal: "${TERMINAL_CONTEXT}"
+   - IDE agent: "${IDE_CONTEXT}"
+   - Unsupported machine: "${UNSUPPORTED_CONTEXT}"
+
+   Then give one short block in this order: what was found, what is ready,
+   what is needed and why, and what happens next. Use plain words. Keep
+   identifiers, file paths, ports, command names, and error codes out of the
+   conversation unless the user asks for them.
+7. Work through the plan's first remaining step only. State what the step does
+   and why it is needed. If it needs consent, ask one yes-or-no question and
+   wait. Never ask permission for a step the plan already shows cannot work.
+   After consent, run \`setup.js\` with only the matching permission for that
+   first step:
+
+   \`\`\`bash
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --install-claude-cli
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --install-codex-cli
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --sign-in
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --start-runtime
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --relaunch-desktop
+   node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --persist-attach
+   \`\`\`
+
+   Those are alternatives, not a batch. Run only the line that matches the
+   current first step. For a step that needs no consent, run \`setup.js\`
+   without a permission option. After each result, rerun the explaining doctor,
+   give the short status block again, and handle only the new first step. Do
+   not pre-authorize later steps. If the user declines, explain what remains
+   available and stop asking about that step.
+8. When setup is ready, follow the installed skill's ownership and safety
+   rules. Reuse what the doctor found. Never kill, restart, reconfigure, steer,
+   interrupt, archive, or adopt work that this installation does not own. In an
+   IDE agent, finish setup and send the user to one of the desktop apps; do not
+   start lane work there. On an unsupported machine, offer Codex without live
+   app streaming. Otherwise continue with the user's requested work.
 
 Transmogrify does not use GUI automation as a lifecycle control channel.
 `;
