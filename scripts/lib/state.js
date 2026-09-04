@@ -47,7 +47,7 @@ const OPERATION_SCHEMA_VERSION = 1;
 // terminal states. A write outside this table is a programming error and is
 // refused before it reaches disk, so no adapter can invent a phase that no
 // reconcile branch settles.
-const OPERATION_TYPES = new Set(['spawn', 'steer', 'stop', 'recover', 'resume', 'interrupt', 'retire']);
+const OPERATION_TYPES = new Set(['spawn', 'steer', 'stop', 'recover', 'resume', 'interrupt', 'harvest', 'retire']);
 const OPERATION_STATES = new Map([
   ['spawn', new Set([
     'planned', 'seatReady', 'dispatching', 'dispatched', 'providerRequestDispatched', 'providerCreated',
@@ -62,6 +62,10 @@ const OPERATION_STATES = new Map([
     ...TERMINAL_OPERATION_STATES,
   ])],
   ['interrupt', new Set(['planned', 'dispatching', 'unknown', ...TERMINAL_OPERATION_STATES])],
+  ['harvest', new Set([
+    'planned', 'staged', 'commitDispatching', 'committed', 'copying', 'copied',
+    'cleanupDispatching', 'cleanupComplete', ...TERMINAL_OPERATION_STATES,
+  ])],
   // A Claude retirement journals its nested whole-session stop (dispatching,
   // dispatched, unknown) into the same record before the archive phases.
   ['retire', new Set([

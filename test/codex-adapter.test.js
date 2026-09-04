@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const {
   executionCapabilities,
@@ -35,6 +36,7 @@ const {
   verifySeat,
 } = require('../scripts/lib/worktree');
 const { createParentContext, listEvents, readDispatch } = require('../scripts/lib/dispatch');
+const { exchangePreamble } = require('../scripts/lib/exchange');
 const { NO_RESPONSE, startMockAppServer } = require('./helpers/mock-app-server');
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
 
@@ -258,6 +260,14 @@ test('Codex spawn persists identity, materializes, then names and verifies', asy
 
   const result = await spawn(baseOptions(fixture, server.url), fixture.env);
   assert.equal(result.ok, true);
+  assert.deepEqual(result.exchange, {
+    packet: path.join(fs.realpathSync(fixture.seat), '.transmogrify', 'packet.md'),
+    handback: path.join(fs.realpathSync(fixture.seat), '.transmogrify', 'handback.md'),
+  });
+  assert.equal(
+    fs.readFileSync(result.exchange.packet, 'utf8'),
+    'Return one short sentence without using tools.',
+  );
   assert.equal(result.receipt.providerId, 'thread-1');
   assert.deepEqual(result.visibility, {
     surface: 'codex',
@@ -330,7 +340,10 @@ test('Codex dispatched profiles use live capabilities, render provenance, and re
       assert.equal(request.params.serviceTier, 'default');
       assert.equal(request.params.serviceTierForTurn, 'default');
       if (turnStarts === 1) {
-        assert.match(request.params.input[0].text, /^╭─ Transmogrify · a task from your user's own session ─+\n/);
+        assert.ok(request.params.input[0].text.startsWith(
+          `${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`,
+        ));
+        assert.match(request.params.input[0].text, /╭─ Transmogrify · a task from your user's own session ─+\n/);
         assert.match(request.params.input[0].text, /^│ From {6}Claude Code on Claude Desktop$/m);
         assert.match(request.params.input[0].text, /^│ Task {6}"Cross-provider operator"$/m);
         assert.match(request.params.input[0].text, /^│ Intent {4}deep$/m);

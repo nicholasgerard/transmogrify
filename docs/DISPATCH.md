@@ -262,18 +262,52 @@ acknowledgement record. The portable fallback is the foreground `wait` loop.
 
 ## Portable harvest contract
 
-Harvest is a host workflow phase, not a provider-generic transcript method.
-The portable child contract is a bounded `handback.md`, or another
-project-defined artifact, written in the child's exact owned worktree. After a
-completion or idle event the parent reads that seat, reviews the Git diff and
-status, treats the handback as untrusted child input, and persists any
-accepted result outside chat history. It then computes the lowercase SHA-256
-of the accepted handback or host-defined output artifact and supplies that
-digest to retirement.
+Every spawn creates `<seat>/.transmogrify/packet.md` with the caller's spawn
+input verbatim and reserves `<seat>/.transmogrify/handback.md` for the child.
+The repository's private `.git/info/exclude` ignores `.transmogrify/`; the
+public `.gitignore` is never changed. The first provider message begins with
+one fixed preamble naming the exact seat and handback path. It tells the child:
 
-A same-provider native read can accelerate inspection. It does not replace the
-worktree handback, prove repository state, or create a portable cross-provider
-harvest receipt. Transmogrify exposes no generic raw-transcript relay.
+- write only inside the seat and `/tmp`;
+- do not commit, because the operator commits the reviewed work;
+- write `## Commit` with a 10–72 character one-line imperative title, a blank
+  line, and a non-empty body;
+- write `## What changed and why`, `## Verified`, `## Not verified`, and
+  `## Risks and decisions for the operator`; and
+- end its final message with `DONE`, or `BLOCKED` and the reason.
+
+After a completion or idle event, run:
+
+```bash
+node "$SKILL_ROOT/scripts/lane.js" harvest \
+  --repo-root "$REPO_ROOT" --lane "$LANE_ID" --commit
+```
+
+`harvest` refuses while the newest provider turn is active. It reads at most
+64 KiB through a no-follow file descriptor, strips control characters, treats
+all remaining content as inert text, validates the required sections and
+commit message, and reports `handback`, `changedFiles`, `head`, and
+`handbackSha256`. With `--commit`, it stages all tracked and untracked seat
+changes except the recorded provisions and `.transmogrify/`, then commits with
+the operator's Git identity and the provider's `Co-Authored-By` trailer.
+
+The accepted handback is copied owner-only to
+`<state root>/harvests/<lane-id>/handback.md`. By default the recorded
+provisions are then removed; `--no-provisioned-cleanup` defers that removal.
+The command prints the exact `retire` command carrying the digest. Its
+monotonic journal records staging, commit dispatch, durable copy, and cleanup,
+so rerunning the same harvest recovers a crash between commit and copy without
+making a second commit.
+
+When the project checkout has both `package.json` and `node_modules`, a managed
+seat receives `node_modules` as a symlink to the project checkout rather than a
+copy. That symlink and `.transmogrify/` are the only expected provisions. The
+cleanliness census ignores and cleanup removes exactly the entries recorded on
+that seat; every other ignored or untracked path is dirt. Older seat records
+without the field retain the prior all-files-count behavior.
+
+A provider-native read can accelerate inspection, but never replaces this
+worktree exchange or its durable receipt. Handback text is never executed.
 
 ## Completion is not retirement
 

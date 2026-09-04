@@ -32,6 +32,7 @@ endpoint. Add `--url` only to override that selection.
 | Install, upgrade, rollback, or uninstall | [Installation and upgrades](#installation-and-upgrades) |
 | Refused `WORKTREES` root inside the repository | [Managed worktree is not ignored](#managed-worktree-is-not-ignored) |
 | Ownership or mode refusal on state and seat paths | [Private state or worktree permissions](#private-state-or-worktree-permissions) |
+| `EPERM` on operator state, sockets, `ps`, or the Keychain inside a child lane | [Lane sandbox denials](#lane-sandbox-denials) |
 | `boundary:sandbox-loopback-denied`, `runtime-unsupported`, occupied or incompatible endpoint | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
 | `NATIVE_VISIBILITY_REQUIRED`, `DESKTOP_RELAUNCH_REQUIRED`, `DESKTOP_HOST_SESSION`, `ATTACHED_ELSEWHERE`, `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, `DESKTOP_QUIT_TIMEOUT` | [Codex Desktop is not attached](#codex-desktop-is-not-attached) |
 | `NO_ACTIVE_TURN`, unmarked or foreign native rows | [Codex lane and native row symptoms](#codex-lane-and-native-row-symptoms) |
@@ -178,6 +179,22 @@ ownership or purpose is unclear:
 ```bash
 install -d -m 700 "$HOME/.local/share/transmogrify/worktrees/example-repository"
 ```
+
+## Lane sandbox denials
+
+A managed child lane has `workspace-write` access to its exact worktree and
+`/tmp`. The private state root, Git common directory, loopback and Unix sockets,
+process inspection such as `ps`, and the macOS Keychain remain outside that
+boundary. `EPERM` from those resources inside a lane means the sandbox is
+working as designed; it does not prove the resource is missing or unhealthy.
+
+The child writes its packet response only to
+`<seat>/.transmogrify/handback.md` and never commits. The operator runs
+`lane.js harvest --commit` on the host, where private state, Git metadata, and
+provider observation are available. Tests that require socket binding,
+process inspection, Keychain access, or writes to the shared Git directory
+must likewise run on the host. Do not widen a child's writable roots or infer a
+provider outage from its sandbox denial.
 
 ## Codex runtime is unavailable or occupied
 

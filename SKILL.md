@@ -46,7 +46,8 @@ outcome is unknown.
    (section 5).
 6. `lane.js steer`, `status`, `interrupt` or `stop` as the work needs
    (section 4).
-7. Harvest the output, then `lane.js retire` with its digest (section 7).
+7. Run `lane.js harvest` (normally with `--commit`), then run the exact
+   `lane.js retire` command it prints (section 7).
 8. `lane.js reconcile` at startup and after each batch (section 6).
 
 ## Host parameters
@@ -367,8 +368,26 @@ bound lane keeps its state. Retirements are never abandoned.
 
 ## 7. Harvest and retire
 
-Retirement is automatic only after the host has durably harvested the lane's
-output and supplied its lowercase SHA-256 digest:
+Every spawned child receives `.transmogrify/packet.md` in its seat and must
+write `.transmogrify/handback.md`. A child may edit only its seat and `/tmp`.
+It must not commit or write operator state. After the child is idle, harvest
+and optionally commit from the operator process:
+
+```bash
+node "$SKILL_ROOT/scripts/lane.js" harvest \
+  --repo-root "$REPO_ROOT" --lane "$LANE_ID" --commit
+```
+
+Harvest refuses an active newest turn, validates the bounded handback as
+untrusted text, commits all non-provisioned changes with the handed-back title
+and body plus provider attribution, copies the handback owner-only under the
+state root, and removes recorded provisions by default. Use
+`--no-provisioned-cleanup` only to defer that exact cleanup. A pending harvest
+is resumed by rerunning the same command; do not use provider reconciliation
+for it.
+
+Retirement is automatic only after this durable harvest. Run the exact command
+printed by harvest, equivalent to:
 
 ```bash
 node "$SKILL_ROOT/scripts/lane.js" retire \
@@ -376,12 +395,14 @@ node "$SKILL_ROOT/scripts/lane.js" retire \
   --harvested-output-sha256 "$HARVEST_SHA256"   # add --private-archive for Claude
 ```
 
-The tool records the digest with the seat's branch, HEAD, clean flag, and
+Retirement records the digest with the seat's branch, HEAD, clean flag, and
 status digest; verifies the lane is stopped or stops the exact owned
 execution; archives the exact native thread or session and verifies it; then
 removes a managed worktree only if it was clean at harvest, its HEAD is
 unchanged, and it is still clean, counting tracked, untracked, and ignored
-files as dirt. For Claude, `claude rm` runs only after the recorded seat path
+files as dirt except for the exact provisions recorded on newer seats. Those
+entries are removed before worktree cleanup; older records retain the strict
+all-files census. For Claude, `claude rm` runs only after the recorded seat path
 is absent, because that public command can delete a session and its worktree.
 External seats are never removed and never passed to `claude rm`.
 `--no-cleanup-worktree` defers an eligible removal (and Claude local `rm`).

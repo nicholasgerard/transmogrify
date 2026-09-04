@@ -1191,6 +1191,7 @@ test('operation journals accept only the states enumerated for their type', (t) 
       `${type} must allow planned and every terminal state`);
   }
   assert.ok(!ABANDONABLE_OPERATION_TYPES.has('retire'));
+  assert.ok(!ABANDONABLE_OPERATION_TYPES.has('harvest'));
 });
 
 test('operation records tolerate an absent schema version and refuse a newer one', (t) => {
@@ -1282,7 +1283,7 @@ test('every operation state literal handed to a journal writer belongs to an enu
   const journalStates = new Set();
   for (const states of OPERATION_STATES.values()) for (const state of states) journalStates.add(state);
   const unknown = [];
-  for (const file of ['codex-adapter.js', 'claude-adapter.js', 'state.js']) {
+  for (const file of ['codex-adapter.js', 'claude-adapter.js', 'exchange.js', 'state.js']) {
     const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'lib', file), 'utf8');
     for (const call of source.matchAll(JOURNAL_WRITERS)) {
       const window = source.slice(call.index, source.indexOf(');', call.index) + 1);

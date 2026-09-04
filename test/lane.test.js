@@ -43,6 +43,7 @@ test('lane CLI rejects unknown operations, targets, and flags without provider m
     '--no-cleanup-worktree', '--accept-manual-seat-removal', '--url', '--claude-bin',
     '--parent-context-file', '--intent', '--model', '--effort', '--speed',
     '--allow-protocol-only',
+    '--commit', '--no-provisioned-cleanup',
   ]) {
     assert.match(help.stdout, new RegExp(flag), flag);
   }
@@ -70,6 +71,9 @@ test('lane CLI rejects unknown operations, targets, and flags without provider m
     'reconcile', '--repo-root', '/tmp', '--target', 'claude',
     '--accept-manual-seat-removal',
   ], {}), /not valid for reconcile/);
+  await assert.rejects(() => main([
+    'harvest', '--repo-root', '/tmp', '--lane', 'x', '--input', 'not accepted',
+  ], {}), /not valid for harvest/);
 });
 
 test('public capability output retains catalog ids, names, and provider-neutral descriptors', () => {

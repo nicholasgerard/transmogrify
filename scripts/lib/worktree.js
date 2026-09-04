@@ -370,7 +370,7 @@ function materializeManagedSeat(repoRoot, intent) {
     if (existing.branchRef !== intent.branchRef || existing.head?.toLowerCase() !== intent.baseCommit) {
       throw new Error(`managed seat does not match its durable intent: ${intent.path}`);
     }
-    return { ...existing, managed: true };
+    return provisionSeat(project.root, { ...existing, managed: true });
   }
 
   const records = parseWorktreeList(git(project.root, ['worktree', 'list', '--porcelain', '-z']));
@@ -396,7 +396,77 @@ function materializeManagedSeat(repoRoot, intent) {
   if (seat.branchRef !== intent.branchRef || seat.head?.toLowerCase() !== intent.baseCommit) {
     throw new Error('materialized managed seat does not match its durable intent');
   }
-  return { ...seat, managed: true };
+  return provisionSeat(project.root, { ...seat, managed: true });
+}
+
+// Entries the operator creates in a lane seat. They are kept relative to the
+// seat root so later census and cleanup code can match exactly these paths.
+function plannedProvisionedEntries(repoRoot) {
+  const project = resolveProject(repoRoot);
+  const entries = ['.transmogrify'];
+  if (fs.existsSync(path.join(project.root, 'package.json')) &&
+      fs.existsSync(path.join(project.root, 'node_modules'))) {
+    entries.push('node_modules');
+  }
+  return entries;
+}
+
+function validateProvisionedEntries(entries, label = 'provisioned entries') {
+  if (!Array.isArray(entries) || new Set(entries).size !== entries.length ||
+      entries.some((entry) => typeof entry !== 'string' || !entry ||
+        path.isAbsolute(entry) || entry === '.' || entry === '..' ||
+        entry.includes('/') || entry.includes('\\') || /[\u0000-\u001f\u007f]/u.test(entry))) {
+    throw seatIdentity(`${label} must contain unique safe top-level relative paths`);
+  }
+  return entries;
+}
+
+function ensureExchangeExclude(project) {
+  const infoDirectory = path.join(project.commonDir, 'info');
+  const excludeFile = path.join(infoDirectory, 'exclude');
+  fs.mkdirSync(infoDirectory, { recursive: true });
+  const current = fs.existsSync(excludeFile) ? fs.readFileSync(excludeFile, 'utf8') : '';
+  if (current.split(/\r?\n/u).includes('.transmogrify/')) return;
+  fs.appendFileSync(excludeFile, `${current && !current.endsWith('\n') ? '\n' : ''}.transmogrify/\n`);
+}
+
+function ensureDirectory(target, label) {
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(target, { mode: 0o700 });
+    return;
+  }
+  const stat = fs.lstatSync(target);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw seatIdentity(`${label} must be a real directory: ${target}`);
+  }
+}
+
+// Provision a materialized seat without copying dependencies. Existing entries
+// are accepted only when they are exactly the directory or symlink we create.
+function provisionSeat(repoRoot, recorded) {
+  const project = resolveProject(repoRoot);
+  const seat = verifySeat(project.root, recorded.path, recorded.worktreesRoot);
+  const provisioned = plannedProvisionedEntries(project.root);
+  for (const entry of provisioned) {
+    if (git(seat.path, ['ls-files', '--', entry]).trim()) {
+      throw seatIdentity(`refusing to provision tracked lane entry: ${entry}`);
+    }
+  }
+  ensureExchangeExclude(project);
+  ensureDirectory(path.join(seat.path, '.transmogrify'), 'lane exchange directory');
+  if (provisioned.includes('node_modules')) {
+    const source = path.join(project.root, 'node_modules');
+    const target = path.join(seat.path, 'node_modules');
+    if (!pathEntryExists(target)) {
+      fs.symlinkSync(source, target, 'dir');
+    } else {
+      const stat = fs.lstatSync(target);
+      if (!stat.isSymbolicLink() || fs.realpathSync(target) !== fs.realpathSync(source)) {
+        throw seatIdentity(`refusing to replace existing lane dependency entry: ${target}`);
+      }
+    }
+  }
+  return { ...recorded, provisioned };
 }
 
 // A managed lane's recorded seat must still verify with the same path, root,
@@ -411,7 +481,12 @@ function verifyRecordedSeat(repoRoot, recorded) {
       throw seatIdentity(`managed lane seat identity changed (${key}): ${recorded.path}`);
     }
   }
-  return { ...current, managed: true };
+  if (recorded.provisioned !== undefined) validateProvisionedEntries(recorded.provisioned);
+  return {
+    ...current,
+    managed: true,
+    ...(recorded.provisioned === undefined ? {} : { provisioned: [...recorded.provisioned] }),
+  };
 }
 
 // The seat check every mutation runs first, for managed and external seats
@@ -425,7 +500,11 @@ function verifyLaneSeat(repoRoot, recorded) {
       throw seatIdentity(`lane seat identity changed (${key}): ${recorded.path}`);
     }
   }
-  return current;
+  if (recorded.provisioned !== undefined) validateProvisionedEntries(recorded.provisioned);
+  return {
+    ...current,
+    ...(recorded.provisioned === undefined ? {} : { provisioned: [...recorded.provisioned] }),
+  };
 }
 
 // The durable pre-retirement receipt: the caller's harvested output digest plus
@@ -437,7 +516,7 @@ function captureHarvestReceipt(repoRoot, recorded, outputSha256) {
   }
   const seat = verifyLaneSeat(repoRoot, recorded);
   const head = git(seat.path, ['rev-parse', '--verify', 'HEAD']).trim().toLowerCase();
-  const status = cleanupStatus(seat.path);
+  const status = cleanupStatus(seat.path, seat.provisioned);
   return {
     version: 1,
     outputSha256,
@@ -453,16 +532,39 @@ function captureHarvestReceipt(repoRoot, recorded, outputSha256) {
 
 // The seat's full working-tree census: tracked changes, untracked files, and
 // ignored files. Clean means all three are empty.
-function cleanupStatus(seatPath) {
-  const visible = git(seatPath, ['status', '--porcelain=v1', '--untracked-files=all']);
+function cleanupStatus(seatPath, provisioned) {
+  const entries = provisioned === undefined ? [] : validateProvisionedEntries(provisioned);
+  const exclusions = entries.flatMap((entry) => [
+    `:(top,exclude)${entry}`,
+    `:(top,exclude)${entry}/**`,
+  ]);
+  const visible = git(seatPath, [
+    'status', '--porcelain=v1', '--untracked-files=all', '--', '.', ...exclusions,
+  ]);
   const ignored = git(seatPath, [
-    'ls-files', '--others', '--ignored', '--exclude-standard', '-z',
+    'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.', ...exclusions,
   ]);
   return {
     clean: visible.length === 0 && ignored.length === 0,
     sha256: crypto.createHash('sha256')
       .update('visible\0').update(visible).update('\0ignored\0').update(ignored).digest('hex'),
   };
+}
+
+// Remove only the exact top-level entries recorded as operator provisions.
+// A missing entry is already clean; a symlink is unlinked rather than followed.
+function removeProvisionedEntries(recorded) {
+  const entries = recorded.provisioned === undefined
+    ? [] : validateProvisionedEntries(recorded.provisioned);
+  for (const entry of entries) {
+    const target = path.join(recorded.path, entry);
+    if (!pathEntryExists(target)) continue;
+    const stat = fs.lstatSync(target);
+    if (stat.isSymbolicLink() || stat.isFile()) fs.unlinkSync(target);
+    else if (stat.isDirectory()) fs.rmSync(target, { recursive: true });
+    else throw unsafeCleanup(`refusing unsupported provisioned entry: ${target}`);
+  }
+  return entries;
 }
 
 // Removal is permitted only when the seat was clean at harvest, its identity
@@ -488,7 +590,7 @@ function verifyHarvestedSeatForCleanup(repoRoot, recorded, harvestReceipt) {
   if (head !== harvestReceipt.seat.head) {
     throw unsafeCleanup('managed worktree HEAD changed after output harvest');
   }
-  if (!cleanupStatus(seat.path).clean) {
+  if (!cleanupStatus(seat.path, seat.provisioned).clean) {
     throw unsafeCleanup(`refusing to remove dirty managed worktree: ${seat.path}`);
   }
   return seat;
@@ -539,6 +641,10 @@ function removeManagedSeat(repoRoot, laneId, harvestReceipt, env = process.env) 
       };
     }
     const seat = verifyHarvestedSeatForCleanup(repoRoot, lane.seat, harvestReceipt);
+    removeProvisionedEntries(seat);
+    if (!cleanupStatus(seat.path).clean) {
+      throw unsafeCleanup(`refusing to remove dirty managed worktree: ${seat.path}`);
+    }
     const project = resolveProject(repoRoot);
     git(project.root, ['worktree', 'remove', '--', seat.path]);
     if (pathEntryExists(seat.path)) {
@@ -565,6 +671,7 @@ function removeManagedSeat(repoRoot, laneId, harvestReceipt, env = process.env) 
 module.exports = {
   canonicalFuturePath,
   captureHarvestReceipt,
+  cleanupStatus,
   containsPath,
   createManagedSeat,
   isPermanentCleanupError,
@@ -572,7 +679,10 @@ module.exports = {
   pathEntryExists,
   parseWorktreeList,
   planManagedSeat,
+  plannedProvisionedEntries,
+  provisionSeat,
   requireIgnoredManagedRoot,
+  removeProvisionedEntries,
   removeManagedSeat,
   verifyLaneSeat,
   verifyHarvestedSeatForCleanup,

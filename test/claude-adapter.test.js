@@ -25,6 +25,7 @@ const {
   pendingOperationForLane, projectPaths, reserveSpawn, updatePendingLaneOperation, observeLaneStopped,
 } = require('../scripts/lib/state');
 const { removeManagedSeat, verifySeat } = require('../scripts/lib/worktree');
+const { exchangePreamble } = require('../scripts/lib/exchange');
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
@@ -297,11 +298,17 @@ test('Claude spawn journals intent, uses exact argv, binds three identifiers, an
   assert.equal(lane.providerIdentity.executionEpochs.length, 1);
   assert.equal(lane.state, 'active');
   assert.equal(result.receipt.presentation, 'deepLinkDispatched');
+  assert.deepEqual(result.exchange, {
+    packet: path.join(fs.realpathSync(fixture.seat), '.transmogrify', 'packet.md'),
+    handback: path.join(fs.realpathSync(fixture.seat), '.transmogrify', 'handback.md'),
+  });
+  assert.equal(fs.readFileSync(result.exchange.packet, 'utf8'), 'Return CLAUDE_READY.');
   const launch = surface.calls.find((call) => call.method === 'launch');
   assert.deepEqual(launch.args.slice(0, 5), [
     '--bg', '--name', '::: native Claude lane', '--remote-control', '::: native Claude lane',
   ]);
-  assert.match(launch.args[5], /^Return CLAUDE_READY\.\n\n\[transmogrify spawn [0-9a-f-]{36}\]$/);
+  assert.ok(launch.args[5].startsWith(`${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`));
+  assert.match(launch.args[5], /Return CLAUDE_READY\.\n\n\[transmogrify spawn [0-9a-f-]{36}\]$/);
   assert.equal(launch.options.cwd, fs.realpathSync(fixture.seat));
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].state, 'complete');
   assert.equal(fs.existsSync(lane.ownership.spawnIntent.stdoutPath), false);
@@ -343,7 +350,8 @@ test('Claude spawn records and forwards an explicit model selection', async (t) 
     '--remote-control', '::: native Claude lane',
     '--model', 'claude-opus-5',
   ]);
-  assert.match(launch.args[7], /^Return CLAUDE_READY\./);
+  assert.ok(launch.args[7].startsWith(`${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`));
+  assert.match(launch.args[7], /Return CLAUDE_READY\./);
   assert.equal(lane.ownership.spawnIntent.modelSelector, 'claude-opus-5');
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].details.modelSelector, 'claude-opus-5');
   assert.equal(result.receipt.requestedModelSelector, 'claude-opus-5');
@@ -372,7 +380,8 @@ test('Claude dispatched profiles render provenance and survive exact-session rec
     '--settings', childHooksPath(lane.laneId, fixture.env),
   ]);
   assert.equal(JSON.parse(fs.readFileSync(childHooksPath(lane.laneId, fixture.env), 'utf8')).fastMode, false, 'the hooks file carries the fast-mode pin');
-  assert.match(launch.args[11], /^╭─ Transmogrify · a task from your user's own session ─+\n/);
+  assert.ok(launch.args[11].startsWith(`${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`));
+  assert.match(launch.args[11], /╭─ Transmogrify · a task from your user's own session ─+\n/);
   assert.match(launch.args[11], /^│ From {6}Codex Desktop$/m);
   assert.match(launch.args[11], /^│ Task {6}"Release operator"$/m);
   assert.match(launch.args[11], /^│ To {8}Claude Code · claude-opus-5 · high effort · standard speed$/m);

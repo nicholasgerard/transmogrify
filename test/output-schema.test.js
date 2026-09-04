@@ -49,6 +49,16 @@ test('status results carry both phases and drop provider handles', () => {
 
 test('retire, reconcile, abandon, and wait results keep their declared keys only', () => {
   assert.deepEqual(publicResult({
+    version: 1, ok: true, operation: 'harvest', operationId: 'op', laneId: 'lane',
+    adapter: 'codex-app-server', handback: 'present', changedFiles: ['feature.js'],
+    head: 'a'.repeat(40), handbackSha256: 'b'.repeat(64), retireCommand: 'node lane.js retire',
+    durableHandback: '/Users/private/handback.md', providerId: 'private-thread',
+  }), {
+    version: 1, ok: true, operation: 'harvest', operationId: 'op', laneId: 'lane',
+    adapter: 'codex-app-server', handback: 'present', changedFiles: ['feature.js'],
+    head: 'a'.repeat(40), handbackSha256: 'b'.repeat(64), retireCommand: 'node lane.js retire',
+  });
+  assert.deepEqual(publicResult({
     version: 1, ok: true, operation: 'retire', operationId: 'op', laneId: 'lane', adapter: 'claude-code',
     providerId: 'session-private', state: 'worktreeRemoved', capabilities: { stop: 'wholeSession' },
     receipt: {
