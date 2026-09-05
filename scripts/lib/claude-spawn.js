@@ -206,6 +206,19 @@ async function spawnLane(options, env = process.env) {
     options = { ...options, executionProfile: resolveSpawnProfile(options, runtime) };
   }
   const laneId = options.laneId || crypto.randomUUID();
+  // The first message reads, in order: the parent's provenance box, the
+  // exchange preamble, then the packet. The seat is planned first because the
+  // preamble names it; a planning failure here reserves nothing to settle.
+  const seatIntent = options.cwd ? null : planManagedSeat(
+    options.repoRoot, worktreesRoot(options, env), laneId,
+    { branchName: options.branchName, baseRef: options.baseRef },
+  );
+  const externalSeat = options.cwd
+    ? {
+      ...verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)),
+      provisioned: plannedProvisionedEntries(options.repoRoot),
+    } : null;
+  const exchangeInput = prependExchangePreamble((externalSeat || seatIntent).path, options.input);
   const dispatchEnvelope = options.parentContext ? reserveDispatch({
     parentContext: options.parentContext,
     repoRoot: options.repoRoot,
@@ -214,19 +227,16 @@ async function spawnLane(options, env = process.env) {
     backend: BACKEND,
     displayName: options.name,
     profile: options.executionProfile,
-    prompt: options.input,
+    prompt: exchangeInput,
   }, env) : null;
-  if (dispatchEnvelope) {
-    options = {
-      ...options,
-      input: dispatchEnvelope.renderedPrompt,
-      dispatch: dispatchEnvelope.dispatch,
-      lineage: dispatchEnvelope.lineage,
-    };
-  }
+  options = {
+    ...options,
+    input: dispatchEnvelope ? dispatchEnvelope.renderedPrompt : exchangeInput,
+    ...(dispatchEnvelope ? { dispatch: dispatchEnvelope.dispatch, lineage: dispatchEnvelope.lineage } : {}),
+  };
   ensureRegistry(options.repoRoot, env);
   const ctx = {
-    options, env, surface, runtime, laneId, dispatchEnvelope, packet,
+    options, env, surface, runtime, laneId, dispatchEnvelope, packet, seatIntent, externalSeat,
     operationId: crypto.randomUUID(), lane: null, operation: null, argv: null, stdoutPath: null, stderrPath: null,
   };
   await reserveClaudeSpawn(ctx);
@@ -284,26 +294,7 @@ async function reserveClaudeSpawn(ctx) {
   const paths = projectPaths(options.repoRoot, env);
   ctx.stdoutPath = path.join(paths.operations, `${operationId}.spawn.stdout`);
   ctx.stderrPath = path.join(paths.operations, `${operationId}.spawn.stderr`);
-  let seatIntent;
-  let externalSeat;
-  try {
-    seatIntent = options.cwd ? null : planManagedSeat(
-      options.repoRoot, worktreesRoot(options, env), laneId,
-      { branchName: options.branchName, baseRef: options.baseRef },
-    );
-    externalSeat = options.cwd
-      ? {
-        ...verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)),
-        provisioned: plannedProvisionedEntries(options.repoRoot),
-      } : null;
-  } catch (error) {
-    failReservedDispatch(dispatchEnvelope, env);
-    throw error;
-  }
-  options.input = prependExchangePreamble(
-    (externalSeat || seatIntent).path,
-    options.input,
-  );
+  const { seatIntent, externalSeat } = ctx;
   const prompt = `${options.input}\n\n${marker}`;
   ctx.argv = claudeSpawnArgs(options.name, prompt, {
     ...execution,

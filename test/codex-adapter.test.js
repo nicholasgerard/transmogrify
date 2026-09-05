@@ -340,10 +340,11 @@ test('Codex dispatched profiles use live capabilities, render provenance, and re
       assert.equal(request.params.serviceTier, 'default');
       assert.equal(request.params.serviceTierForTurn, 'default');
       if (turnStarts === 1) {
-        assert.ok(request.params.input[0].text.startsWith(
-          `${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`,
+        // Provenance first, then the exchange preamble, then the packet.
+        assert.match(request.params.input[0].text, /^╭─ Transmogrify · a task from your user's own session ─+\n/);
+        assert.ok(request.params.input[0].text.includes(
+          `\n\n${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`,
         ));
-        assert.match(request.params.input[0].text, /╭─ Transmogrify · a task from your user's own session ─+\n/);
         assert.match(request.params.input[0].text, /^│ From {6}Claude Code on Claude Desktop$/m);
         assert.match(request.params.input[0].text, /^│ Task {6}"Cross-provider operator"$/m);
         assert.match(request.params.input[0].text, /^│ Intent {4}deep$/m);

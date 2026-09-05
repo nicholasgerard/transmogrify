@@ -201,6 +201,11 @@ async function spawn(options, env = process.env) {
   }
   const laneId = options.laneId || crypto.randomUUID();
   const operationId = crypto.randomUUID();
+  // The child's first message reads, in order: the parent's provenance box,
+  // the exchange preamble, then the packet. The seat is planned first because
+  // the preamble names it; the plan is reused when the lane is reserved.
+  const seatPlan = planSeat(options, env, laneId);
+  const exchangeInput = prependExchangePreamble(seatPlan.path, options.input);
   const dispatchEnvelope = options.parentContext ? reserveDispatch({
     parentContext: options.parentContext,
     repoRoot: options.repoRoot,
@@ -209,19 +214,16 @@ async function spawn(options, env = process.env) {
     backend: 'codex-app-server',
     displayName: options.name,
     profile: options.executionProfile,
-    prompt: options.input,
+    prompt: exchangeInput,
   }, env) : null;
-  if (dispatchEnvelope) {
-    options = {
-      ...options,
-      input: dispatchEnvelope.renderedPrompt,
-      dispatch: dispatchEnvelope.dispatch,
-      lineage: dispatchEnvelope.lineage,
-    };
-  }
+  options = {
+    ...options,
+    input: dispatchEnvelope ? dispatchEnvelope.renderedPrompt : exchangeInput,
+    ...(dispatchEnvelope ? { dispatch: dispatchEnvelope.dispatch, lineage: dispatchEnvelope.lineage } : {}),
+  };
   ensureRegistry(options.repoRoot, env);
   const ctx = {
-    options, env, laneId, operationId, endpoint, visibility, dispatchEnvelope, receiptVerification, packet,
+    options, env, laneId, operationId, endpoint, visibility, dispatchEnvelope, receiptVerification, packet, seatPlan,
     lane: undefined, seat: undefined, operation: undefined,
     providerRequestDispatched: false, spawnVerified: false, providerId: null,
   };
@@ -274,22 +276,27 @@ function validateSpawnRequest(options) {
 
 // Plan or verify the seat, reserve the lane and its spawn journal atomically,
 // mark the parent's dispatch journaled, and materialize a managed seat.
-function reserveSpawnLane(ctx) {
-  const { options, env, laneId, operationId, dispatchEnvelope } = ctx;
-  const seatIntent = options.cwd
-    ? null
-    : planManagedSeat(options.repoRoot, worktreesRoot(options, env), laneId, {
-      branchName: options.branchName,
-      baseRef: options.baseRef,
-    });
-  ctx.seat = options.cwd
-    ? {
+// Plan or verify the seat before anything is reserved: a managed seat's intent
+// (path, branch, base commit) or an external seat's verified identity.
+function planSeat(options, env, laneId) {
+  if (options.cwd) {
+    const external = {
       ...verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)),
       provisioned: plannedProvisionedEntries(options.repoRoot),
-    }
-    : null;
-  const seatPath = ctx.seat?.path || seatIntent.path;
-  options.input = prependExchangePreamble(seatPath, options.input);
+    };
+    return { path: external.path, external, intent: null };
+  }
+  const intent = planManagedSeat(options.repoRoot, worktreesRoot(options, env), laneId, {
+    branchName: options.branchName,
+    baseRef: options.baseRef,
+  });
+  return { path: intent.path, external: null, intent };
+}
+
+function reserveSpawnLane(ctx) {
+  const { options, env, laneId, operationId, dispatchEnvelope, seatPlan } = ctx;
+  const seatIntent = seatPlan.intent;
+  ctx.seat = seatPlan.external;
   const operationDetails = {
     target: 'codex',
     name: options.name,

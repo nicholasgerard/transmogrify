@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1 (in progress)
+
+- A dispatched child's first message reads provenance box, exchange preamble,
+  then packet again. The exchange preamble had been prepended after the
+  provenance box was rendered, burying the `╭─ Transmogrify` block that names the
+  parent session.
+
 ## 0.6.0
 
 - A Claude lane spawned by a measured CLI persists the same exact runtime
