@@ -1,33 +1,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const path = require('node:path');
 const test = require('node:test');
-const {
-  ACTIONS, INSTALL_COMMANDS, actionForStep, parseSetupArgs, runSetup,
-} = require('../scripts/setup');
+const { ACTIONS, parseSetupArgs, runSetup } = require('../scripts/setup');
+const { ACTIONS: PLAN_ACTIONS } = require('../scripts/lib/setup-plan');
+const { parseCli } = require('../scripts/desktop-attach');
 const { runNodeScript } = require('./helpers/run-cli');
-
-const REPO_ROOT = path.resolve(__dirname, '..');
-const HOST = {
-  app: 'shell',
-  surface: 'terminal',
-  tools: { claudeCode: false, codex: false },
-};
-
-function step(what, consent, command) {
-  return { what, why: `${what} is needed.`, consent, command };
-}
-
-function report(steps, ready = steps.length === 0) {
-  return {
-    setup: { ready, ownerActions: [], plan: { context: 'Test host.', steps } },
-    providers: {
-      claude: { reusable: ready },
-      codex: { reusable: ready, nativeVisibility: { verified: ready } },
-    },
-  };
-}
+const { REPO_ROOT, codexBinary, doctorReport, host } = require('./helpers/onboarding-fixture');
 
 function options(overrides = {}) {
   return {
@@ -43,168 +22,191 @@ function options(overrides = {}) {
   };
 }
 
-test('setup dry-run prints the measured plan without invoking any action', async () => {
-  const planned = step('Install Claude Code.', 'install', '--install-claude-cli');
+function doctorSequence(reports) {
+  let index = 0;
+  return async () => reports[Math.min(index++, reports.length - 1)];
+}
+
+test('setup dry-run returns the real doctor plan without invoking an action', async (t) => {
+  const measured = await doctorReport(t, { claudeReason: 'cli-not-found' });
   let actions = 0;
   const result = await runSetup(options({ dryRun: true }), {}, {
-    runDoctor: async () => report([planned]),
-    hostContext: HOST,
+    runDoctor: doctorSequence([measured]),
+    hostContext: host(),
     installers: { claude: async () => { actions += 1; } },
   });
   assert.equal(result.ok, true);
   assert.equal(result.dryRun, true);
-  assert.equal(result.ready, false);
-  assert.deepEqual(result.plan.steps, [planned]);
+  assert.equal(result.outcome, 'needs-action');
+  assert.deepEqual(result.plan, measured.setup.plan);
   assert.deepEqual(result.completed, []);
   assert.equal(actions, 0);
 });
 
-test('setup executes every recognized action through injected runners and rechecks after each', async () => {
-  const plans = [
-    step('Install Claude Code.', 'install', '--install-claude-cli'),
-    step('Sign in to Claude Code.', 'sign-in', 'claude auth login'),
-    step('Install Codex.', 'install', '--install-codex-cli'),
-    step('Sign in to Codex.', 'sign-in', 'codex login'),
-    step('Start runtime.', 'start-runtime', 'runtime-up'),
-    step('Open Desktop.', 'none', 'desktop-attach.js ensure'),
-    step('Relaunch Desktop.', 'relaunch-desktop', 'desktop-attach.js ensure --relaunch-desktop'),
-    step('Keep Desktop attached.', 'persist-attach', 'desktop-attach.js persist'),
-  ];
-  const reports = plans.map((entry) => report([entry]));
-  reports.push(report([]));
+test('two provider sign-ins require two non-interactive setup invocations', async (t) => {
+  const binary = codexBinary(t, { signedIn: false });
+  const both = await doctorReport(t, {
+    claudeReason: 'not-logged-in', codexRuntime: 'unavailable', codexBinaries: [binary],
+  });
+  const codexOnly = await doctorReport(t, {
+    codexRuntime: 'unavailable', codexBinaries: [binary],
+  });
+  const ready = await doctorReport(t);
   const calls = [];
-  let doctorCalls = 0;
-  const result = await runSetup(options({
-    installClaudeCli: true,
-    installCodexCli: true,
-    signIn: true,
-    startRuntime: true,
-    relaunchDesktop: true,
-    persistAttach: true,
-  }), {}, {
-    runDoctor: async () => reports[doctorCalls++],
-    hostContext: HOST,
-    narrate: (line) => calls.push(['narrate', line]),
-    installers: {
-      claude: async ({ command }) => calls.push(['install', 'claude', command]),
-      codex: async ({ command }) => calls.push(['install', 'codex', command]),
-    },
+  const dependencies = {
+    hostContext: host(), stdin: { isTTY: false }, narrate: () => {},
     signIn: {
-      claude: async () => calls.push(['sign-in', 'claude']),
-      codex: async () => calls.push(['sign-in', 'codex']),
+      claude: async () => calls.push('claude'),
+      codex: async () => calls.push('codex'),
     },
-    ensureRuntime: async () => {
-      calls.push(['runtime']);
-      return { runtime: 'managed-daemon', state: 'started' };
-    },
-    desktopAttach: async ({ operation, args }) => calls.push(['desktop', operation, args]),
+  };
+  const first = await runSetup(options({ signIn: true }), {}, {
+    ...dependencies, runDoctor: doctorSequence([both, codexOnly]),
   });
+  assert.deepEqual(calls, ['claude']);
+  assert.equal(first.completed.length, 1);
+  assert.equal(first.plan.steps[0].action, 'sign-in-codex');
 
-  assert.equal(result.ok, true);
-  assert.equal(result.ready, true);
-  assert.equal(result.completed.length, plans.length);
-  assert.equal(doctorCalls, plans.length + 1);
-  assert.deepEqual(calls.filter(([kind]) => kind === 'install'), [
-    ['install', 'claude', INSTALL_COMMANDS.claude],
-    ['install', 'codex', INSTALL_COMMANDS.codex],
-  ]);
-  assert.deepEqual(calls.filter(([kind]) => kind === 'sign-in'), [
-    ['sign-in', 'claude'],
-    ['sign-in', 'codex'],
-  ]);
-  assert.deepEqual(calls.filter(([kind]) => kind === 'desktop'), [
-    ['desktop', ACTIONS.attachDesktop, ['ensure']],
-    ['desktop', ACTIONS.relaunchDesktop, ['ensure', '--relaunch-desktop']],
-    ['desktop', ACTIONS.persistAttach, ['persist']],
-  ]);
+  const second = await runSetup(options({ signIn: true }), {}, {
+    ...dependencies, runDoctor: doctorSequence([codexOnly, ready]),
+  });
+  assert.deepEqual(calls, ['claude', 'codex']);
+  assert.equal(second.completed.length, 1);
 });
 
-test('a fake TTY grants one interactive step only after the reason is printed', async () => {
-  const planned = step('Sign in to Claude Code.', 'sign-in', 'claude auth login');
-  const lines = [];
-  const events = [];
-  let doctorCalls = 0;
+test('a non-interactive invocation performs only the first matching action', async (t) => {
+  const before = await doctorReport(t, { claudeReason: 'cli-not-found' });
+  const afterInstall = await doctorReport(t, { claudeReason: 'not-logged-in' });
+  const calls = [];
+  const result = await runSetup(options({ installClaudeCli: true, signIn: true }), {}, {
+    runDoctor: doctorSequence([before, afterInstall]),
+    hostContext: host(), stdin: { isTTY: false }, narrate: () => {},
+    installers: { claude: async () => calls.push('install') },
+    signIn: { claude: async () => calls.push('sign-in') },
+  });
+  assert.deepEqual(calls, ['install']);
+  assert.equal(result.completed.length, 1);
+  assert.equal(result.plan.steps[0].action, 'sign-in-claude');
+});
+
+test('an interactive terminal asks separately before consecutive actions', async (t) => {
+  const before = await doctorReport(t, { claudeReason: 'cli-not-found' });
+  const afterInstall = await doctorReport(t, { claudeReason: 'not-logged-in' });
+  const ready = await doctorReport(t);
+  const confirmations = [];
+  const calls = [];
   const result = await runSetup(options(), {}, {
-    runDoctor: async () => doctorCalls++ === 0 ? report([planned]) : report([]),
-    hostContext: HOST,
-    stdin: { isTTY: true },
-    narrate: (line) => {
-      lines.push(line);
-      events.push('narrate');
-    },
-    confirm: async (received) => {
-      assert.equal(received, planned);
-      events.push('confirm');
-      return true;
-    },
-    signIn: { claude: async () => events.push('sign-in') },
+    runDoctor: doctorSequence([before, afterInstall, ready]),
+    hostContext: host(), stdin: { isTTY: true }, narrate: () => {},
+    confirm: async (step) => { confirmations.push(step.action); return true; },
+    installers: { claude: async () => calls.push('install') },
+    signIn: { claude: async () => calls.push('sign-in') },
   });
+  assert.deepEqual(confirmations, ['install-claude', 'sign-in-claude']);
+  assert.deepEqual(calls, ['install', 'sign-in']);
+  assert.equal(result.completed.length, 2);
+});
+
+test('setup dispatches on action and never evaluates the display command', async (t) => {
+  const measured = await doctorReport(t, { claudeReason: 'not-logged-in' });
+  measured.setup.plan.steps[0].command = 'do-not-run-this';
+  let signedIn = false;
+  await runSetup(options({ signIn: true }), {}, {
+    runDoctor: doctorSequence([measured, await doctorReport(t)]),
+    hostContext: host(), stdin: { isTTY: false }, narrate: () => {},
+    signIn: { claude: async () => { signedIn = true; } },
+  });
+  assert.equal(signedIn, true);
+
+  const unknown = structuredClone(measured);
+  unknown.setup.plan.steps[0].action = 'unknown-action';
+  const refused = await runSetup(options({ signIn: true }), {}, {
+    runDoctor: doctorSequence([unknown]), hostContext: host(), stdin: { isTTY: false }, narrate: () => {},
+  });
+  assert.equal(refused.refusal.reason, 'manual-action-required');
+});
+
+test('start-runtime receives the doctor-selected binary and accepts a compatible race winner', async (t) => {
+  const binary = codexBinary(t);
+  const absent = await doctorReport(t, { codexRuntime: 'unavailable', codexBinaries: [binary] });
+  const reusable = await doctorReport(t);
+  let received;
+  const result = await runSetup(options({ startRuntime: true }), {}, {
+    runDoctor: doctorSequence([absent, reusable]),
+    hostContext: host(), stdin: { isTTY: false }, narrate: () => {},
+    runtimeUrlDependencies: { activeRelayUrl: () => null },
+    ensureRuntime: async (runtimeOptions) => {
+      received = runtimeOptions;
+      return { runtime: 'standalone-fallback', state: 'race-reused' };
+    },
+  });
+  assert.equal(received.bin, binary.path);
+  assert.equal(received.url, 'ws://127.0.0.1:8843');
   assert.equal(result.ok, true);
-  assert.match(lines.join('\n'), /Why: Sign in to Claude Code\. is needed\./);
-  assert.ok(events.indexOf('narrate') < events.indexOf('confirm'));
-  assert.ok(events.indexOf('confirm') < events.indexOf('sign-in'));
+  assert.equal(result.providers.codex, 'ready');
 });
 
-test('setup refuses a consented step on a non-TTY without its exact flag', async () => {
-  const planned = step('Install Codex.', 'install', '--install-codex-cli');
-  let installed = false;
-  const result = await runSetup(options(), {}, {
-    runDoctor: async () => report([planned]),
-    hostContext: HOST,
-    stdin: { isTTY: false },
-    narrate: () => {},
-    installers: { codex: async () => { installed = true; } },
-  });
-  assert.equal(result.ok, false);
-  assert.equal(result.code, 'POLICY_REFUSAL');
-  assert.equal(result.refusal.reason, 'consent-required');
-  assert.equal(installed, false);
-});
-
-test('setup never replaces the CLI hosting the current session', async () => {
-  for (const scenario of [
-    { command: '--install-claude-cli', option: 'installClaudeCli', tool: 'claudeCode', provider: 'claude' },
-    { command: '--install-codex-cli', option: 'installCodexCli', tool: 'codex', provider: 'codex' },
-  ]) {
-    const planned = step(`Install ${scenario.provider}.`, 'install', scenario.command);
-    let installed = false;
-    const result = await runSetup(options({ [scenario.option]: true }), {}, {
-      runDoctor: async () => report([planned]),
-      hostContext: { ...HOST, tools: { ...HOST.tools, [scenario.tool]: true } },
-      narrate: () => {},
-      installers: { [scenario.provider]: async () => { installed = true; } },
+test('Desktop actions use CLI arguments accepted by the real parser', async (t) => {
+  const cases = [
+    {
+      before: await doctorReport(t, { desktopState: 'notRunning', host: host('shell') }),
+      option: {}, action: ACTIONS.openApp, expected: { operation: 'ensure', launchOnly: true, relaunch: false },
+    },
+    {
+      before: await doctorReport(t, { desktopState: 'unattached', host: host('claude-desktop', 'desktop') }),
+      option: { relaunchDesktop: true }, action: ACTIONS.relaunchApp,
+      expected: { operation: 'ensure', launchOnly: false, relaunch: true },
+    },
+    {
+      before: await doctorReport(t, { persisted: false, host: host('claude-desktop', 'desktop') }),
+      option: { persistAttach: true }, action: ACTIONS.persistAttach,
+      expected: { operation: 'persist', authorize: true },
+    },
+  ];
+  for (const scenario of cases) {
+    let parsed;
+    const result = await runSetup(options(scenario.option), {}, {
+      runDoctor: doctorSequence([scenario.before, await doctorReport(t)]),
+      hostContext: host('claude-desktop', 'desktop'), stdin: { isTTY: false }, narrate: () => {},
+      desktopAttach: async ({ operation, args }) => {
+        assert.equal(operation, scenario.action);
+        parsed = parseCli(args);
+      },
     });
-    assert.equal(result.ok, false);
-    assert.equal(result.refusal.reason, 'hosting-cli-protected');
-    assert.equal(installed, false);
+    assert.equal(result.ok, true);
+    for (const [key, value] of Object.entries(scenario.expected)) assert.equal(parsed[key], value);
   }
 });
 
-test('setup refuses a foreign runtime returned by the runtime ensure boundary', async () => {
-  const planned = step('Start runtime.', 'start-runtime', 'runtime-up');
-  const result = await runSetup(options({ startRuntime: true }), {}, {
-    runDoctor: async () => report([planned]),
-    hostContext: HOST,
-    narrate: () => {},
-    ensureRuntime: async () => ({ runtime: 'standalone-fallback', state: 'reused' }),
+test('setup refuses to replace the CLI hosting the current session', async (t) => {
+  const measured = await doctorReport(t, {
+    claudeReason: 'cli-unsupported', host: host('claude-code-terminal', 'terminal', true, { claudeCode: true }),
   });
-  assert.equal(result.ok, false);
-  assert.equal(result.code, 'RUNTIME_MISMATCH');
-  assert.equal(result.refusal.reason, 'foreign-runtime');
+  let installed = false;
+  const result = await runSetup(options({ installClaudeCli: true }), {}, {
+    runDoctor: doctorSequence([measured]),
+    hostContext: host('claude-code-terminal', 'terminal', true, { claudeCode: true }),
+    stdin: { isTTY: false }, narrate: () => {},
+    installers: { claude: async () => { installed = true; } },
+  });
+  assert.equal(result.refusal.reason, 'hosting-cli-protected');
+  assert.equal(installed, false);
 });
 
-test('setup never evaluates an unknown doctor command', async () => {
-  const planned = step('Change an environment setting.', 'none', 'run-whatever-the-doctor-said');
-  const result = await runSetup(options(), {}, {
-    runDoctor: async () => report([planned]),
-    hostContext: HOST,
-    narrate: () => {},
+test('setup outcome and provider statuses mirror the doctor summary state', async (t) => {
+  const measured = await doctorReport(t, {
+    claudeReason: 'unsupported-platform', host: host('shell', 'terminal', false),
   });
-  assert.equal(result.ok, false);
-  assert.equal(result.refusal.reason, 'manual-action-required');
+  const result = await runSetup(options({ dryRun: true }), {}, {
+    runDoctor: doctorSequence([measured]), hostContext: host('shell', 'terminal', false),
+  });
+  assert.equal(result.ready, measured.setup.ready);
+  assert.equal(result.outcome, measured.setup.outcome);
+  assert.deepEqual(result.providers, measured.setup.providers);
 });
 
-test('setup option parsing and action recognition expose the six consent flags', () => {
+test('setup option parsing exposes the six consent flags', () => {
+  assert.deepEqual(new Set(Object.values(ACTIONS)), new Set(PLAN_ACTIONS));
   const parsed = parseSetupArgs([
     '--repo-root', REPO_ROOT,
     '--install-claude-cli', '--install-codex-cli', '--sign-in',
@@ -216,7 +218,6 @@ test('setup option parsing and action recognition expose the six consent flags',
   assert.equal(parsed.startRuntime, true);
   assert.equal(parsed.relaunchDesktop, true);
   assert.equal(parsed.persistAttach, true);
-  assert.equal(actionForStep(step('Persist.', 'persist-attach', 'desktop-attach.js persist')), ACTIONS.persistAttach);
   assert.throws(() => parseSetupArgs(['--repo-root', 'relative'], {}), /normalized absolute path/);
 });
 

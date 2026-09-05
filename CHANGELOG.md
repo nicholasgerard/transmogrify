@@ -30,6 +30,11 @@
 - Require an affirmative quiescent provider observation before harvest.
 - Fsync durable handbacks before journaling them as copied and retain one
   immutable content-addressed copy for every distinct harvested handback.
+- Compose doctor observations, typed setup plans, and guided setup execution:
+  distinguish missing Codex binaries, sign-in, and runtime state; execute one
+  non-interactive action per invocation; preserve provider limitations; use
+  launch-only and authorized persistence operations; and keep terminal summary
+  output separate from JSON.
 
 ## 0.6.0
 

@@ -1,6 +1,7 @@
 # Output contract
 
-Every Transmogrify command prints one JSON document. A success goes to stdout
+Every Transmogrify command prints one JSON document, except the explaining
+doctor on an interactive terminal. A success goes to stdout
 and carries `version`, `ok: true`, and `operation`; a failure goes to stderr
 with `ok: false`, a stable `code`, a fixed `message`, and, for lane
 operations, a `delivery` projection (`confirmed`, `notDelivered`, `unknown`,
@@ -72,15 +73,21 @@ value. Persistence refusals may report `currentValue`, `plannedValue`, and
 
 ### `setup`
 
-The guided setup runner reports `dryRun`, `ready`, the doctor's current
-`plan`, `completed` step receipts, and an `apps` summary for Claude Desktop
-and the ChatGPT app. Each completed receipt contains only `what`, `consent`,
-and `outcome`. When setup stops safely, `code`, `message`, and `refusal`
+The guided setup runner reports `dryRun`, `ready`, `outcome`, per-provider
+`providers` statuses, the doctor's current `plan`, `completed` step receipts,
+and an `apps` summary for Claude Desktop and the ChatGPT app. `outcome` is
+`ready`, `ready-with-limitations`, `needs-action`, or `unsupported`.
+Provider status is `ready`, `ready-with-limitations`, `needs-action`,
+`unsupported`, or `not-requested`. Each completed receipt contains only
+`what`, `consent`, and `outcome`. When setup stops safely, `code`, `message`, and `refusal`
 identify the pending step and one plain reason such as `consent-required`,
-`hosting-cli-protected`, `foreign-runtime`, or `manual-action-required`.
+`hosting-cli-protected`, `manual-action-required`, or `step-not-verified`.
 
 The `plan` remains measured rather than inferred: setup reruns the doctor after
-every action. `apps.nextSession` explains that a new session in the other app
+every action. A non-interactive invocation executes exactly the first plan
+step, and only when its matching flag is present; a later step requires a new
+invocation. An interactive terminal can continue, asking separately before
+each consented step. `apps.nextSession` explains that a new session in the other app
 picks up the machine-wide installation. `--dry-run` returns this shape without
 running an installer, sign-in, runtime ensure, attachment, or persistence step.
 
@@ -207,20 +214,27 @@ each `available`, `reconciled`, `results`, `notOk`, `skipped`, and `code`
 when a reconcile threw), `counts`
 (`ownedActive`, `ownedStopped`, `pendingOperations`, `pendingRetirements`,
 `cleanupBlocked`, `unattendedChildren`), `setup` (the doctor's own setup
-block: `ready`, `ownerActions`, and optional `plan`). No provider id, lane id,
+block: `ready`, `outcome`, per-provider `providers`, `ownerActions`, and
+optional `plan`). No provider id, lane id,
 name, or path ever appears in this output.
 
 ## Doctor explanation
 
 `doctor.js --explain` adds `setup.plan`. The plan has `context`, a sentence
 for the current terminal, IDE, or unsupported host when one applies, and
-ordered `steps`. Every step has `what`, `why`, `consent`, and `command`.
+ordered `steps`. Every step has a typed `action`, plus `what`, `why`,
+`consent`, and `command`. A `start-runtime` step also has `binary`, the exact
+supported executable selected from the doctor's observation. `action` is one
+of `install-claude`, `install-codex`, `sign-in-claude`, `sign-in-codex`,
+`start-runtime`, `open-app`, `relaunch-app`, or `persist-attach`.
 `consent` is one of `none`, `install`, `sign-in`, `start-runtime`,
 `relaunch-desktop`, or `persist-attach`. The existing `setup.ownerActions`
-remain unchanged beside the plan. On a terminal, the doctor also prints a
-short `Found`, `Ready`, `Needed`, `Next` summary before the JSON document.
+remain unchanged beside the plan. On a terminal, `--explain` prints only the
+four-line `Found`, `Ready`, `Needed`, `Next` summary. Pass `--json` to print
+the JSON document instead. When stdout is not a terminal, JSON is always
+printed, including with `--explain`.
 The doctor adds `persist-attach` only after Codex Desktop attachment is
-verified and its receipt explicitly reports `persisted: false`. Older or
+verified and `nativeVisibility.persisted` explicitly reports `false`. Older or
 partial receipts with no `persisted` field do not imply that action.
 
 With `--retention`, the result carries `retention` instead of
@@ -241,10 +255,17 @@ Each provider reports `requested`, `available`, `reusable`, `reuse`, `probe`,
 the supported or pre-measured compatibility receipt in `pinned`, and a bounded
 `observed` block. Claude's observed block adds `buildMeasurement` (`result`,
 `source`, `measuredAt`) and `agentListReadable`. Codex's observed block adds
-`compatibility`, `compatibleMethods`, and `failingMethod` when present. Codex
+`compatibility` and `failingMethod` when present. Codex
 also reports `cliBinaries`; each entry contains an executable `path`, discovery
 `sources` (`PATH`, `codex-desktop`, or `TRANSMOGRIFY_BIN`), and the parsed
-`version` or `null`. Those binaries are invoked only with `--version`.
+`version` or `null`, plus `supported`: `true` at version `0.151.0` or newer,
+`false` below it, and `null` when the version could not be read. Codex also
+reports `runtime.state`: `reusable`, `unavailable`, `unsupported`, or
+`sandbox-denied`. An unavailable runtime reports `supportedBinaryAvailable`,
+`accountSignedIn` (`true`, `false`, or `null` when status is unreadable), and
+the selected `binary` when one is supported. Binary discovery invokes only
+`--version`; an unavailable runtime additionally invokes the selected binary
+with read-only `login status`.
 
 An unavailable provider has an `error.code` and `setup`. Setup carries
 `reason`, `blocking`, and `ownerAction`; `cli-unmeasured-failed` additionally
@@ -265,3 +286,5 @@ do not meet the runtime contract use `runtime-unsupported`.
 `providerRetired`, `queued`, `removed`, `state`, `stop`. Lane operations add
 `delivery` and `effect`. Usage errors keep their own text; every other code
 prints the fixed message from `scripts/lib/public-error.js`.
+The `desktop-attach.js` CLI uses the stricter fixed four-field projection for
+all failures and never prints exception details.

@@ -9,7 +9,7 @@
 // app's own quit after explicit or standing owner authorization.
 
 const { parseArgs } = require('node:util');
-const { exitCodeForError, isUsageCode } = require('./lib/public-error');
+const { exitCodeForError, failureBody, publicErrorMessage } = require('./lib/public-error');
 const {
   DEFAULT_ATTACH_TIMEOUT_MS,
   DISABLE_ENV,
@@ -132,6 +132,16 @@ async function main(argv = process.argv.slice(2), env = process.env, dependencie
   return applyPersisted(options, env, dependencies);
 }
 
+function cliFailure(error) {
+  const failure = failureBody(error);
+  return {
+    version: failure.version,
+    ok: failure.ok,
+    code: failure.code,
+    message: publicErrorMessage(failure.code),
+  };
+}
+
 // An unattached observation is a result, not an exception: it prints as JSON and
 // exits 3. A refusal before acting exits 2 and a failure after acting exits 3.
 if (require.main === module) {
@@ -143,16 +153,10 @@ if (require.main === module) {
     console.log(JSON.stringify(result, null, 2));
     if (!result.ok) process.exitCode = 3;
   }).catch((error) => {
-    const code = isUsageCode(error?.code) ? 'USAGE_ERROR' : (error?.code || 'DESKTOP_ATTACH_FAILED');
-    console.log(JSON.stringify({
-      version: 1,
-      ok: false,
-      code,
-      message: error?.message || String(error),
-      ...(error?.details ? { details: error.details } : {}),
-    }, null, 2));
-    process.exitCode = exitCodeForError(code);
+    const failure = cliFailure(error);
+    console.error(JSON.stringify(failure, null, 2));
+    process.exitCode = exitCodeForError(failure.code);
   });
 }
 
-module.exports = { HELP, main, parseCli };
+module.exports = { HELP, cliFailure, main, parseCli };
