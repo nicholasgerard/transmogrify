@@ -40,7 +40,7 @@ endpoint. Add `--url` only to override that selection.
 | `NOT_OWNED`, `RUNTIME_MISMATCH`, `OWNERSHIP_MISMATCH`, `SEAT_MISMATCH`, `EXECUTION_EPOCH_UNBOUND`, `ADAPTER_MISMATCH` | [Ownership or identity refused](#ownership-or-identity-refused) |
 | `DELIVERY_UNCERTAIN` on a Claude steer | [Claude steer delivery is uncertain](#claude-steer-delivery-is-uncertain) |
 | Mobile task fails after a Desktop restart | [Codex mobile Remote access](#codex-mobile-remote-access) |
-| Claude CLI, account, Desktop, or Keychain refusal | [Claude compatibility or authentication problems](#claude-compatibility-or-authentication-problems) |
+| `cli-not-found`, `cli-not-executable`, Claude account, Desktop, or Keychain refusal | [Claude compatibility or authentication problems](#claude-compatibility-or-authentication-problems) |
 | `SPAWN_UNCERTAIN` with `causeCode` `TRANSCRIPT_RECEIPT_PENDING` or `REMOTE_CONTROL_UNAVAILABLE`, `spawnJobAbsent` | [Claude spawn did not verify](#claude-spawn-did-not-verify) |
 | `FORKED_COPY`, `forkedCopyStopped`, `recoveryNotAchieved` | [Claude recovery forked or did not resume](#claude-recovery-forked-or-did-not-resume) |
 | `PENDING_OPERATION`, `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, `NO_PENDING_OPERATION`, `ABANDON_REFUSED`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
@@ -414,6 +414,11 @@ own installer with `claude install`. A newer unknown build is probed once. If
 one of its public JSON or argument-shape checks fails, the doctor reports
 `cli-unmeasured-failed` and names the probe. It never recommends an older
 version. An unsupported Desktop build disables only private native archival.
+
+| Doctor reason | Meaning | Repair |
+| --- | --- | --- |
+| `cli-not-found` | No Claude Code executable was found on `PATH`, or the configured path no longer exists. | Let guided setup install Claude Code, or point `CLAUDE_BIN` at the installed executable, then rerun the doctor. |
+| `cli-not-executable` | Claude Code was found, but its executable could not be read or run with the current permissions. | Reinstall Claude Code, or point `CLAUDE_BIN` at an executable installation, then rerun the doctor. |
 
 Transmogrify sets `DISABLE_UPDATES=1` only in the Claude subprocesses it owns,
 as documented by Anthropic's

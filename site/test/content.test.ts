@@ -43,10 +43,14 @@ describe('the start prompt', () => {
 
   test('preserves the target and private worktree roots before entering install scratch space', () => {
     const rootAssignments = remotePrompt.match(
-      /export REPO_ROOT="\$\(git rev-parse --show-toplevel\)"/g,
+      /REPO_ROOT="\$\(git rev-parse --show-toplevel\)"/g,
     ) ?? [];
+    const rootExports = remotePrompt.match(/export REPO_ROOT/g) ?? [];
     assert.equal(rootAssignments.length, 1);
+    assert.equal(rootExports.length, 1);
+    assert.ok(remotePrompt.indexOf(rootAssignments[0]) < remotePrompt.indexOf(rootExports[0]));
     assert.ok(remotePrompt.indexOf(rootAssignments[0]) < remotePrompt.indexOf('Create a fresh scratch'));
+    assert.doesNotMatch(remotePrompt, /export REPO_ROOT="\$\(git rev-parse --show-toplevel\)"/);
     assert.match(remotePrompt, /--repo-root "\$REPO_ROOT"/);
     assert.match(remotePrompt, /Keep `REPO_ROOT` and `WORKTREES` unchanged/);
   });

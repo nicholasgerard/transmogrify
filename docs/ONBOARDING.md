@@ -76,7 +76,7 @@ Cursor as a supported host in this wave.
 
 | Landing context | Detected by | What happens |
 | --- | --- | --- |
-| Claude Code inside Claude Desktop | `CLAUDECODE` in the environment and a `Claude.app` ancestor of the CLI process | Full setup for both hosts; Codex Desktop attach offered with the reason; Claude lanes and Codex lanes both available. |
+| Claude Code inside Claude Desktop | `CLAUDECODE` in the environment and a `Claude.app` native executable or helper ancestor whose bundle identifier is `com.anthropic.claudefordesktop` | Full setup for both hosts; Codex Desktop attach offered with the reason; Claude lanes and Codex lanes both available. |
 | Claude Code in a terminal (TUI) | `CLAUDECODE`, terminal ancestor (`Terminal.app`, iTerm, tmux, ssh) | Same setup; one sentence up front: this is built for the desktop apps, live streaming shows there, everything else works here. |
 | Codex Desktop (ChatGPT.app) | `CODEX_THREAD_ID` plus the app's private runtime (`hostedByDesktop` in `lib/desktop-attach.js`) | Full setup for both hosts; never relaunch the app from inside it; Claude lanes available; Codex children through the app's own collaboration or a runtime the owner attaches from outside. |
 | Codex TUI in a terminal | `CODEX_THREAD_ID` without the Desktop ancestry | Same as the Claude TUI row. |
@@ -98,11 +98,14 @@ Claude Code CLI:
 - A supported range replaces the single build: a minimum version
   (`2.1.258`, the oldest build whose `-p --cloud` acknowledgement,
   `--settings` hooks, and `agents --json --all` shape are known) and no
-  maximum. A build above the minimum is **measured** once, not refused:
-  `--version`, `auth status --json`, `agents --json --all`, the follow-up
-  acknowledgement shape (dry, against no session), and `--settings`
-  acceptance are probed, and the result is recorded under the state root
-  keyed by the binary's path and SHA-256 (`measured-builds/<sha>.json`).
+  maximum. A build above the minimum is **measured** once, not refused.
+  Version, auth-status JSON, and agent-list JSON are vendor observations.
+  Help checks prove only that `--settings` and the follow-up options are
+  accepted. The acknowledgment parser runs against Transmogrify's own fixture,
+  which is not vendor evidence; live steering still requires an exact vendor
+  acknowledgment and transcript receipt. The result is recorded under the
+  state root keyed by the binary's path and SHA-256
+  (`measured-builds/<sha>.json`).
   A measured build behaves exactly like today's verified build; a build
   that fails a probe is `cli-unsupported` with the failing probe named.
   `VERIFIED_CLI_BUILDS` stays as the pre-measured fast path.
@@ -241,8 +244,8 @@ About a week of agent time across the six steps, most of it in steps 1 and
 4. Risks: vendor installers and version strings change (mitigated by
 measuring instead of pinning, and by reading the official install
 commands at implementation time); a newer CLI could change the follow-up
-acknowledgement or hook behavior (mitigated by the measured-build probes,
-which are the same checks that caught the 2.1.258 acknowledgement change);
+acknowledgement or hook behavior (the measurement checks option acceptance,
+while actual steering fails closed on the vendor acknowledgment and transcript);
 Desktop's bundled CLI may not support `app-server --listen` on every
 version (probe before use).
 

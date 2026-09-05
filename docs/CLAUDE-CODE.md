@@ -293,14 +293,19 @@ invocations, but it is not required for the current lifecycle contract.
 | Desktop `app.asar` SHA-256 | `0fcf5499f5eee77bb769362a3603a4278b5ba9a8ae2620395146afc60c13861f` |
 | Claude for iOS | `1.260828.1` (`33349478298`) |
 
-The public lifecycle adapter requires the minimum version, then probes an
-unknown build's version output, auth-status JSON shape, agent-list JSON shape,
-`--settings` parser support, and public follow-up parser contract. The result
-is cached at `measured-builds/<cli-sha256>.json` under the private state root;
-the record includes the executable path and digest, probe results, and date,
-and is written mode `0600`. A failed cache names the first failed probe and is
-not rerun on every preflight. The account and device/inode identities of the
-default config and projects directories are still checked on every preflight.
+The public lifecycle adapter requires the minimum version, then observes an
+unknown build's version output, auth-status JSON shape, and agent-list JSON
+shape. Separate help checks prove that the CLI accepts `--settings` and the
+public follow-up options. The `follow-up-options` check exercises the
+acknowledgment parser on Transmogrify's own fixture; that fixture is not vendor
+evidence. Actual follow-up delivery remains fail-closed on the exact CLI
+acknowledgment and transcript receipt at steer time. The measurement result is
+cached at `measured-builds/<cli-sha256>.json` under the private state root. The
+record describes its source as `vendor-observations-and-option-checks`, includes
+the executable path and digest, probe results, and date, and is written mode
+`0600`. A failed cache names the first failed check and is not rerun on every
+preflight. The account and device/inode identities of the default config and
+projects directories are still checked on every preflight.
 Both directories must be current-user-owned and not group or world writable;
 symlink traversal fails closed. Private native archival additionally pins the
 pre-measured CLI digest, Desktop version, bundle ID, and `app.asar` hash.

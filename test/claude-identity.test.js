@@ -45,7 +45,7 @@ test('a measured preflight still matches the tuple recorded at spawn', () => {
   const recorded = JSON.parse(JSON.stringify(publicRuntime(runtime(measured))));
   assert.equal(sameRuntime(recorded, runtime({
     ...measured,
-    cliMeasurement: { result: 'good', source: 'live-probe', measuredAt: '2026-09-05T01:00:00.000Z' },
+    cliMeasurement: { result: 'good', source: 'vendor-observations-and-option-checks', measuredAt: '2026-09-05T01:00:00.000Z' },
   })), true);
   assert.equal(sameRuntime(recorded, runtime({ ...measured, cliSha256: 'c'.repeat(64) })), false);
 });
