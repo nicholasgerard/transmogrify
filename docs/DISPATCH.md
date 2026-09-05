@@ -262,8 +262,11 @@ acknowledgement record. The portable fallback is the foreground `wait` loop.
 
 ## Portable harvest contract
 
-Every spawn creates `<seat>/.transmogrify/packet.md` with the caller's spawn
-input verbatim and reserves `<seat>/.transmogrify/handback.md` for the child.
+Every spawn creates `<seat>/.transmogrify/packet.md` exclusively with the
+caller's spawn input verbatim and reserves
+`<seat>/.transmogrify/handback.md` for the child. A same-lane retry may replace
+the packet contents only while the file still has its recorded device and
+inode.
 The repository's private `.git/info/exclude` ignores `.transmogrify/`; the
 public `.gitignore` is never changed. The first provider message begins with
 one fixed preamble naming the exact seat and handback path. It tells the child:
@@ -283,28 +286,37 @@ node "$SKILL_ROOT/scripts/lane.js" harvest \
   --repo-root "$REPO_ROOT" --lane "$LANE_ID" --commit
 ```
 
-`harvest` refuses while the newest provider turn is active. It reads at most
-64 KiB through a no-follow file descriptor, strips control characters, treats
-all remaining content as inert text, validates the required sections and
-commit message, and reports `handback`, `changedFiles`, `head`, and
-`handbackSha256`. With `--commit`, it stages all tracked and untracked seat
-changes except the recorded provisions and `.transmogrify/`, then commits with
-the operator's Git identity and the provider's `Co-Authored-By` trailer.
+`harvest` proceeds only after provider observation reports `idle`, `stopped`,
+`completed`, or `retired`. An absent observation, `unknown`, `executing`, or
+`waiting` refuses and directs the operator to the exact read-only lane status
+command. Harvest reads at most 64 KiB through a no-follow file descriptor,
+strips control characters, treats all remaining content as inert text,
+validates the required sections and commit message, and reports `handback`,
+`changedFiles`, `head`, and `handbackSha256`. With `--commit`, it stages all
+tracked and untracked seat changes except the recorded provisions and
+`.transmogrify/`, then commits with the operator's Git identity and the
+provider's `Co-Authored-By` trailer.
 
-The accepted handback is copied owner-only to
-`<state root>/harvests/<lane-id>/handback.md`. By default the recorded
-provisions are then removed; `--no-provisioned-cleanup` defers that removal.
-The command prints the exact `retire` command carrying the digest. Its
-monotonic journal records staging, commit dispatch, durable copy, and cleanup,
-so rerunning the same harvest recovers a crash between commit and copy without
-making a second commit.
+The accepted handback is fsynced owner-only to the immutable
+`<state root>/harvests/<lane-id>/<handback-sha256>.md` and then to
+`handback.md` as the latest copy. Each rename is followed by a directory
+fsync. A copied journal cannot advance unless both digests still match. By
+default the recorded provisions are then removed;
+`--no-provisioned-cleanup` defers that removal. The command prints the exact
+`retire` command carrying the digest. Its monotonic journal records staging,
+commit dispatch, durable copy, and cleanup, so rerunning the same harvest
+recovers a crash between commit and copy without making a second commit.
 
 When the project checkout has both `package.json` and `node_modules`, a managed
 seat receives `node_modules` as a symlink to the project checkout rather than a
-copy. That symlink and `.transmogrify/` are the only expected provisions. The
-cleanliness census ignores and cleanup removes exactly the entries recorded on
-that seat; every other ignored or untracked path is dirt. Older seat records
-without the field retain the prior all-files-count behavior.
+copy. That symlink and `.transmogrify/` are created only when absent. Each is
+recorded with its kind, device, inode, and symlink target where applicable.
+The cleanliness census excludes an entry only while it matches that receipt.
+Cleanup unlinks only a matching symlink and removes the matching exchange
+directory only when it contains no names except `packet.md` and `handback.md`.
+A replacement or extra file blocks cleanup and preserves the seat. Version
+0.6.0 name-only records exclude nothing and remove nothing automatically;
+their provisions must be removed manually before guarded seat cleanup.
 
 A provider-native read can accelerate inspection, but never replaces this
 worktree exchange or its durable receipt. Handback text is never executed.

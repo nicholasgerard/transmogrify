@@ -132,10 +132,14 @@ Retirement requires a durable output-harvest digest before provider mutation.
 Remove only an operator-managed worktree that was clean at harvest, whose
 current HEAD matches its harvest receipt, and whose current status remains
 clean. The status census includes tracked, untracked, and ignored files; ignored
-output is preserved as data, not treated as disposable. External, dirty,
-changed, ambiguous, or unverified seats remain in place
-for review. Once a harvest or cleanup check observes dirt or changed HEAD, the
-seat permanently blocks automatic cleanup even if it later appears clean.
+output is preserved as data, not treated as disposable. The only exception is
+an operator-created provision with a matching creation receipt. A replaced
+symlink, a replaced exchange directory, or an extra exchange entry is dirt and
+blocks removal. Name-only seat records from version 0.6.0 receive no exception
+and remain on manual provision removal. External, dirty, changed, ambiguous,
+or unverified seats remain in place for review. Once a harvest or cleanup check
+observes dirt or changed HEAD, the seat permanently blocks automatic cleanup
+even if it later appears clean.
 The final census and `git worktree remove` are separate operations. Stop the
 exact owned lane first and prevent other same-user processes from writing into
 the managed seat during retirement; a new ignored file created in that interval

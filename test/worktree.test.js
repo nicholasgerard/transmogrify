@@ -16,8 +16,12 @@ const {
   isPermanentCleanupError,
   materializeManagedSeat,
   planManagedSeat,
+  plannedProvisionedEntries,
+  provisionSeat,
   requireIgnoredManagedRoot,
+  removeProvisionedEntries,
   removeManagedSeat,
+  validateProvisionedEntries,
   verifyRecordedSeat,
   verifyHarvestedSeatForCleanup,
   verifySeat,
@@ -162,7 +166,8 @@ test('managed seats provision exchange and shared dependencies without census di
   const publicIgnore = fs.readFileSync(path.join(fixture.repoRoot, '.gitignore'), 'utf8');
 
   const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
-  assert.deepEqual(seat.provisioned, ['.transmogrify', 'node_modules']);
+  assert.deepEqual(seat.provisioned.map((entry) => entry.name), ['.transmogrify', 'node_modules']);
+  assert.deepEqual(validateProvisionedEntries(seat.provisioned).shape, 'receipts');
   assert.throws(
     () => verifyRecordedSeat(fixture.repoRoot, { ...seat, provisioned: ['../escape'] }),
     /safe top-level relative paths/,
@@ -308,19 +313,86 @@ test('a missing ignored root is accepted and Git metadata roots are refused', (t
   );
 });
 
-test('managed seat intent is durable before materialization and exact retry is idempotent', (t) => {
+test('managed seat intent is durable and a retry without provision receipts is refused', (t) => {
   const fixture = createRepoWithSeat(t);
   const laneId = crypto.randomUUID();
   const intent = planManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
   assert.equal(fs.existsSync(intent.path), false);
   assert.equal(intent.branchRef, `refs/heads/transmogrify/${laneId}`);
   const first = materializeManagedSeat(fixture.repoRoot, intent);
-  const retry = materializeManagedSeat(fixture.repoRoot, intent);
-  assert.deepEqual(retry, first);
+  assert.throws(
+    () => materializeManagedSeat(fixture.repoRoot, intent),
+    /pre-existing lane provision without a creation receipt/,
+  );
+  assert.deepEqual(verifyRecordedSeat(
+    fixture.repoRoot,
+    JSON.parse(JSON.stringify(first)),
+  ), first);
   assert.throws(() => materializeManagedSeat(fixture.repoRoot, {
     ...intent,
     baseCommit: 'f'.repeat(intent.baseCommit.length),
   }), /does not match its durable intent/);
+});
+
+test('an external seat with a pre-existing exchange directory is never adopted', (t) => {
+  const fixture = createRepoWithSeat(t);
+  const exchange = path.join(fixture.seat, '.transmogrify');
+  fs.mkdirSync(exchange);
+  fs.writeFileSync(path.join(exchange, 'owner-output.txt'), 'preserve me\n');
+  const external = {
+    ...verifySeat(fixture.repoRoot, fixture.seat, fixture.worktreesRoot),
+    provisioned: plannedProvisionedEntries(fixture.repoRoot),
+  };
+
+  assert.throws(
+    () => provisionSeat(fixture.repoRoot, external),
+    /pre-existing lane provision without a creation receipt/,
+  );
+  assert.equal(fs.readFileSync(path.join(exchange, 'owner-output.txt'), 'utf8'), 'preserve me\n');
+});
+
+test('a replaced dependency provision is dirt and is never removed', (t) => {
+  const fixture = createRepoWithSeat(t);
+  fs.writeFileSync(path.join(fixture.repoRoot, 'package.json'), '{}\n');
+  execFileSync('git', ['-C', fixture.repoRoot, 'add', 'package.json']);
+  execFileSync('git', ['-C', fixture.repoRoot, 'commit', '-qm', 'add package manifest']);
+  fs.mkdirSync(path.join(fixture.repoRoot, 'node_modules'));
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
+  const dependency = path.join(seat.path, 'node_modules');
+  fs.unlinkSync(dependency);
+  fs.mkdirSync(dependency);
+  const output = path.join(dependency, 'child-output.txt');
+  fs.writeFileSync(output, 'preserve child output\n');
+
+  assert.equal(cleanupStatus(seat.path, seat.provisioned).clean, false);
+  assert.throws(
+    () => removeProvisionedEntries(seat),
+    (error) => isPermanentCleanupError(error) && /changed provisioned entry/.test(error.message),
+  );
+  assert.equal(fs.readFileSync(output, 'utf8'), 'preserve child output\n');
+});
+
+test('an exchange directory with extra output blocks provision cleanup', (t) => {
+  const fixture = createRepoWithSeat(t);
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
+  const output = path.join(seat.path, '.transmogrify', 'unexpected.txt');
+  fs.writeFileSync(output, 'preserve unexpected output\n');
+
+  assert.throws(
+    () => removeProvisionedEntries(seat),
+    (error) => isPermanentCleanupError(error) && /unexpected output/.test(error.message),
+  );
+  assert.equal(fs.readFileSync(output, 'utf8'), 'preserve unexpected output\n');
+});
+
+test('version 0.6.0 name-only provisions stay on manual cleanup', (t) => {
+  const fixture = createRepoWithSeat(t);
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
+  const legacy = seat.provisioned.map((entry) => entry.name);
+  assert.equal(validateProvisionedEntries(legacy).shape, 'legacy-names');
+  assert.equal(cleanupStatus(seat.path, legacy).clean, false);
+  assert.deepEqual(removeProvisionedEntries({ ...seat, provisioned: legacy }), []);
+  assert.equal(fs.existsSync(path.join(seat.path, '.transmogrify')), true);
 });
 
 test('managed cleanup verifies an already-removed exact seat after a crash boundary', (t) => {

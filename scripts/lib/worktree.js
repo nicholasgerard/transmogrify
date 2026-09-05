@@ -411,14 +411,52 @@ function plannedProvisionedEntries(repoRoot) {
   return entries;
 }
 
+function isSafeProvisionedName(name) {
+  return typeof name === 'string' && name && !path.isAbsolute(name) &&
+    name !== '.' && name !== '..' && !name.includes('/') && !name.includes('\\') &&
+    !/[\u0000-\u001f\u007f]/u.test(name);
+}
+
+// Version 0.6.0 stored only names. New records carry creation receipts. The
+// returned shape lets every caller keep the legacy records on their manual
+// path instead of accidentally granting them the newer cleanup behavior.
 function validateProvisionedEntries(entries, label = 'provisioned entries') {
-  if (!Array.isArray(entries) || new Set(entries).size !== entries.length ||
-      entries.some((entry) => typeof entry !== 'string' || !entry ||
-        path.isAbsolute(entry) || entry === '.' || entry === '..' ||
-        entry.includes('/') || entry.includes('\\') || /[\u0000-\u001f\u007f]/u.test(entry))) {
-    throw seatIdentity(`${label} must contain unique safe top-level relative paths`);
+  if (!Array.isArray(entries)) {
+    throw seatIdentity(`${label} must be an array`);
   }
-  return entries;
+  const legacy = entries.length === 0 || entries.every((entry) => typeof entry === 'string');
+  const receipts = entries.length > 0 && entries.every((entry) =>
+    entry && typeof entry === 'object' && !Array.isArray(entry));
+  if (!legacy && !receipts) {
+    throw seatIdentity(`${label} must use either legacy names or creation receipts`);
+  }
+  if (legacy) {
+    if (new Set(entries).size !== entries.length || entries.some((entry) => !isSafeProvisionedName(entry))) {
+      throw seatIdentity(`${label} must contain unique safe top-level relative paths`);
+    }
+    return { shape: 'legacy-names', entries: [...entries] };
+  }
+  const names = new Set();
+  for (const receipt of entries) {
+    const expectedKeys = receipt.kind === 'symlink'
+      ? ['created', 'dev', 'ino', 'kind', 'name', 'target']
+      : ['created', 'dev', 'ino', 'kind', 'name'];
+    const actualKeys = Object.keys(receipt).sort();
+    const supportedEntry =
+      (receipt.name === '.transmogrify' && receipt.kind === 'directory') ||
+      (receipt.name === 'node_modules' && receipt.kind === 'symlink');
+    if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys) ||
+        !isSafeProvisionedName(receipt.name) || names.has(receipt.name) || !supportedEntry ||
+        !['directory', 'symlink'].includes(receipt.kind) || receipt.created !== true ||
+        !Number.isSafeInteger(receipt.dev) || receipt.dev < 0 ||
+        !Number.isSafeInteger(receipt.ino) || receipt.ino < 0 ||
+        (receipt.kind === 'symlink' &&
+          (typeof receipt.target !== 'string' || !path.isAbsolute(receipt.target)))) {
+      throw seatIdentity(`${label} contains an invalid creation receipt`);
+    }
+    names.add(receipt.name);
+  }
+  return { shape: 'receipts', entries: entries.map((entry) => ({ ...entry })) };
 }
 
 function ensureExchangeExclude(project) {
@@ -430,15 +468,52 @@ function ensureExchangeExclude(project) {
   fs.appendFileSync(excludeFile, `${current && !current.endsWith('\n') ? '\n' : ''}.transmogrify/\n`);
 }
 
-function ensureDirectory(target, label) {
-  if (!fs.existsSync(target)) {
-    fs.mkdirSync(target, { mode: 0o700 });
-    return;
-  }
+function directoryReceipt(name, target) {
   const stat = fs.lstatSync(target);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw seatIdentity(`${label} must be a real directory: ${target}`);
+  return { name, kind: 'directory', created: true, dev: stat.dev, ino: stat.ino };
+}
+
+function symlinkReceipt(name, target) {
+  const stat = fs.lstatSync(target);
+  return {
+    name,
+    kind: 'symlink',
+    created: true,
+    target: fs.realpathSync(target),
+    dev: stat.dev,
+    ino: stat.ino,
+  };
+}
+
+function provisionMatchesReceipt(seatPath, receipt) {
+  const target = path.join(seatPath, receipt.name);
+  let stat;
+  try {
+    stat = fs.lstatSync(target);
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
   }
+  if (receipt.kind === 'directory') {
+    return stat.isDirectory() && !stat.isSymbolicLink() &&
+      stat.dev === receipt.dev && stat.ino === receipt.ino;
+  }
+  if (!stat.isSymbolicLink()) return false;
+  try {
+    return fs.realpathSync(target) === receipt.target;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function matchingProvisionedNames(seatPath, provisioned) {
+  if (provisioned === undefined) return [];
+  const validated = validateProvisionedEntries(provisioned);
+  if (validated.shape !== 'receipts') return [];
+  return validated.entries
+    .filter((receipt) => provisionMatchesReceipt(seatPath, receipt))
+    .map((receipt) => receipt.name);
 }
 
 // Provision a materialized seat without copying dependencies. Existing entries
@@ -446,25 +521,47 @@ function ensureDirectory(target, label) {
 function provisionSeat(repoRoot, recorded) {
   const project = resolveProject(repoRoot);
   const seat = verifySeat(project.root, recorded.path, recorded.worktreesRoot);
-  const provisioned = plannedProvisionedEntries(project.root);
-  for (const entry of provisioned) {
+  const planned = plannedProvisionedEntries(project.root);
+  for (const entry of planned) {
     if (git(seat.path, ['ls-files', '--', entry]).trim()) {
       throw seatIdentity(`refusing to provision tracked lane entry: ${entry}`);
     }
   }
-  ensureExchangeExclude(project);
-  ensureDirectory(path.join(seat.path, '.transmogrify'), 'lane exchange directory');
-  if (provisioned.includes('node_modules')) {
-    const source = path.join(project.root, 'node_modules');
-    const target = path.join(seat.path, 'node_modules');
-    if (!pathEntryExists(target)) {
-      fs.symlinkSync(source, target, 'dir');
-    } else {
-      const stat = fs.lstatSync(target);
-      if (!stat.isSymbolicLink() || fs.realpathSync(target) !== fs.realpathSync(source)) {
-        throw seatIdentity(`refusing to replace existing lane dependency entry: ${target}`);
+  const validated = recorded.provisioned === undefined
+    ? null : validateProvisionedEntries(recorded.provisioned);
+  if (validated?.shape === 'receipts') {
+    const receiptsByName = new Map(validated.entries.map((entry) => [entry.name, entry]));
+    if (planned.some((name) => !receiptsByName.has(name))) {
+      throw seatIdentity('lane seat is missing a receipt for a planned provision');
+    }
+    for (const receipt of validated.entries) {
+      if (!provisionMatchesReceipt(seat.path, receipt)) {
+        throw seatIdentity(`lane provision no longer matches its creation receipt: ${receipt.name}`);
       }
     }
+    ensureExchangeExclude(project);
+    return { ...recorded, provisioned: validated.entries };
+  }
+
+  // A name-only record does not prove ownership. It can describe a fresh
+  // external seat before creation, but any existing planned path is refused.
+  for (const name of planned) {
+    const target = path.join(seat.path, name);
+    if (pathEntryExists(target)) {
+      throw seatIdentity(`refusing pre-existing lane provision without a creation receipt: ${name}`);
+    }
+  }
+
+  ensureExchangeExclude(project);
+  const provisioned = [];
+  const exchangeDirectory = path.join(seat.path, '.transmogrify');
+  fs.mkdirSync(exchangeDirectory, { mode: 0o700 });
+  provisioned.push(directoryReceipt('.transmogrify', exchangeDirectory));
+  if (planned.includes('node_modules')) {
+    const source = path.join(project.root, 'node_modules');
+    const target = path.join(seat.path, 'node_modules');
+    fs.symlinkSync(source, target, 'dir');
+    provisioned.push(symlinkReceipt('node_modules', target));
   }
   return { ...recorded, provisioned };
 }
@@ -481,11 +578,13 @@ function verifyRecordedSeat(repoRoot, recorded) {
       throw seatIdentity(`managed lane seat identity changed (${key}): ${recorded.path}`);
     }
   }
-  if (recorded.provisioned !== undefined) validateProvisionedEntries(recorded.provisioned);
+  const provisioned = recorded.provisioned === undefined
+    ? null : validateProvisionedEntries(recorded.provisioned);
   return {
     ...current,
     managed: true,
-    ...(recorded.provisioned === undefined ? {} : { provisioned: [...recorded.provisioned] }),
+    ...(provisioned === null ? {} : { provisioned: provisioned.entries }),
+    ...(recorded.packetReceipt === undefined ? {} : { packetReceipt: { ...recorded.packetReceipt } }),
   };
 }
 
@@ -500,10 +599,12 @@ function verifyLaneSeat(repoRoot, recorded) {
       throw seatIdentity(`lane seat identity changed (${key}): ${recorded.path}`);
     }
   }
-  if (recorded.provisioned !== undefined) validateProvisionedEntries(recorded.provisioned);
+  const provisioned = recorded.provisioned === undefined
+    ? null : validateProvisionedEntries(recorded.provisioned);
   return {
     ...current,
-    ...(recorded.provisioned === undefined ? {} : { provisioned: [...recorded.provisioned] }),
+    ...(provisioned === null ? {} : { provisioned: provisioned.entries }),
+    ...(recorded.packetReceipt === undefined ? {} : { packetReceipt: { ...recorded.packetReceipt } }),
   };
 }
 
@@ -533,8 +634,13 @@ function captureHarvestReceipt(repoRoot, recorded, outputSha256) {
 // The seat's full working-tree census: tracked changes, untracked files, and
 // ignored files. Clean means all three are empty.
 function cleanupStatus(seatPath, provisioned) {
-  const entries = provisioned === undefined ? [] : validateProvisionedEntries(provisioned);
-  const exclusions = entries.flatMap((entry) => [
+  const matched = matchingProvisionedNames(seatPath, provisioned);
+  const validated = provisioned === undefined ? null : validateProvisionedEntries(provisioned);
+  const provisionDirt = validated === null ? [] : validated.entries
+    .map((entry) => typeof entry === 'string' ? entry : entry.name)
+    .filter((name) => pathEntryExists(path.join(seatPath, name)) && !matched.includes(name))
+    .sort();
+  const exclusions = matched.flatMap((entry) => [
     `:(top,exclude)${entry}`,
     `:(top,exclude)${entry}/**`,
   ]);
@@ -545,26 +651,56 @@ function cleanupStatus(seatPath, provisioned) {
     'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.', ...exclusions,
   ]);
   return {
-    clean: visible.length === 0 && ignored.length === 0,
+    clean: visible.length === 0 && ignored.length === 0 && provisionDirt.length === 0,
     sha256: crypto.createHash('sha256')
-      .update('visible\0').update(visible).update('\0ignored\0').update(ignored).digest('hex'),
+      .update('visible\0').update(visible)
+      .update('\0ignored\0').update(ignored)
+      .update('\0provisions\0').update(provisionDirt.join('\0')).digest('hex'),
   };
 }
 
 // Remove only the exact top-level entries recorded as operator provisions.
 // A missing entry is already clean; a symlink is unlinked rather than followed.
 function removeProvisionedEntries(recorded) {
-  const entries = recorded.provisioned === undefined
-    ? [] : validateProvisionedEntries(recorded.provisioned);
-  for (const entry of entries) {
-    const target = path.join(recorded.path, entry);
+  if (recorded.provisioned === undefined) return [];
+  const validated = validateProvisionedEntries(recorded.provisioned);
+  if (validated.shape === 'legacy-names') return [];
+
+  // Prove every entry before unlinking any of them. This avoids a partial
+  // cleanup when one provision was replaced or gained unexpected output.
+  for (const receipt of validated.entries) {
+    const target = path.join(recorded.path, receipt.name);
     if (!pathEntryExists(target)) continue;
-    const stat = fs.lstatSync(target);
-    if (stat.isSymbolicLink() || stat.isFile()) fs.unlinkSync(target);
-    else if (stat.isDirectory()) fs.rmSync(target, { recursive: true });
-    else throw unsafeCleanup(`refusing unsupported provisioned entry: ${target}`);
+    if (!provisionMatchesReceipt(recorded.path, receipt)) {
+      throw unsafeCleanup(`refusing changed provisioned entry: ${target}`);
+    }
+    if (receipt.kind === 'directory') {
+      const children = fs.readdirSync(target);
+      if (children.some((name) => !['packet.md', 'handback.md'].includes(name))) {
+        throw unsafeCleanup(`refusing non-empty exchange directory with unexpected output: ${target}`);
+      }
+      for (const name of children) {
+        const child = path.join(target, name);
+        if (fs.lstatSync(child).isDirectory()) {
+          throw unsafeCleanup(`refusing nested directory in lane exchange: ${child}`);
+        }
+      }
+    }
   }
-  return entries;
+  for (const receipt of validated.entries) {
+    const target = path.join(recorded.path, receipt.name);
+    if (!pathEntryExists(target)) continue;
+    if (!provisionMatchesReceipt(recorded.path, receipt)) {
+      throw unsafeCleanup(`refusing changed provisioned entry: ${target}`);
+    }
+    if (receipt.kind === 'symlink') {
+      fs.unlinkSync(target);
+      continue;
+    }
+    for (const name of fs.readdirSync(target)) fs.unlinkSync(path.join(target, name));
+    fs.rmdirSync(target);
+  }
+  return validated.entries.map((entry) => entry.name);
 }
 
 // Removal is permitted only when the seat was clean at harvest, its identity
@@ -676,6 +812,7 @@ module.exports = {
   createManagedSeat,
   isPermanentCleanupError,
   materializeManagedSeat,
+  matchingProvisionedNames,
   pathEntryExists,
   parseWorktreeList,
   planManagedSeat,
@@ -684,6 +821,7 @@ module.exports = {
   requireIgnoredManagedRoot,
   removeProvisionedEntries,
   removeManagedSeat,
+  validateProvisionedEntries,
   verifyLaneSeat,
   verifyHarvestedSeatForCleanup,
   verifyManagedSeatIntent,

@@ -43,6 +43,7 @@ endpoint. Add `--url` only to override that selection.
 | `cli-not-found`, `cli-not-executable`, Claude account, Desktop, or Keychain refusal | [Claude compatibility or authentication problems](#claude-compatibility-or-authentication-problems) |
 | `SPAWN_UNCERTAIN` with `causeCode` `TRANSCRIPT_RECEIPT_PENDING` or `REMOTE_CONTROL_UNAVAILABLE`, `spawnJobAbsent` | [Claude spawn did not verify](#claude-spawn-did-not-verify) |
 | `FORKED_COPY`, `forkedCopyStopped`, `recoveryNotAchieved` | [Claude recovery forked or did not resume](#claude-recovery-forked-or-did-not-resume) |
+| `TARGET_ACTIVE` during harvest | [Harvest is not quiescent](#harvest-is-not-quiescent) |
 | `PENDING_OPERATION`, `PARENT_EVENT_UNRECORDED`, `LOCAL_STATE_LIMIT`, `LOCAL_LOCK_TIMEOUT`, `NO_PENDING_OPERATION`, `ABANDON_REFUSED`, crash or timeout | [Pending or uncertain operation](#pending-or-uncertain-operation) |
 | `CLEANUP_RETRYABLE`, `CLEANUP_BLOCKED` | [Cleanup is blocked](#cleanup-is-blocked) |
 
@@ -518,6 +519,15 @@ the lane stopped. The stopped fork's local record can be removed with
 `claude rm <job>` after review, and its Remote Control row archived in the
 app.
 
+## Harvest is not quiescent
+
+`TARGET_ACTIVE` during harvest means it did not receive an affirmative provider
+observation of `idle`, `stopped`, `completed`, or `retired`. It also covers an
+absent or `unknown` observation; neither proves that the child has stopped
+writing. Run the exact `lane.js status --lane <lane-id>` command named by the
+refusal. Repair or reconcile provider observation before trying harvest again.
+Do not infer quiescence from a cached lane state.
+
 ## Pending or uncertain operation
 
 Provider mutations are journaled before dispatch. After a crash, timeout, or
@@ -602,6 +612,14 @@ at harvest, is dirty now, changed HEAD after harvest, no longer matches the
 recorded filesystem identity, or is outside its managed root. Once dirt or a
 changed HEAD is observed, automatic deletion remains permanently blocked.
 Ignored files are included in the dirt census and remain preserved.
+
+Provisioned paths are exempt only while their typed creation receipts still
+match. A dependency symlink replaced by a directory, an exchange directory
+with a different device or inode, or any unexpected name inside that directory
+returns `UNSAFE_CLEANUP_STATE` and leaves the seat intact. Version 0.6.0 seats
+store only provision names, so their entries are counted as dirt and are never
+removed automatically. Remove those exact legacy provisions manually only
+after review, then retry the guarded cleanup.
 
 Review and harvest the preserved worktree manually. Do not edit the ownership
 registry to make it appear eligible, and do not run `claude rm` against an

@@ -24,6 +24,12 @@
   login settings, rolls back partial writes, and refuses unowned removal.
 - Mark installer backups with owner-only receipts. Retention now moves only
   valid receipted backups and refuses symlinked trash paths.
+- Receipt every created seat provision and refuse automatic cleanup when an
+  entry was replaced, gained unexpected output, or came from a version 0.6.0
+  name-only record.
+- Require an affirmative quiescent provider observation before harvest.
+- Fsync durable handbacks before journaling them as copied and retain one
+  immutable content-addressed copy for every distinct harvested handback.
 
 ## 0.6.0
 
