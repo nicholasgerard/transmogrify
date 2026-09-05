@@ -30,6 +30,14 @@ from "still going".
    more for every event still unacknowledged, never for acknowledged ones. Subscribing to the app-server's own
    `thread/status/changed` notifications instead of polling is a later
    optimization, not a semantic change.
+The Codex watcher maintains one notification subscription for each endpoint
+recorded by its outstanding owned children. Thread notification filters are
+separate for each endpoint. A removed endpoint closes its subscription.
+Watcher records are bounded, owner-only JSON read without following symlinks.
+The writer uses an exclusive randomized temporary file. Stopping the watcher
+requires an affirmative process identity match; an inspection gap never
+allows a signal.
+
 3. **The wake** (per host). When a round records events worth the
    parent's attention it delivers one short fixed message naming all of
    them into the parent's own session, so the parent's model is re-invoked
@@ -53,6 +61,11 @@ from "still going".
      command line being run (plus `--self-nonce` when supplied). A Codex host
      whose thread is not on the shared runtime (Desktop unattached) has no
      wake channel and falls back to layer 4.
+     Discovery returns `wake.runtime = {url, userAgent}` for the verified
+     endpoint. Delivery requires that saved runtime receipt, uses its endpoint
+     without consulting a default, and refuses a changed runtime user agent.
+     A missing receipt requires rediscovery through `parent-init`.
+
 4. **Foreground or background wait** (exists, improved). `wait` with a positive timeout observes
    every child first, returns pending and new events together, and blocks
    up to thirty minutes; `--timeout-ms 0` returns the durable queue without

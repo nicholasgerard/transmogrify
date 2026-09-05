@@ -13,7 +13,7 @@ const {
 } = require('../scripts/lib/dispatch');
 const { registerLane } = require('../scripts/lib/state');
 const {
-  ensureWatcher, main, outstandingChildren, runWatcher, runningWatcher, watchOnce, watcherPaths,
+  ensureWatcher, main, outstandingChildren, runWatcher, runningWatcher, watchOnce, watcherPaths, readRecord, writeRecord, stopWatcher, createCodexSubscriptions, codexEndpoints,
 } = require('../scripts/watch');
 const { createStateFixture } = require('./helpers/state-fixture');
 
@@ -37,6 +37,23 @@ function parentWithChild(t, options = {}) {
   return { fixture, context: loadParentContext(context.file, fixture.env), dispatch: reserved.dispatch, laneId };
 }
 
+// Obtain the watcher writer's real record, then use that output to model the
+// process boundary. No hand-built saved schema stands in for the producer.
+async function seedWatcher(context, env, pid, birth) {
+  const paths = watcherPaths(context.parent.parentRef, env);
+  let record;
+  await runWatcher({ parentContextFile: context.file }, env, {
+    subscription: null, noSignals: true, processBirth: () => birth,
+    maxRounds: 1, sleep: async () => {},
+    observe: async () => {
+      record = readRecord(paths.record);
+      return { observed: [], errors: [] };
+    },
+  });
+  writeRecord(paths, { ...record, pid });
+  return paths;
+}
+
 // A process table where only the pids in `alive` exist, all born at the same time.
 function processTable(alive) {
   return {
@@ -45,7 +62,7 @@ function processTable(alive) {
   };
 }
 
-test('ensureWatcher starts one detached watcher per parent and reuses a live one', (t) => {
+test('ensureWatcher starts one detached watcher per parent and reuses a live one', async (t) => {
   const { fixture, context } = parentWithChild(t);
   const launches = [];
   const alive = new Set([4242]);
@@ -57,9 +74,7 @@ test('ensureWatcher starts one detached watcher per parent and reuses a live one
   assert.equal(runningWatcher(context.parent.parentRef, fixture.env, deps), null, 'no record until the watcher itself writes one');
 
   // The watcher writes its record; a later ensure sees it running.
-  const paths = watcherPaths(context.parent.parentRef, fixture.env);
-  require('node:fs').mkdirSync(paths.root, { recursive: true, mode: 0o700 });
-  require('node:fs').writeFileSync(paths.record, JSON.stringify({ pid: 4242, processBirth: 'Tue Sep  1 15:00:00 2026', parentRef: context.parent.parentRef }));
+  await seedWatcher(context, fixture.env, 4242, 'Tue Sep  1 15:00:00 2026');
   const second = ensureWatcher(context.file, {}, fixture.env, deps);
   assert.deepEqual(second, { running: true, started: false, pid: 4242 });
   assert.equal(launches.length, 1);
@@ -156,9 +171,7 @@ test('runWatcher records itself, runs bounded rounds, and reports through --stat
 
 test('--stop signals only a watcher whose recorded birth still matches and clears its record', async (t) => {
   const { fixture, context } = parentWithChild(t);
-  const paths = watcherPaths(context.parent.parentRef, fixture.env);
-  require('node:fs').mkdirSync(paths.root, { recursive: true, mode: 0o700 });
-  require('node:fs').writeFileSync(paths.record, JSON.stringify({ pid: 4343, processBirth: 'birth', parentRef: context.parent.parentRef }));
+  const paths = await seedWatcher(context, fixture.env, 4343, 'birth');
   const signals = [];
   const alive = new Set([4343]);
   const deps = { subscription: null,
@@ -274,4 +287,74 @@ test('a Codex notification for an outstanding child triggers an early read; fore
   assert.equal(subscription.connected(), false);
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(clients.length, 2, 'no reconnect after stop');
+});
+
+for (const identity of ['same', 'different', 'unknown']) {
+  test(`watcher stop signals only affirmative identity: ${identity}`, async (t) => {
+    const { fixture, context } = parentWithChild(t);
+    await seedWatcher(context, fixture.env, 4343, 'birth');
+    const signals = [];
+    let alive = true;
+    const result = await stopWatcher(context.file, fixture.env, {
+      kill(pid, signal) {
+        if (!alive) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+        if (signal === 'SIGTERM') { signals.push(pid); alive = false; }
+      },
+      processBirth: () => identity === 'same' ? 'birth' : identity === 'different' ? 'replacement' : null,
+      sleep: async () => {},
+    });
+    assert.deepEqual(signals, identity === 'same' ? [4343] : []);
+    assert.equal(result.stopped, identity === 'same');
+  });
+}
+
+test('watcher records reject symlinks, unsafe modes, oversized data, and invalid shape', async (t) => {
+  const fs = require('node:fs');
+  const { fixture, context } = parentWithChild(t);
+  const paths = await seedWatcher(context, fixture.env, 4343, 'birth');
+  const original = fs.readFileSync(paths.record);
+  assert.equal(fs.statSync(paths.record).mode & 0o777, 0o600);
+  fs.chmodSync(paths.record, 0o644);
+  assert.equal(readRecord(paths.record), null);
+  fs.chmodSync(paths.record, 0o600);
+  fs.writeFileSync(paths.record, '{}');
+  assert.equal(readRecord(paths.record), null);
+  fs.writeFileSync(paths.record, Buffer.alloc(128 * 1024 + 1));
+  assert.equal(readRecord(paths.record), null);
+  fs.writeFileSync(paths.record, original);
+  fs.renameSync(paths.record, `${paths.record}.target`);
+  fs.symlinkSync(`${paths.record}.target`, paths.record);
+  assert.equal(readRecord(paths.record), null);
+  assert.equal(fs.readdirSync(paths.root).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('watcher subscribes to every outstanding child recorded endpoint and scopes notifications per endpoint', async (t) => {
+  const { EventEmitter } = require('node:events');
+  const { updateLane } = require('../scripts/lib/state');
+  const { fixture, context, laneId } = parentWithChild(t);
+  const secondId = crypto.randomUUID();
+  const second = reserveDispatch({ parentContext: context, repoRoot: fixture.repoRoot, laneId: secondId,
+    targetProvider: 'codex', backend: 'codex-app-server', displayName: '::: other child', prompt: 'Work.' }, fixture.env);
+  registerLane(fixture.repoRoot, { laneId: secondId, backend: 'codex-app-server', target: 'codex', providerId: 'other-thread',
+    displayName: '::: other child', state: 'active', runtime: { endpoint: 'ws://127.0.0.1:2/' }, lineage: second.lineage }, fixture.env);
+  const clients = [];
+  const subscription = createCodexSubscriptions({ subscriptionClient(config) {
+    const client = new EventEmitter();
+    Object.assign(client, { config, verifiedRuntime: true, connect: async () => ({}), close: () => client.emit('connection/closed') });
+    clients.push(client);
+    return client;
+  } });
+  t.after(() => subscription.stop());
+  subscription.watch(codexEndpoints(outstandingChildren(context, fixture.env), fixture.env));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(clients.map((client) => client.config.url).sort(), ['ws://127.0.0.1:1/', 'ws://127.0.0.1:2/']);
+  clients[0].emit('notification', { method: 'turn/completed', params: { threadId: 'other-thread' } });
+  assert.equal(subscription.pending(), false);
+  clients[1].emit('notification', { method: 'turn/completed', params: { threadId: 'other-thread' } });
+  assert.equal(subscription.pending(), true);
+  subscription.consume();
+  updateLane(fixture.repoRoot, laneId, { state: 'retireRequested' }, fixture.env);
+  updateLane(fixture.repoRoot, laneId, { state: 'archivedVerified' }, fixture.env);
+  subscription.watch(codexEndpoints(outstandingChildren(context, fixture.env), fixture.env));
+  assert.equal(clients.length, 2, 'the existing endpoint connection is reused');
 });

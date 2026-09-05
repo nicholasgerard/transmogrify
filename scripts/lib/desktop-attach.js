@@ -1,5 +1,7 @@
 'use strict';
 
+const { runtimeUrl } = require('./codex-runtime');
+
 // Codex Desktop attachment.
 //
 // Mechanism (observed on the tested macOS builds below; not an OpenAI-documented
@@ -116,8 +118,7 @@ function resolveRuntimeTarget(options = {}, env = process.env, dependencies = {}
   if (!options.url && !env.TRANSMOGRIFY_URL) {
     relay = readRelay(env, dependencies.relayDependencies || dependencies);
   }
-  const rawUrl = options.url || env.TRANSMOGRIFY_URL || relay?.url ||
-    `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`;
+  const rawUrl = runtimeUrl(options, env, { activeRelayUrl: () => relay?.url });
   const url = validateUrl(rawUrl);
   if (!relay) {
     try {

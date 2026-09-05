@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
+const { runtimeUrl } = require('./lib/codex-runtime');
+
 // Wait for a status transition on exact registry-owned Codex lanes. `--all`
 // means every active lane bound to the selected runtime, never every thread
 // hosted by that runtime. A watched lane's provider cwd must equal its durable
@@ -85,8 +87,7 @@ function parseArgs(argv) {
   const maxMin = Number(maxMinRaw);
   const maxTimerMinutes = Math.floor(2_147_483_647 / 60_000);
   if (maxMin > maxTimerMinutes) usage(`--max-min exceeds the maximum safe Node timer (${maxTimerMinutes} minutes)`);
-  const rawUrl = urlFlag || process.env.TRANSMOGRIFY_URL ||
-    `ws://127.0.0.1:${process.env.TRANSMOGRIFY_PORT || '8843'}`;
+  const rawUrl = runtimeUrl({ url: urlFlag });
   let url;
   try { url = validateUrl(rawUrl); } catch (error) { usage(error.message); }
   return {

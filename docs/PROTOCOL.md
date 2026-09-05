@@ -532,6 +532,31 @@ share it. Both remain unverified until a disposable live acceptance run proves
 process ownership, multi-client notification delivery, and the full native
 lifecycle.
 
+## Runtime compatibility evidence
+
+Lifecycle mutations require both a supported runtime version and a `good`
+compatibility receipt for the connected version. The client measures missing
+or expired evidence before sending a mutation. A failed measurement refuses
+with `RUNTIME_UNSUPPORTED` and names `failingMethod`.
+
+`thread/list` requires a validated successful response. The sentinel probes
+for `turn/steer`, `thread/name/set`, and `thread/archive` require an exact,
+method-specific not-found error containing the nil thread ID. Only error code
+`-32600` with the complete measured message qualifies. Unknown methods,
+missing fields, internal errors, and an unexpected success all fail.
+
+The error patterns were measured on `0.151.0` and `0.153.4`. Other supported
+versions use the newest measured patterns and explicitly identify that fallback
+in the receipt. `thread/turns/list` starts `unmeasured`; it is never probed
+against the nil thread. A validated read after the adapter verifies an exact
+owned thread and its seat records positive turns-list evidence.
+
+Compatibility receipts use `version: 2`. The cache key includes both runtime
+version and probe-set version. Definitive failed measurements expire after
+24 hours. Transport failures and exhausted deadlines never become persistent
+incompatibility. Unmeasured turns-list capability does not fail the required
+probe set. No raw runtime error text is stored in the receipt.
+
 ## Compatibility tuple and verified receipts
 
 | Component | Receipt |

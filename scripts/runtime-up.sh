@@ -8,7 +8,7 @@
 # Env overrides:
 #   TRANSMOGRIFY_BIN   codex binary   (default PATH, then standalone fallback)
 #   TRANSMOGRIFY_URL   fallback URL   (default ws://127.0.0.1:<port>)
-#   TRANSMOGRIFY_PORT  fallback port  (default 8843; ignored when URL is supplied)
+#   TRANSMOGRIFY_PORT  fallback port  (ignored when URL is supplied)
 #   TRANSMOGRIFY_RELAY_PORT relay port (default 8844)
 #   TRANSMOGRIFY_LOG   log file       (default ~/.codex/log/app-server-<port>.log)
 set -euo pipefail
@@ -45,14 +45,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -n "$URL_FLAG" ]; then
-  URL="$URL_FLAG"
-elif [ -n "${TRANSMOGRIFY_URL:-}" ]; then
-  URL="$TRANSMOGRIFY_URL"
-else
-  URL="ws://127.0.0.1:${TRANSMOGRIFY_PORT:-8843}"
-fi
-
 command -v lsof >/dev/null 2>&1 || {
   echo "lsof is required to verify the shared runtime port; refusing to launch" >&2
   exit 1
@@ -69,6 +61,8 @@ command -v node >/dev/null 2>&1 || {
   echo "runtime launcher is missing: $LAUNCHER" >&2
   exit 1
 }
+
+URL="$(env -u NODE_USE_SYSTEM_CA node -e 'const { runtimeUrl } = require(process.argv[1]); process.stdout.write(runtimeUrl({ url: process.argv[2] }));' "$SCRIPT_DIR/lib/codex-runtime.js" "$URL_FLAG")"
 
 BIN="${TRANSMOGRIFY_BIN:-}"
 if [ -z "$BIN" ] && command -v codex >/dev/null 2>&1; then

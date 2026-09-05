@@ -10,6 +10,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { measuredReply } = require('./helpers/measured-codex');
+const { createStateFixture } = require('./helpers/state-fixture');
 const {
   WakeError, deliverWake, discoverClaudeWake, discoverCodexWake, wakeMessage,
 } = require('../scripts/lib/wake');
@@ -65,9 +67,13 @@ test('discoverClaudeWake reports none for sessions without a bridge, foreign rec
 function fakeClient(responses, calls = []) {
   return () => ({
     verifiedRuntime: true,
+    userAgent: 'codex_cli_rs/0.151.0',
     async connect() { return { userAgent: 'codex_cli_rs/0.151.0' }; },
     async call(method, params) {
       calls.push({ method, params });
+      const probe = measuredReply({ method, params });
+      if (probe?.error) throw Object.assign(new Error('mock rejection'), { code: 'RPC_ERROR', rpc: probe.error });
+      if (probe) return probe.result;
       const handler = responses[method];
       if (!handler) throw Object.assign(new Error(`unexpected ${method}`), { code: 'RPC_ERROR' });
       return typeof handler === 'function' ? handler(params) : handler;
@@ -166,7 +172,15 @@ test('wakeMessage names the lane, the kind, and the exact next commands without 
     /completed its task and is idle/);
 });
 
-test('deliverWake sends a Claude follow-up to the recorded bridge and steers or starts a Codex turn', async () => {
+test('deliverWake sends a Claude follow-up to the recorded bridge and steers or starts a Codex turn', async (t) => {
+  const { env } = createStateFixture(t);
+  const discovered = await discoverCodexWake({
+    url: 'ws://127.0.0.1:1', threadIdHint: 'thread_parent001', repoRoot: '/tmp/repo',
+    clientFactory: fakeClient({
+      'thread/read': { thread: { id: 'thread_parent001', cwd: '/tmp/repo' } },
+      'thread/items/list': { data: [{ type: 'commandExecution', command: 'parent-init' }] },
+    }),
+  }, env);
   const sent = [];
   const surface = {
     preflight: () => ({ cliPath: '/opt/claude', cleanEnv: {} }),
@@ -193,9 +207,9 @@ test('deliverWake sends a Claude follow-up to the recorded bridge and steers or 
     'thread/turns/list': { data: [{ id: 'turn-1', status: 'completed' }] },
     'turn/start': { turn: { id: 'turn-2' } },
   }, calls);
-  const started = await deliverWake({ channel: 'codex-thread', threadId: 'thread_parent001', cwd: '/tmp/repo' }, 'wake', {
+  const started = await deliverWake(discovered, 'wake', {
     clientFactory: idle, clientUserMessageId: 'msg-1',
-  }, { TRANSMOGRIFY_URL: 'ws://127.0.0.1:8843' });
+  }, env);
   assert.equal(started.method, 'turn/start');
   const start = calls.find((call) => call.method === 'turn/start');
   assert.equal(start.params.threadId, 'thread_parent001');
@@ -209,16 +223,16 @@ test('deliverWake sends a Claude follow-up to the recorded bridge and steers or 
     'thread/turns/list': { data: [{ id: 'turn-3', status: 'inProgress' }] },
     'turn/steer': { turnId: 'turn-3' },
   }, steerCalls);
-  const steered = await deliverWake({ channel: 'codex-thread', threadId: 'thread_parent001', cwd: '/tmp/repo' }, 'wake', {
+  const steered = await deliverWake(discovered, 'wake', {
     clientFactory: busy,
-  }, { TRANSMOGRIFY_URL: 'ws://127.0.0.1:8843' });
+  }, env);
   assert.equal(steered.method, 'turn/steer');
-  assert.equal(steerCalls.find((call) => call.method === 'turn/steer').params.expectedTurnId, 'turn-3');
+  assert.equal(steerCalls.find((call) => call.method === 'turn/steer' && call.params.threadId === discovered.threadId).params.expectedTurnId, 'turn-3');
 
   const moved = fakeClient({ 'thread/read': { thread: { id: 'thread_parent001', cwd: '/moved' } } });
-  await assert.rejects(() => deliverWake({ channel: 'codex-thread', threadId: 'thread_parent001', cwd: '/tmp/repo' }, 'wake', {
+  await assert.rejects(() => deliverWake(discovered, 'wake', {
     clientFactory: moved,
-  }, { TRANSMOGRIFY_URL: 'ws://127.0.0.1:8843' }), (error) => error.code === 'WAKE_UNDELIVERED');
+  }, env), (error) => error.code === 'WAKE_UNDELIVERED');
 
   await assert.rejects(() => deliverWake({ channel: 'none' }, 'wake'), (error) => error.code === 'WAKE_UNAVAILABLE');
 });

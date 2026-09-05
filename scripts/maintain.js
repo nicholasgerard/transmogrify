@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
+const { runtimeUrl } = require('./lib/codex-runtime');
+
 // A bounded maintenance runner around the read-only doctor and each
 // provider's own exact-owned reconcile. It runs the doctor for the selected
 // targets, then reconciles every provider the doctor reports available; it
@@ -128,8 +130,7 @@ function parseMaintainArgs(argv, env = process.env) {
   let url;
   if (target !== 'claude') {
     try {
-      url = validateUrl(values.url || env.TRANSMOGRIFY_URL ||
-        `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
+      url = validateUrl(runtimeUrl(values, env));
     } catch (error) { usage(error.message); }
   }
   const claudeBin = target === 'codex' ? undefined : (values['claude-bin'] || env.CLAUDE_BIN);

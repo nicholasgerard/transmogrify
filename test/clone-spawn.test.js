@@ -9,6 +9,7 @@ const { exchangePreamble } = require('../scripts/lib/exchange');
 const { listLanes } = require('../scripts/lib/state');
 const { verifyRecordedSeat } = require('../scripts/lib/worktree');
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
+const { measuredReply } = require('./helpers/measured-codex');
 
 test('Codex clone spawn keeps provenance, attributed preamble, and packet order at the provider boundary', async (t) => {
   const fixture = createRepoWithSeat(t);
@@ -32,10 +33,18 @@ test('Codex clone spawn keeps provenance, attributed preamble, and packet order 
     clientFactory(config) {
       return {
         verifiedRuntime: true,
+        runtimeVersion: '0.151.0',
+        userAgent: 'codex_cli_rs/0.151.0',
         runtimeIdentity: { endpoint: new URL(config.url).toString(), codexHome: '/tmp/fixture-codex', platformFamily: 'unix', platformOs: 'test' },
         async connect() { return { userAgent: 'codex_cli_rs/0.151.0' }; },
         close() {},
         async call(method, params) {
+          // The compatibility gate probes the measured runtime before any mutation.
+          const measured = measuredReply({ method, params });
+          if (measured) {
+            if (measured.error) { const error = new Error(measured.error.message); error.code = 'RPC_ERROR'; error.rpc = measured.error; throw error; }
+            return measured.result;
+          }
           calls.push(method);
           if (method === 'model/list') return catalog;
           if (method === 'thread/start') {

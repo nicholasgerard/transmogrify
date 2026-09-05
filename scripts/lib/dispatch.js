@@ -1,5 +1,7 @@
 'use strict';
 
+const { validateUrl, canonicalCodexUserAgent } = require('./app-server');
+
 // Parent/child dispatch lineage and durable delivery: the installation record,
 // parent contexts, dispatch reservations, the bounded provenance block that
 // prefixes a child's first message, monotonic child events, and their
@@ -288,7 +290,7 @@ function validateWake(wake) {
   if (!wake || typeof wake !== 'object' || Array.isArray(wake)) {
     throw new DispatchError('INVALID_LOCAL_STATE', 'parent wake channel is invalid');
   }
-  assertExactKeys(wake, ['channel', 'id', 'cwd', 'receipt'], [], 'parent wake channel');
+  assertExactKeys(wake, ['channel', 'id', 'cwd', 'receipt'], ['runtime'], 'parent wake channel');
   if (!WAKE_CHANNELS.has(wake.channel) ||
       (wake.channel === 'claude-bridge' && !WAKE_BRIDGE_PATTERN.test(wake.id || '')) ||
       (wake.channel === 'codex-thread' && (typeof wake.id !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(wake.id) ||
@@ -296,6 +298,21 @@ function validateWake(wake) {
       (wake.channel === 'none' && wake.id !== null) ||
       !wake.receipt || typeof wake.receipt !== 'object' || Array.isArray(wake.receipt)) {
     throw new DispatchError('INVALID_LOCAL_STATE', 'parent wake channel is invalid');
+  }
+  // Old contexts remain readable, but delivery requires rediscovery when the
+  // endpoint receipt is absent. New receipts must carry a canonical identity.
+  if (wake.runtime !== undefined) {
+    const runtime = wake.runtime;
+    if (wake.channel !== 'codex-thread' || !runtime || typeof runtime !== 'object' || Array.isArray(runtime)) {
+      throw new DispatchError('INVALID_LOCAL_STATE', 'parent wake runtime is invalid');
+    }
+    assertExactKeys(runtime, ['url', 'userAgent'], [], 'parent wake runtime');
+    try {
+      if (validateUrl(runtime.url) !== runtime.url || !runtime.userAgent ||
+          canonicalCodexUserAgent(runtime.userAgent) !== runtime.userAgent) throw new Error('invalid identity');
+    } catch {
+      throw new DispatchError('INVALID_LOCAL_STATE', 'parent wake runtime is invalid');
+    }
   }
   return wake;
 }

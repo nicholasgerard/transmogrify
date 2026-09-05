@@ -3,7 +3,8 @@
 // Codex app-server runtime and thread helpers shared by the lane adapter and
 // its retirement and recovery modules: the selected endpoint, exact ownership
 // and seat checks, the loopback client, thread and turn inspection, and the
-// input-receipt search. Nothing here mutates a thread.
+// input-receipt search. Mutation requests are gated here; lifecycle journals
+// remain in the adapters.
 
 const crypto = require('node:crypto');
 const { requireOwnedLane, requireOwnedProviderLane, updateLane } = require('./state');
@@ -12,6 +13,7 @@ const { activeRelayUrl } = require('./relay');
 const { AdapterError } = require('./adapter-kit');
 const { sleep } = require('./async');
 const { VERSION } = require('./version');
+const { measureCodexCompatibility, recordTurnsListEvidence } = require('./codex-compat');
 const { verifyLaneSeat } = require('./worktree');
 const { boundedCursor, normalizeThreadStatus } = require('./validation');
 
@@ -78,7 +80,7 @@ const TransmogrifyError = AdapterError;
 
 // The selected runtime endpoint: explicit option, TRANSMOGRIFY_URL, the live
 // managed-daemon relay record, then the legacy standalone loopback port.
-function runtimeUrl(options, env = process.env, dependencies = {}) {
+function runtimeUrl(options = {}, env = process.env, dependencies = {}) {
   return options.url || env.TRANSMOGRIFY_URL ||
     (dependencies.activeRelayUrl || activeRelayUrl)(env, dependencies) ||
     `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`;
@@ -182,6 +184,48 @@ function spawnAbsenceGraceMs(options) {
   return graceMs;
 }
 
+const MUTATION_METHODS = new Set([
+  'thread/start', 'turn/start', 'turn/steer', 'thread/name/set', 'thread/archive', 'turn/interrupt',
+]);
+
+function connectedRuntimeVersion(client) {
+  return /\/(\d+\.\d+\.\d+)(?:\s|$)/.exec(client.userAgent || '')?.[1] || '';
+}
+
+// The raw call is private to the measurement, so sentinel probes do not
+// recurse through the mutation gate. All adapter calls use this guarded view.
+function compatibilityClient(client, options = {}, env = process.env) {
+  const rawCall = client.call.bind(client);
+  let measuring;
+  return new Proxy(client, {
+    get(target, key) {
+      if (key === 'recordOwnedTurnsListEvidence') return () => {
+        target.compatibilityReceipt = recordTurnsListEvidence(connectedRuntimeVersion(target), true, { env });
+        return target.compatibilityReceipt;
+      };
+      if (key === 'call') return async (method, params, timeoutMs) => {
+        if (MUTATION_METHODS.has(method)) {
+          const runtimeVersion = connectedRuntimeVersion(target);
+          if (!target.verifiedRuntime) throw new TransmogrifyError('UNVERIFIED_RUNTIME', 'Codex runtime version is unsupported');
+          measuring ||= measureCodexCompatibility({ call: rawCall }, runtimeVersion, {
+            env, timeoutMs: options.timeoutMs, now: options.now,
+          }).finally(() => { measuring = null; });
+          const receipt = await measuring;
+          target.compatibilityReceipt = receipt;
+          if (receipt.result !== 'good' || receipt.runtimeVersion !== runtimeVersion) {
+            throw new TransmogrifyError('RUNTIME_UNSUPPORTED',
+              `Codex compatibility check failed for ${receipt.failingMethod || method}`,
+              { failingMethod: receipt.failingMethod || method });
+          }
+        }
+        return rawCall(method, params, timeoutMs);
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 // Open one app-server connection for the duration of a callback and always
 // close it. A runtime outside the supported version line is UNVERIFIED_RUNTIME
 // and no lifecycle mutation is attempted behind it.
@@ -204,7 +248,7 @@ async function withClient(options, callback, env = process.env) {
     if (!client.verifiedRuntime) {
       throw new TransmogrifyError('UNVERIFIED_RUNTIME', `unsupported Codex app-server ${initialized.userAgent}`);
     }
-    return await callback(client, initialized);
+    return await callback(compatibilityClient(client, options, env), initialized);
   } finally {
     client.close();
   }
@@ -244,7 +288,7 @@ async function readModelCatalog(client) {
 
 // The newest turn only. A not-materialized precondition error means a genuinely
 // empty thread and returns null; every other RPC error propagates.
-async function newestTurn(client, threadId) {
+async function newestTurn(client, threadId, onValidated = () => {}) {
   try {
     const turns = await client.call('thread/turns/list', {
       threadId,
@@ -261,6 +305,7 @@ async function newestTurn(client, threadId) {
         !Array.isArray(turn.items))) {
       throw new TransmogrifyError('PROTOCOL_ERROR', 'thread/turns/list returned an invalid newest turn');
     }
+    onValidated();
     return turn;
   } catch (error) {
     if (error.rpc?.code === -32600 && /not materialized yet/i.test(error.rpc?.message || '')) return null;
@@ -440,7 +485,9 @@ async function inspectThread(client, lane) {
   try { status = normalizeThreadStatus(read.thread.status); } catch {
     throw new TransmogrifyError('PROTOCOL_ERROR', 'thread/read returned an invalid thread status');
   }
-  const turn = await newestTurn(client, lane.providerId);
+  const turn = await newestTurn(client, lane.providerId, () => {
+    client.recordOwnedTurnsListEvidence?.();
+  });
   const thread = { ...read.thread, status };
   return { thread, turn, phase: phaseFor(thread, turn) };
 }
@@ -518,6 +565,8 @@ module.exports = {
   MAX_SPAWN_ABSENCE_GRACE_MS,
   TransmogrifyError,
   runtimeUrl,
+  compatibilityClient,
+  connectedRuntimeVersion,
   ownedLane,
   assertRuntimeIdentity,
   assertSeatIdentity,
