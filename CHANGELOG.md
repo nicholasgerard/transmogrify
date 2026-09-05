@@ -18,6 +18,12 @@
 - Make the published start handoff verify Git, Node.js 20 or newer, npm, a
   committed repository, and a visibly resolved repository root before it
   creates any preparation directory.
+- Record whether a relay was launched or merely adopted. Stop only a launched
+  relay whose live process birth exactly matches its receipt.
+- Make Desktop persistence a receipt-backed transaction that preserves foreign
+  login settings, rolls back partial writes, and refuses unowned removal.
+- Mark installer backups with owner-only receipts. Retention now moves only
+  valid receipted backups and refuses symlinked trash paths.
 
 ## 0.6.0
 

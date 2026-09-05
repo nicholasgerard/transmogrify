@@ -577,10 +577,10 @@ function processGone(owner, dependencies = {}) {
   }
 }
 
-// True when the recorded pid is live and its measured birth still matches. A
-// live pid whose birth cannot be measured counts as matching, so a lock is
-// never reclaimed from a process that may still hold it.
-function processMatches(owner, dependencies = {}) {
+// True when a recorded lock holder may still be alive. A live pid whose birth
+// cannot be measured counts as matching, so a lock is never reclaimed from a
+// process that may still hold it.
+function lockHolderMayBeAlive(owner, dependencies = {}) {
   if (!owner || !Number.isInteger(owner.pid) || owner.pid < 1 || !owner.processBirth) return false;
   const signal = dependencies.kill || process.kill.bind(process);
   const birth = dependencies.processBirth || processBirth;
@@ -604,6 +604,28 @@ function processMatches(owner, dependencies = {}) {
   const observedMs = Date.parse(observed);
   return Number.isFinite(recordedMs) && Number.isFinite(observedMs) &&
     Math.abs(recordedMs - observedMs) <= 2000;
+}
+
+// Backward-compatible lock-only alias. Callers deciding whether to signal a
+// process must use processIdentity and require its affirmative `same` result.
+const processMatches = lockHolderMayBeAlive;
+
+// Affirmatively compare a live process with an ownership receipt. Unlike the
+// conservative lock predicate, an inspection gap is never evidence that a
+// process is safe to signal.
+function processIdentity(owner, dependencies = {}) {
+  if (!owner || !Number.isInteger(owner.pid) || owner.pid < 1 || !owner.processBirth) {
+    return 'unknown';
+  }
+  const signal = dependencies.kill || process.kill.bind(process);
+  try {
+    signal(owner.pid, 0);
+  } catch (error) {
+    return error?.code === 'ESRCH' ? 'gone' : 'unknown';
+  }
+  const observed = (dependencies.processBirth || processBirth)(owner.pid);
+  if (!observed) return 'unknown';
+  return observed === owner.processBirth ? 'same' : 'different';
 }
 
 function sleepSync(milliseconds) {
@@ -2068,7 +2090,9 @@ module.exports = {
   observeLaneStopped,
   ownedProviderLane,
   pendingOperationForLane,
+  lockHolderMayBeAlive,
   processBirth,
+  processIdentity,
   processMatches,
   projectPaths,
   readRegistry,

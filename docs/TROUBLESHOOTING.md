@@ -117,6 +117,12 @@ Codex backups live under `$HOME/.agents/transmogrify-backups/`. Names begin with
 destinations; a failed new copy is also preserved outside discovery as
 `transmogrify.failed-…` for inspection.
 
+Every installer-created backup contains an owner-only
+`.transmogrify-backup.json` receipt. Retention considers only backups with a
+valid receipt and leaves lookalike or unreceipted entries for manual review.
+It refuses a symlinked backup or trash directory and never changes permissions
+through a link.
+
 For a manual rollback, stop if either path is unclear. Select one exact live
 target and one exact backup for the same host, verify both contain `SKILL.md`
 and `.transmogrify-install.json`, move the live target into that host's backup
@@ -243,6 +249,12 @@ is ignored. An occupied relay port is reused only when its TCP endpoint and the
 daemon's Unix socket identify the same runtime and the listener's process birth
 can be measured; otherwise the command refuses without signalling it. Use
 `TRANSMOGRIFY_RELAY_PORT` to choose another deterministic loopback port.
+Such a listener is recorded as adopted so URL selection can reuse it, but stop
+refuses it. A relay is signalled only when its record says Transmogrify launched
+it and a fresh liveness and process-birth check returns an exact match. A legacy
+record without an origin is treated as adopted. Stop reports
+`RELAY_NOT_OWNED` for adopted records and `RELAY_IDENTITY_UNVERIFIED` when the
+launched process does not match or cannot be measured.
 
 When the daemon is unavailable, the standalone launcher refuses non-loopback
 endpoints and never cleans up a process it did not launch and identify exactly.
@@ -304,6 +316,9 @@ reuses an existing attachment as is, including one another operator set up;
 launches Desktop attached when it is not running; and quits and relaunches a
 running unattached Desktop only after the owner authorizes it. A relaunch ends
 whatever the app's private runtime was doing, so ask first.
+`ensure --launch-only` launches only a stopped Desktop against an already-live
+selected relay. It never starts a runtime or relay and returns
+`RELAY_UNAVAILABLE` when no listener is present.
 
 When the selected URL is the managed relay, the receipt includes both the
 Desktop connection to the relay port and the live relay record's daemon socket.
@@ -329,12 +344,16 @@ node "$SKILL_ROOT/scripts/desktop-attach.js" unpersist --dry-run
 node "$SKILL_ROOT/scripts/desktop-attach.js" unpersist --authorize
 ```
 
-`persist` sets `CODEX_APP_SERVER_WS_URL` in the login launch environment and
-writes `~/Library/LaunchAgents/sh.transmogrify.attach.plist`. At login that job
-uses `runtime-up` to ensure the daemon and relay first, then reapplies the
-environment variable. `unpersist` removes only that marked LaunchAgent and
-unsets the variable. Neither command relaunches Desktop; a running app keeps
-its current runtime until the owner separately authorizes a relaunch.
+`persist` first verifies that the LaunchAgent path is empty or already managed
+and that an existing login value is explained by its private persistence
+receipt. It records the previous and applied values, writes the LaunchAgent,
+then changes the login environment. A failed or interrupted transaction removes
+the plist it wrote and restores the previous value. At login the job verifies
+the runtime and receipt before reapplying an unset owned value. `unpersist`
+requires that receipt and restores the previous value only while the current
+value still equals the applied value. Neither command relaunches Desktop; a
+running app keeps its current runtime until the owner separately authorizes a
+relaunch.
 
 | Code | Meaning | Repair |
 | --- | --- | --- |
@@ -342,6 +361,10 @@ its current runtime until the owner separately authorizes a relaunch.
 | `DESKTOP_RELAUNCH_REQUIRED` | Desktop is running unattached and the repair quits it | Run `ensure --relaunch-desktop` after the owner agrees, or set the standing `TRANSMOGRIFY_DESKTOP_RELAUNCH=auto` |
 | `DESKTOP_HOST_SESSION` | The command runs inside a Desktop-hosted session, so the relaunch would end it | Attach from a session outside the app, or spawn Claude lanes and `--allow-protocol-only` Codex lanes |
 | `ATTACHED_ELSEWHERE` | Desktop already streams another loopback Codex runtime | Point `TRANSMOGRIFY_URL` at the reported endpoint instead of competing with it |
+| `FOREIGN_LAUNCH_AGENT` | The persistence path contains a file Transmogrify cannot prove it manages | Inspect the file and choose whether to preserve or remove it manually |
+| `FOREIGN_LOGIN_SETTING` | The current login setting differs from the planned or receipted value | Inspect the reported current and planned values; do not overwrite it by retrying |
+| `PERSISTENCE_NOT_OWNED` | A persistence receipt or managed LaunchAgent is absent or invalid | Inspect the persistence files and repair or remove them manually before retrying |
+| `RELAY_UNAVAILABLE` | A launch-only attachment found no listener at the selected relay | Establish the selected runtime separately, then retry launch-only |
 | `RUNTIME_UNAVAILABLE` | `runtime-up` could not establish a listener on the selected endpoint | Repair the daemon, relay, or standalone runtime, then retry |
 | `ATTACH_TIMEOUT` | Desktop launched but no connection appeared inside the wait window | Re-run `check`; raise `--timeout-ms` if the host is slow to start the app |
 | `DESKTOP_QUIT_TIMEOUT` | Desktop did not exit after its own quit request | Finish or discard the app's open work, then retry |

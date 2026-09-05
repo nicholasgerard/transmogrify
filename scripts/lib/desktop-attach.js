@@ -23,6 +23,7 @@ const { execFile } = require('node:child_process');
 const { validateUrl } = require('./app-server');
 const { inspectListeners } = require('./listeners');
 const { sleep: delay } = require('./async');
+const { atomicWriteJson, stateRoot } = require('./state');
 const {
   DEFAULT_RELAY_HOST,
   DEFAULT_RELAY_PORT,
@@ -46,6 +47,8 @@ const MAX_ELSEWHERE_PORTS = 8;
 const LAUNCH_AGENT_LABEL = 'sh.transmogrify.attach';
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`;
 const LAUNCH_AGENT_MARKER = 'Managed by Transmogrify desktop-attach.js';
+const PERSISTENCE_RECEIPT_VERSION = 1;
+const PERSISTENCE_PHASES = new Set(['prepared', 'plistWritten', 'settingEnvironment', 'applied']);
 
 // Desktop builds on which an attached launch was observed to render and stream
 // Transmogrify lanes live. Documentation for the operator, not a gate: the
@@ -598,6 +601,12 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
   const authorization = options.relaunch === true
     ? 'flag'
     : env[RELAUNCH_ENV] === 'auto' ? 'standing-env' : 'none';
+  if (options.launchOnly === true && !resolveRuntimeTarget(options, env, dependencies).relay) {
+    throw new DesktopAttachError(
+      'the selected relay must already have a live record for a launch-only attachment',
+      'RELAY_UNAVAILABLE',
+    );
+  }
   let selectedOptions = options;
   let initial = await check(selectedOptions, env, dependencies);
   const finished = (action, receipt, warnings = []) => ({
@@ -630,6 +639,12 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
       { suggestedRuntimeUrl: initial.attachment.elsewhere[0].url },
     );
   }
+  if (options.launchOnly === true && state === 'unattached') {
+    throw new DesktopAttachError(
+      'launch-only attachment requires Codex Desktop to be stopped',
+      'DESKTOP_RELAUNCH_REQUIRED',
+    );
+  }
   const warnings = [];
   let action;
   if (state === 'unattached') {
@@ -657,6 +672,12 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
   // appears. Establish the selected runtime first, and adopt runtime-up's relay
   // URL before any quit or launch.
   if (!(await runtimeListeners(run, initial.runtimeUrl, env, dependencies)).length) {
+    if (options.launchOnly === true) {
+      throw new DesktopAttachError(
+        'the selected relay must already be listening for a launch-only attachment',
+        'RELAY_UNAVAILABLE',
+      );
+    }
     const runtime = await runtimeUp({ url: options.url || env.TRANSMOGRIFY_URL || initial.runtimeUrl }, env, dependencies);
     selectedOptions = { ...options, url: runtime.url };
     initial = await check(selectedOptions, env, dependencies);
@@ -750,16 +771,25 @@ ${argumentsXml}
 }
 
 function assertManagedLaunchAgent(file) {
-  if (!fs.existsSync(file)) return false;
-  const stat = fs.lstatSync(file);
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
   if (!stat.isFile() || stat.isSymbolicLink() ||
       (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
-    usage(`refusing an unowned or non-regular LaunchAgent at ${file}`);
+    throw new DesktopAttachError(
+      `refusing an unowned or non-regular LaunchAgent at ${file}`,
+      'FOREIGN_LAUNCH_AGENT',
+    );
   }
   const contents = fs.readFileSync(file, 'utf8');
   if (!contents.includes(`<!-- ${LAUNCH_AGENT_MARKER} -->`) ||
       !contents.includes(`<string>${LAUNCH_AGENT_LABEL}</string>`)) {
-    usage(`refusing to replace a LaunchAgent not owned by Transmogrify at ${file}`);
+    throw new DesktopAttachError(
+      `refusing to replace a LaunchAgent not owned by Transmogrify at ${file}`,
+      'FOREIGN_LAUNCH_AGENT',
+    );
   }
   return true;
 }
@@ -800,6 +830,100 @@ async function launchctl(args, env, dependencies) {
   if (result && result.code !== undefined && result.code !== 0) {
     throw new DesktopAttachError(`launchctl ${args[0]} failed`, 'TOOL_FAILED');
   }
+  return result;
+}
+
+async function launchEnvironmentValue(env, dependencies) {
+  const inspect = dependencies.launchctlGetenv || (dependencies.launchctl
+    ? async (name) => dependencies.launchctl(['getenv', name], env)
+    : async (name) => (dependencies.execFileResult || execFileResult)(
+      '/bin/launchctl', ['getenv', name], { timeoutMs: 5000, env },
+    ));
+  const observed = await inspect(ATTACH_ENV, env);
+  if (typeof observed === 'string') return observed.trim();
+  if (observed === undefined || observed?.code === 1) return '';
+  if (observed?.code === 0) return String(observed.stdout || '').trim();
+  throw new DesktopAttachError('launchctl getenv failed', 'TOOL_FAILED');
+}
+
+function persistenceReceiptPath(env = process.env, dependencies = {}) {
+  const root = dependencies.persistenceStateRoot || stateRoot(env);
+  return path.join(root, 'desktop-attach', 'persistence.json');
+}
+
+function validatePersistenceReceipt(receipt, file) {
+  const keys = receipt && typeof receipt === 'object' && !Array.isArray(receipt)
+    ? Object.keys(receipt).sort() : [];
+  const expected = [
+    'appliedValue', 'phase', 'plistPath', 'previousValue', 'rollbackValue', 'version',
+  ].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index]) ||
+      receipt.version !== PERSISTENCE_RECEIPT_VERSION ||
+      !PERSISTENCE_PHASES.has(receipt.phase) ||
+      (receipt.previousValue !== null && typeof receipt.previousValue !== 'string') ||
+      (receipt.rollbackValue !== null && typeof receipt.rollbackValue !== 'string') ||
+      typeof receipt.appliedValue !== 'string' || !receipt.appliedValue ||
+      receipt.plistPath !== file) {
+    throw new DesktopAttachError('the Desktop persistence receipt is invalid', 'PERSISTENCE_NOT_OWNED');
+  }
+  return receipt;
+}
+
+function readPersistenceReceipt(env, dependencies, file) {
+  const receiptFile = persistenceReceiptPath(env, dependencies);
+  let stat;
+  try { stat = fs.lstatSync(receiptFile); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() ||
+      (typeof process.getuid === 'function' && stat.uid !== process.getuid()) ||
+      (stat.mode & 0o077) !== 0) {
+    throw new DesktopAttachError('the Desktop persistence receipt is unsafe', 'PERSISTENCE_NOT_OWNED');
+  }
+  let receipt;
+  try { receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); } catch {
+    throw new DesktopAttachError('the Desktop persistence receipt is invalid', 'PERSISTENCE_NOT_OWNED');
+  }
+  return validatePersistenceReceipt(receipt, file);
+}
+
+async function writePersistenceReceipt(receipt, env, dependencies) {
+  const write = dependencies.receiptWriter || atomicWriteJson;
+  await write(persistenceReceiptPath(env, dependencies), receipt);
+  return receipt;
+}
+
+async function removePersistenceReceipt(env, dependencies) {
+  const remove = dependencies.receiptRemover || ((file) => fs.unlinkSync(file));
+  try { await remove(persistenceReceiptPath(env, dependencies)); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+async function restoreEnvironmentValue(receipt, currentValue, restoredValue, env, dependencies) {
+  const previousValue = restoredValue || '';
+  if (currentValue === previousValue) return;
+  if (currentValue !== receipt.appliedValue) {
+    throw new DesktopAttachError(
+      `the login-session setting changed to ${currentValue || '(unset)'}`,
+      'FOREIGN_LOGIN_SETTING',
+      { currentValue: currentValue || null, appliedValue: receipt.appliedValue },
+    );
+  }
+  if (restoredValue === null) await launchctl(['unsetenv', ATTACH_ENV], env, dependencies);
+  else await launchctl(['setenv', ATTACH_ENV, restoredValue], env, dependencies);
+}
+
+// Finish the rollback described by an incomplete durable receipt. Environment
+// restoration is allowed only while the current value is still transaction-owned.
+async function recoverInterruptedPersistence(receipt, currentValue, env, dependencies) {
+  if (!receipt || receipt.phase === 'applied') return currentValue;
+  await restoreEnvironmentValue(receipt, currentValue, receipt.rollbackValue, env, dependencies);
+  const remove = dependencies.plistRemover || dependencies.plistWriter?.remove || removeLaunchAgent;
+  await remove(receipt.plistPath);
+  await removePersistenceReceipt(env, dependencies);
+  return receipt.rollbackValue || '';
 }
 
 function persistencePlan(runtimeUrl, env, dependencies) {
@@ -827,8 +951,8 @@ function plannedPersistentUrl(options, env, dependencies) {
   return validateUrl(relayUrl(DEFAULT_RELAY_HOST, port));
 }
 
-// Install the login-session setting now and a per-user LaunchAgent that asks
-// runtime-up to establish the daemon/relay before reapplying it at each login.
+// Install the login-session setting and LaunchAgent as one receipt-backed
+// transaction. No foreign setting or plist is replaced by inference.
 async function persist(options = {}, env = process.env, dependencies = {}) {
   if ((dependencies.platform || process.platform) !== 'darwin') {
     throw new DesktopAttachError('Codex Desktop attachment persistence is available on macOS only', 'UNSUPPORTED_PLATFORM');
@@ -838,17 +962,61 @@ async function persist(options = {}, env = process.env, dependencies = {}) {
     const plan = persistencePlan(plannedPersistentUrl(options, env, dependencies), env, dependencies);
     return { version: 1, ok: true, operation: 'persist', dryRun: true, ...plan };
   }
-  const selected = resolveRuntimeUrl(options, env, dependencies);
-  const runtime = await runtimeUp({ url: selected }, env, dependencies);
-  const plan = persistencePlan(runtime.url, env, dependencies);
-  await launchctl(['setenv', ATTACH_ENV, runtime.url], env, dependencies);
+  const plannedUrl = plannedPersistentUrl(options, env, dependencies);
+  const plan = persistencePlan(plannedUrl, env, dependencies);
+  assertManagedLaunchAgent(plan.launchAgent.path);
+  let currentValue = await launchEnvironmentValue(env, dependencies);
+  let existingReceipt = readPersistenceReceipt(env, dependencies, plan.launchAgent.path);
+  currentValue = await recoverInterruptedPersistence(existingReceipt, currentValue, env, dependencies);
+  if (existingReceipt?.phase !== 'applied') existingReceipt = null;
+  if (currentValue && currentValue !== plannedUrl && existingReceipt?.appliedValue !== currentValue) {
+    throw new DesktopAttachError(
+      `persist would replace the login-session setting ${currentValue} with ${plannedUrl}`,
+      'FOREIGN_LOGIN_SETTING',
+      { currentValue, plannedValue: plannedUrl },
+    );
+  }
+  const runtime = await runtimeUp({ url: plannedUrl }, env, dependencies);
+  if (runtime.url !== plannedUrl) {
+    throw new DesktopAttachError('runtime-up selected a different persistence endpoint', 'RUNTIME_MISMATCH');
+  }
+  const previousValue = existingReceipt?.phase === 'applied'
+    ? existingReceipt.previousValue : (currentValue || null);
+  let receipt = {
+    version: PERSISTENCE_RECEIPT_VERSION,
+    previousValue,
+    rollbackValue: currentValue || null,
+    appliedValue: runtime.url,
+    plistPath: plan.launchAgent.path,
+    phase: 'prepared',
+  };
+  let transactionStarted = false;
   try {
+    await writePersistenceReceipt(receipt, env, dependencies);
+    transactionStarted = true;
     const write = typeof dependencies.plistWriter === 'function'
       ? dependencies.plistWriter
       : dependencies.plistWriter?.write || writeLaunchAgent;
     await write(plan.launchAgent.path, plan.launchAgent.contents);
+    receipt = await writePersistenceReceipt({ ...receipt, phase: 'plistWritten' }, env, dependencies);
+    receipt = await writePersistenceReceipt({ ...receipt, phase: 'settingEnvironment' }, env, dependencies);
+    await launchctl(['setenv', ATTACH_ENV, runtime.url], env, dependencies);
+    receipt = await writePersistenceReceipt({ ...receipt, phase: 'applied' }, env, dependencies);
   } catch (error) {
-    try { await launchctl(['unsetenv', ATTACH_ENV], env, dependencies); } catch {}
+    if (transactionStarted) {
+      try {
+        const observed = await launchEnvironmentValue(env, dependencies);
+        await restoreEnvironmentValue(receipt, observed, receipt.rollbackValue, env, dependencies);
+        const remove = dependencies.plistRemover || dependencies.plistWriter?.remove || removeLaunchAgent;
+        await remove(plan.launchAgent.path);
+        await removePersistenceReceipt(env, dependencies);
+      } catch (rollbackError) {
+        throw new DesktopAttachError(
+          `persistence failed and rollback could not complete: ${rollbackError.message}`,
+          'PERSISTENCE_ROLLBACK_FAILED',
+        );
+      }
+    }
     throw error;
   }
   return {
@@ -859,10 +1027,12 @@ async function persist(options = {}, env = process.env, dependencies = {}) {
     runtimeUrl: runtime.url,
     launchctl: plan.launchctl,
     launchAgent: { path: plan.launchAgent.path, written: true },
+    persistence: { phase: receipt.phase },
   };
 }
 
-// Remove only the exact managed plist, then clear the login-session setting.
+// Reverse only the exact applied receipt, restoring a pre-existing value when
+// one was present before Transmogrify's transaction.
 async function unpersist(options = {}, env = process.env, dependencies = {}) {
   if ((dependencies.platform || process.platform) !== 'darwin') {
     throw new DesktopAttachError('Codex Desktop attachment persistence is available on macOS only', 'UNSUPPORTED_PLATFORM');
@@ -879,31 +1049,72 @@ async function unpersist(options = {}, env = process.env, dependencies = {}) {
       launchAgent: { path: file, remove: true },
     };
   }
+  if (!assertManagedLaunchAgent(file)) {
+    throw new DesktopAttachError('the managed LaunchAgent is absent', 'PERSISTENCE_NOT_OWNED');
+  }
   const remove = dependencies.plistRemover || dependencies.plistWriter?.remove || removeLaunchAgent;
+  const receipt = readPersistenceReceipt(env, dependencies, file);
+  if (!receipt || receipt.phase !== 'applied') {
+    throw new DesktopAttachError('no completed Transmogrify persistence receipt exists', 'PERSISTENCE_NOT_OWNED');
+  }
+  const currentValue = await launchEnvironmentValue(env, dependencies);
+  if (currentValue !== receipt.appliedValue) {
+    throw new DesktopAttachError(
+      `the login-session setting is ${currentValue || '(unset)'}, not the value in the receipt`,
+      'FOREIGN_LOGIN_SETTING',
+      { currentValue: currentValue || null, appliedValue: receipt.appliedValue },
+    );
+  }
   const removed = await remove(file);
-  await launchctl(['unsetenv', ATTACH_ENV], env, dependencies);
+  if (removed === false) {
+    throw new DesktopAttachError('the managed LaunchAgent was not removed', 'PERSISTENCE_NOT_OWNED');
+  }
+  await restoreEnvironmentValue(receipt, currentValue, receipt.previousValue, env, dependencies);
+  await removePersistenceReceipt(env, dependencies);
   return {
     version: 1,
     ok: true,
     operation: 'unpersist',
     dryRun: false,
-    launchctl: ['launchctl', 'unsetenv', ATTACH_ENV],
-    launchAgent: { path: file, removed: removed !== false },
+    launchctl: receipt.previousValue === null
+      ? ['launchctl', 'unsetenv', ATTACH_ENV]
+      : ['launchctl', 'setenv', ATTACH_ENV, receipt.previousValue],
+    launchAgent: { path: file, removed: true },
   };
 }
 
 // Private LaunchAgent entrypoint. Its order is the contract: the runtime and
-// relay are verified before the GUI environment can point Desktop at them.
+// relay are verified before the still-owned login environment is reapplied.
 async function applyPersisted(options = {}, env = process.env, dependencies = {}) {
   const selected = resolveRuntimeUrl(options, env, dependencies);
+  const file = persistencePath(env, dependencies);
+  if (!assertManagedLaunchAgent(file)) {
+    throw new DesktopAttachError('the managed LaunchAgent is absent', 'PERSISTENCE_NOT_OWNED');
+  }
+  const receipt = readPersistenceReceipt(env, dependencies, file);
+  if (!receipt || receipt.phase !== 'applied' || receipt.appliedValue !== selected) {
+    throw new DesktopAttachError('the requested persisted setting has no matching receipt', 'PERSISTENCE_NOT_OWNED');
+  }
   const runtime = await runtimeUp({ url: selected }, env, dependencies);
-  await launchctl(['setenv', ATTACH_ENV, runtime.url], env, dependencies);
+  if (runtime.url !== receipt.appliedValue) {
+    throw new DesktopAttachError('runtime-up selected a different persisted endpoint', 'RUNTIME_MISMATCH');
+  }
+  const currentValue = await launchEnvironmentValue(env, dependencies);
+  if (currentValue && currentValue !== receipt.appliedValue) {
+    throw new DesktopAttachError(
+      `the login-session setting changed to ${currentValue}`,
+      'FOREIGN_LOGIN_SETTING',
+      { currentValue, appliedValue: receipt.appliedValue },
+    );
+  }
+  if (!currentValue) await launchctl(['setenv', ATTACH_ENV, runtime.url], env, dependencies);
   return {
     version: 1,
     ok: true,
     operation: 'apply-persisted',
     runtimeUrl: runtime.url,
     runtimeReadyBeforeEnvironment: true,
+    environmentChanged: !currentValue,
   };
 }
 
@@ -924,6 +1135,7 @@ module.exports = {
   parseEstablishedConnections,
   persist,
   persistencePath,
+  persistenceReceiptPath,
   resolveRuntimeTarget,
   resolveRuntimeUrl,
   stableNodePath,

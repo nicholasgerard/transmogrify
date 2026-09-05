@@ -11,7 +11,8 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
-  BACKUP_ENTRY_PATTERN, DEFAULT_KEEP_BACKUPS, DEFAULT_KEEP_DAYS, backupRoots, runRetention,
+  BACKUP_ENTRY_PATTERN, BACKUP_RECEIPT_FILE, DEFAULT_KEEP_BACKUPS, DEFAULT_KEEP_DAYS,
+  backupRoots, runRetention,
 } = require('../scripts/lib/retention');
 const { beginOperation, projectPaths, registerLane } = require('../scripts/lib/state');
 const { createStateFixture } = require('./helpers/state-fixture');
@@ -45,6 +46,18 @@ function isolatedHome(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-retention-home-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   return home;
+}
+
+function installerBackup(root, transaction) {
+  const entry = path.join(root, `transmogrify.backup-${transaction}`);
+  fs.mkdirSync(entry);
+  fs.writeFileSync(path.join(entry, BACKUP_RECEIPT_FILE), `${JSON.stringify({
+    version: 1,
+    transaction,
+    createdAt: '2026-09-01T00:00:00.000Z',
+    source: '/Users/tester/.agents/skills/transmogrify',
+  })}\n`, { mode: 0o600 });
+  return entry;
 }
 
 test('a terminal, worktree-released journal past the keep-days window is a dry-run candidate and then moves to recoverable trash', (t) => {
@@ -144,11 +157,11 @@ test('installer backups beyond the newest keep-backups per root move to trash; u
   fs.mkdirSync(agentsRoot, { recursive: true });
   const now = Date.now();
   ['a', 'b', 'c', 'd'].forEach((name, index) => {
-    const entry = path.join(claudeRoot, `transmogrify.backup-${name}`);
-    fs.mkdirSync(entry);
+    const entry = installerBackup(claudeRoot, name);
     const stamp = new Date(now + index * 1000);
     fs.utimesSync(entry, stamp, stamp);
   });
+  fs.mkdirSync(path.join(claudeRoot, 'transmogrify.backup-unreceipted'));
   fs.mkdirSync(path.join(claudeRoot, 'transmogrify.failed-x'));
   fs.mkdirSync(path.join(claudeRoot, 'codex-operator.legacy-unrelated'));
 
@@ -164,6 +177,7 @@ test('installer backups beyond the newest keep-backups per root move to trash; u
   assert.equal(fs.existsSync(path.join(claudeRoot, 'transmogrify.backup-b')), false);
   assert.equal(fs.existsSync(path.join(claudeRoot, 'transmogrify.backup-c')), true);
   assert.equal(fs.existsSync(path.join(claudeRoot, 'transmogrify.backup-d')), true);
+  assert.equal(fs.existsSync(path.join(claudeRoot, 'transmogrify.backup-unreceipted')), true);
   assert.equal(fs.existsSync(path.join(claudeRoot, 'transmogrify.failed-x')), true);
   assert.equal(fs.existsSync(path.join(claudeRoot, 'codex-operator.legacy-unrelated')), true);
   assert.equal(fs.existsSync(path.join(claudeRoot, 'trash', isoToday(), 'transmogrify.backup-a')), true);
@@ -174,6 +188,28 @@ test('installer backups beyond the newest keep-backups per root move to trash; u
   fs.rmSync(agentsRoot, { recursive: true, force: true });
   const afterRemovedRoot = runRetention({ repoRoot: fixture.repoRoot, dryRun: true, keepBackups: 2 }, env);
   assert.deepEqual(afterRemovedRoot.backups, { candidates: 0, moved: 0 });
+});
+
+test('retention refuses a symlinked trash path without chmod or moving a receipted backup', (t) => {
+  const fixture = createStateFixture(t);
+  const home = isolatedHome(t);
+  const env = { ...fixture.env, HOME: home };
+  const root = path.join(home, '.claude', 'transmogrify-backups');
+  fs.mkdirSync(root, { recursive: true });
+  const old = installerBackup(root, 'old');
+  const newest = installerBackup(root, 'new');
+  fs.utimesSync(old, new Date('2026-01-01T00:00:00.000Z'), new Date('2026-01-01T00:00:00.000Z'));
+  fs.utimesSync(newest, new Date('2026-01-02T00:00:00.000Z'), new Date('2026-01-02T00:00:00.000Z'));
+  const outside = path.join(home, 'outside-trash');
+  fs.mkdirSync(outside, { mode: 0o755 });
+  fs.chmodSync(outside, 0o755);
+  fs.symlinkSync(outside, path.join(root, 'trash'));
+
+  const result = runRetention({ repoRoot: fixture.repoRoot, keepBackups: 1 }, env);
+  assert.deepEqual(result.backups, { candidates: 1, moved: 0 });
+  assert.equal(fs.existsSync(old), true);
+  assert.equal(fs.statSync(outside).mode & 0o777, 0o755);
+  assert.deepEqual(fs.readdirSync(outside), []);
 });
 
 test('retention defaults and the backup-root/entry-name rules match install.js', (t) => {
