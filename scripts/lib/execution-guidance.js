@@ -6,7 +6,7 @@
 // profile resolver still validates everything here against a live or pinned
 // catalog. Guidance never maps an intent to premium Fast.
 
-const GUIDANCE_VERSION = '2026-09-02';
+const GUIDANCE_VERSION = '2026-09-05';
 
 // Operator-facing descriptions surfaced by the capabilities command. These are
 // advice, not constraints: the catalog decides what is actually selectable.
@@ -96,6 +96,11 @@ const CLAUDE_EXECUTION_SETTING_DESCRIPTORS = Object.freeze([
 
 const CODEX_MODEL_DESCRIPTORS = Object.freeze([
   Object.freeze({
+    selector: 'gpt-6-astra',
+    label: 'GPT-6 Astra',
+    useWhen: 'Complex, ambiguous, or high-value work needs the strongest reasoning and the runtime offers it.',
+  }),
+  Object.freeze({
     selector: 'gpt-5.6-sol',
     label: 'GPT-5.6 Sol',
     useWhen: 'Complex, open-ended, ambiguous, difficult, or high-value work needs the strongest analysis and polish.',
@@ -180,10 +185,16 @@ const CODEX_GUIDANCE = Object.freeze({
     documentation: 'https://learn.chatgpt.com/docs/models',
   }),
   intents: Object.freeze({
-    'fast-loop': Object.freeze({ model: 'gpt-5.6-luna', effort: 'low' }),
-    balanced: Object.freeze({ model: 'gpt-5.6-terra', effort: 'medium' }),
-    deep: Object.freeze({ model: 'gpt-5.6-sol', effort: 'high' }),
-    'max-quality': Object.freeze({ model: 'gpt-5.6-sol', effort: 'max' }),
+    'fast-loop': Object.freeze({ models: Object.freeze(['gpt-5.6-luna']), effort: 'low' }),
+    balanced: Object.freeze({ models: Object.freeze(['gpt-5.6-terra']), effort: 'medium' }),
+    deep: Object.freeze({
+      models: Object.freeze(['gpt-6-astra', 'gpt-5.6-sol']),
+      effort: 'high',
+    }),
+    'max-quality': Object.freeze({
+      models: Object.freeze(['gpt-6-astra', 'gpt-5.6-sol']),
+      effort: 'max',
+    }),
   }),
   speeds: Object.freeze({ standard: 'default', fast: 'priority' }),
 });
@@ -216,7 +227,7 @@ const CODEX_SELECTION_GUIDE = Object.freeze({
     Object.freeze({
       id: 'ultra',
       effort: 'ultra',
-      useWhen: 'The work can be split into meaningful parallel parts; this is a provider-specific multi-agent mode, not merely deeper single-agent reasoning.',
+      useWhen: 'The hardest high-value work justifies the strongest available reasoning even though it costs the most.',
     }),
   ]),
   executionSettings: Object.freeze([]),
