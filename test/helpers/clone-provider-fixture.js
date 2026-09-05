@@ -1,5 +1,6 @@
 'use strict';
 
+const { measuredReply } = require('./measured-codex');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -31,6 +32,7 @@ async function createCloneProviderFixture(t, externalSeat) {
     clientFactory(config) {
       return {
         verifiedRuntime: true,
+        userAgent: 'codex_cli_rs/0.151.0',
         runtimeIdentity: {
           endpoint: new URL(config.url).toString(), codexHome: '/tmp/fixture-codex',
           platformFamily: 'unix', platformOs: 'test',
@@ -38,6 +40,12 @@ async function createCloneProviderFixture(t, externalSeat) {
         async connect() { return { userAgent: 'codex_cli_rs/0.151.0' }; },
         close() {},
         async call(method, params) {
+          // The compatibility gate probes the measured runtime before any mutation.
+          const measured = measuredReply({ method, params });
+          if (measured) {
+            if (measured.error) { const error = new Error(measured.error.message); error.code = 'RPC_ERROR'; error.rpc = measured.error; throw error; }
+            return measured.result;
+          }
           if (method === 'model/list') return { data: [{
             id: 'fixture-model', model: 'fixture-model', displayName: 'Fixture model',
             description: 'Fixture model', hidden: false, isDefault: true,
