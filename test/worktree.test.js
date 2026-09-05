@@ -29,22 +29,30 @@ const {
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
 
 test('internal Git children receive no ambient credentials and disable hooks', (t) => {
-  assert.deepEqual(sanitizedGitEnv({
+  const clean = sanitizedGitEnv({
     HOME: '/tmp/home',
     PATH: '/usr/bin:/bin',
     API_TOKEN: 'secret-token',
     HTTPS_PROXY: 'https://user:password@example.invalid',
     SSH_AUTH_SOCK: '/tmp/private-agent.sock',
     GIT_DIR: '/tmp/redirected-git-dir',
-  }), {
+  });
+  assert.deepEqual(clean, {
     HOME: '/tmp/home',
     PATH: '/usr/bin:/bin',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_COUNT: '3',
     GIT_CONFIG_KEY_0: 'core.hooksPath',
-    GIT_CONFIG_VALUE_0: '/dev/null',
+    GIT_CONFIG_VALUE_0: clean.GIT_CONFIG_VALUE_0,
+    GIT_CONFIG_KEY_1: 'core.fsmonitor',
+    GIT_CONFIG_VALUE_1: 'false',
+    GIT_CONFIG_KEY_2: 'core.sshCommand',
+    GIT_CONFIG_VALUE_2: '',
   });
+
+  assert.deepEqual(fs.readdirSync(clean.GIT_CONFIG_VALUE_0), []);
+  assert.equal(fs.statSync(clean.GIT_CONFIG_VALUE_0).mode & 0o077, 0);
 
   const fixture = createRepoWithSeat(t);
   const hookOutput = path.join(fixture.root, 'post-checkout-ran');

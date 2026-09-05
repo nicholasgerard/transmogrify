@@ -94,6 +94,12 @@ test('exchange preamble names the seat, child boundary, handback, and commit con
   assert.match(preamble, /Co-Authored-By: Codex <noreply@openai\.com>/);
   assert.match(exchangePreamble(seat, 'claude'), /Co-Authored-By: Claude Code <noreply@anthropic\.com>/);
   assert.match(preamble, /SHA: <the full commit SHA you made>/);
+  assert.match(preamble, /In a managed clone seat, your own \.git directory is writable/);
+  assert.match(preamble, /Ordinary git add, git commit, git log, and git status work/);
+  assert.match(preamble, /If git add reports "Operation not permitted", this seat lacks the clone Git-directory grant/);
+  assert.match(preamble, /instead of working around it/);
+  assert.match(preamble, /harvest --commit as a fallback/);
+  assert.match(preamble, /If you made no commit, omit the SHA line entirely and explain why in the Not verified section/);
   assert.match(preamble, /\.transmogrify\/handback\.md/);
   assert.match(preamble, /Start with # Handback: <packet name>\./);
   for (const section of [
@@ -415,6 +421,8 @@ test('child commits in a clone and harvest fetches the exact SHA before clone re
   assert.throws(() => execFileSync('git', ['-C', fixture.repoRoot, 'cat-file', '-e', head], { stdio: 'pipe' }));
   const result = await harvestLane(harvestOptions(fixture), fixture.env, idleProvider);
   assert.equal(result.head, head);
+  assert.equal(require('../scripts/lib/output-schema').publicResult(result).childReportedCommit, true);
+  assert.equal(fs.existsSync(path.join(fixture.seat.path, '.transmogrify')), false);
   assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'rev-parse', fixture.seat.branchRef], {
     encoding: 'utf8',
   }).trim(), head);
@@ -489,4 +497,108 @@ test('clone harvest refuses a HEAD change after copy before removing provisions'
   assert.equal(fs.existsSync(exchangePaths(fixture.seat.path).handback), true);
   assert.equal(listOperations(fixture.repoRoot, fixture.env)
     .find((operation) => operation.type === 'harvest').state, 'copied');
+});
+
+test('handback parsing treats non-40-hex SHA reports as absent and removes them from the commit body', () => {
+  for (const sha of ['unavailable — git add was denied', 'a'.repeat(39), 'a'.repeat(64), 'g'.repeat(40), '']) {
+    const text = handback({ body: `Explain the completed change.\n\nSHA: ${sha}` });
+    const parsed = parseHandback(text);
+    assert.equal(parsed.commitSha, null);
+    assert.equal(parsed.body, 'Explain the completed change.');
+    assert.match(parsed.text, /SHA:/, 'the durable handback retains the child report');
+  }
+  assert.equal(parseHandback(handback({ sha: 'A'.repeat(40) })).commitSha, 'a'.repeat(40));
+});
+
+test('operator fallback harvests an unavailable SHA report and publicly records no child commit', async (t) => {
+  const fixture = managedLane(t);
+  fs.writeFileSync(path.join(fixture.seat.path, 'fallback.txt'), 'completed work\n');
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback,
+    handback({ sha: 'unavailable — git add reported Operation not permitted' }));
+  const options = harvestOptions(fixture, { commit: true });
+  const result = await harvestLane(options, fixture.env, idleProvider);
+  const { publicResult } = require('../scripts/lib/output-schema');
+  assert.equal(publicResult(result).childReportedCommit, false);
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'show', `${result.head}:fallback.txt`], {
+    encoding: 'utf8',
+  }), 'completed work\n');
+  assert.doesNotMatch(execFileSync('git', ['-C', fixture.repoRoot, 'show', '-s', '--format=%B', result.head], {
+    encoding: 'utf8',
+  }), /SHA:|unavailable/);
+  const repeated = await harvestLane(options, fixture.env, idleProvider);
+  assert.equal(publicResult(repeated).childReportedCommit, false);
+  assert.equal(repeated.head, result.head);
+});
+
+test('operator fallback accepts an omitted SHA and preserves the no-commit report across crash recovery', async (t) => {
+  const fixture = managedLane(t);
+  fs.writeFileSync(path.join(fixture.seat.path, 'fallback.txt'), 'completed work\n');
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  const options = harvestOptions(fixture, { commit: true });
+  await assert.rejects(() => harvestLane(options, fixture.env, {
+    ...idleProvider,
+    afterCommit: async () => { throw new Error('fixture crash after fallback'); },
+  }), /fixture crash after fallback/);
+  const committedHead = gitHead(fixture.seat.path);
+  const result = await harvestLane(options, fixture.env, idleProvider);
+  assert.equal(result.childReportedCommit, false);
+  assert.equal(result.head, committedHead);
+});
+
+test('operator harvest disables child-configured hooks and fsmonitor and fetches without submodule recursion', async (t) => {
+  const fixture = managedLane(t);
+  const marker = path.join(fixture.root, 'executed-helpers');
+  const hooks = path.join(fixture.seat.gitDir, 'hostile-hooks');
+  const monitor = path.join(fixture.seat.gitDir, 'hostile-fsmonitor');
+  fs.mkdirSync(hooks);
+  const quote = (value) => `'${value.replace(/'/gu, `'\\''`)}'`;
+  fs.writeFileSync(path.join(hooks, 'post-commit'), `#!/bin/sh\nprintf 'hook\\n' >> ${quote(marker)}\n`, { mode: 0o700 });
+  fs.writeFileSync(monitor, `#!/bin/sh\nprintf 'fsmonitor\\n' >> ${quote(marker)}\nprintf 'token\\000'\n`, { mode: 0o700 });
+  for (const [key, value] of [['core.hooksPath', hooks], ['core.fsmonitor', monitor]]) {
+    execFileSync('git', ['-C', fixture.seat.path, 'config', key, value]);
+  }
+  // Positive controls prove the planted helpers execute without host overrides.
+  execFileSync('git', ['-C', fixture.seat.path, 'status', '--porcelain'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', fixture.seat.path, 'commit', '--allow-empty', '-qm', 'Exercise fixture helpers'], { stdio: 'pipe' });
+  assert.match(fs.readFileSync(marker, 'utf8'), /fsmonitor/);
+  assert.match(fs.readFileSync(marker, 'utf8'), /hook/);
+  fs.unlinkSync(marker);
+  fs.writeFileSync(path.join(fixture.seat.path, 'safe-fallback.txt'), 'reviewed fallback\n');
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+
+  // Record actual process argv while delegating to real Git. This also covers
+  // the local upload-pack child receiving the sanitized config environment.
+  const bin = path.join(fixture.root, 'git-wrapper');
+  const argvLog = path.join(fixture.root, 'git-argv.jsonl');
+  fs.mkdirSync(bin);
+  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  fs.writeFileSync(path.join(bin, 'git'), `#!${process.execPath}\n` +
+    `require('node:fs').appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');\n` +
+    `const result = require('node:child_process').spawnSync(${JSON.stringify(realGit)}, process.argv.slice(2), { stdio: 'inherit', env: process.env });\n` +
+    `process.exit(result.status ?? 1);\n`, { mode: 0o700 });
+  const priorPath = process.env.PATH;
+  let result;
+  try {
+    process.env.PATH = `${bin}${path.delimiter}${priorPath}`;
+    result = await harvestLane(harvestOptions(fixture, { commit: true }), fixture.env, idleProvider);
+  } finally {
+    process.env.PATH = priorPath;
+  }
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'show', `${result.head}:safe-fallback.txt`], {
+    encoding: 'utf8',
+  }), 'reviewed fallback\n');
+  const calls = fs.readFileSync(argvLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  for (const command of ['status', 'add', 'commit', 'fetch']) {
+    const call = calls.find((args) => args.includes(command));
+    assert.ok(call, `harvest ran ${command}`);
+    const hooksSetting = call.find((arg) => arg.startsWith('core.hooksPath='));
+    assert.ok(hooksSetting);
+    assert.equal(call[call.indexOf(hooksSetting) - 1], '-c');
+    assert.deepEqual(fs.readdirSync(hooksSetting.slice('core.hooksPath='.length)), []);
+    for (const setting of ['core.fsmonitor=false', 'core.sshCommand=']) {
+      assert.equal(call[call.indexOf(setting) - 1], '-c');
+    }
+  }
+  assert.ok(calls.find((args) => args.includes('fetch')).includes('--no-recurse-submodules'));
 });

@@ -38,7 +38,7 @@ secrets are not inherited. The launcher uses the existing Codex login selected
 by `HOME`/`CODEX_HOME`; do not move credentials into arguments or log paths.
 
 Internal Git children likewise receive a bounded non-secret environment.
-System/global Git config and checkout hooks are disabled for operator-owned Git
+System/global Git config and repository hooks are disabled for operator-owned Git
 operations. Repository attributes and filters remain part of the authorized
 target repository's trust boundary, but they do not inherit ambient tokens,
 proxy credentials, or SSH agent sockets from the operator process.
@@ -133,13 +133,23 @@ surface disables archival until reverified.
 
 ## Child Git boundary
 
-New managed seats are clones whose Git metadata lives inside the seat. Children
+New managed seats are ordinary clones whose Git metadata lives in their own `.git`. Children
 can commit their assigned work with the operator's configured Git identity.
 The injected provider trailer supplies attribution. Children must stay on the
-assigned branch and never push. The sandbox remains `workspace-write` with
-approval policy `never`; the shared object store, operator refs, and operator
-state are outside its write boundary. The dependency symlink grants no write
+assigned branch and never push. Every Codex turn started for a managed clone,
+including a recovery turn, receives a `workspaceWrite` policy whose only extra
+writable root is that clone's `.git`. Network access stays disabled, temporary
+directory access stays enabled, and approval policy stays `never`. Linked
+worktrees and external seats receive no turn policy override. The shared
+object store, operator refs, and operator state remain outside the write boundary. The dependency symlink grants no write
 access to its target outside the seat.
+
+The child may modify its clone's Git configuration. Operator commands override
+`core.hooksPath` with a private empty directory, set `core.fsmonitor=false`, and
+clear `core.sshCommand`. These settings are also pinned in the sanitized Git
+environment for verification reads and local Git subprocesses. Harvest fetches
+with `--no-recurse-submodules`. Repository hook and fsmonitor settings cannot
+execute during operator verification or fallback commits.
 
 Clone creation uses `--no-hardlinks --reference`, optionally `--dissociate`
 when the measured repository is small. References grant object reads only.

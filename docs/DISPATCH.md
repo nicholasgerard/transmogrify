@@ -297,9 +297,14 @@ dispatch the preamble leads. It tells the child:
 - write only inside the seat and `/tmp`;
 - commit on the current branch with a clear title and body and the exact
   provider `Co-Authored-By` trailer injected by spawn;
+- use ordinary `git add`, `git commit`, `git log`, and `git status` with its own
+  writable `.git` directory in a managed clone;
 - never push or change branches;
 - write `## Commit` with a 10–72 character one-line imperative title, a blank
   line, and a non-empty body, ending the section with `SHA: <full commit SHA>`;
+- omit the SHA line when no commit was made and explain why under `Not verified`;
+  a denied `git add` must be reported without a workaround so the operator can
+  use the fallback;
 - write `## What changed and why`, `## Verified`, `## Not verified`, and
   `## Risks and decisions for the operator`; and
 - end its final message with `DONE`, or `BLOCKED` and the reason.
@@ -325,7 +330,10 @@ is exactly that HEAD. It never pushes. A clone with uncommitted changes needs
 tracked and untracked seat changes except the recorded provisions and
 `.transmogrify/`, then commits with the operator's Git identity and the
 provider's `Co-Authored-By` trailer, then fetches the new commit. The fallback
-accepts a title and body without a SHA. A supplied SHA must still match the
+accepts a title and body without a SHA. A SHA line containing anything other
+than one full 40-hex SHA is treated as absent. The result's `childReportedCommit`
+records whether the child supplied a valid commit SHA, even when the operator
+creates the fallback commit. A valid supplied SHA must still match the
 pre-commit HEAD. With no changes, `--commit` accepts the child's existing SHA
 without making another commit. Older linked worktree seats retain their
 existing title-and-body harvest path.
@@ -341,7 +349,13 @@ commit dispatch, durable copy, and cleanup, so rerunning the same harvest
 recovers a crash between commit and copy without making a second commit.
 
 New managed seats are local clones with `--no-hardlinks --reference` to the
-operator Git directory. The receipt records the clone Git directory identity,
+operator Git directory. Their metadata stays in the top-level `.git` directory.
+Every Codex `turn/start` for a managed clone, including recovery turns, supplies
+`sandboxPolicy` with `type: "workspaceWrite"`, `writableRoots: [<seat>/.git]`,
+`networkAccess: false`, `excludeTmpdirEnvVar: false`, and `excludeSlashTmp: false`.
+No other extra writable root is granted. Linked worktrees and external seats
+send no policy override. Approval remains `never`.
+The receipt records the clone Git directory identity,
 origin, branch, base commit, and alternates path and content. Any change to the
 alternates is refused, including an added or removed entry. `git count-objects
 -v` supplies the loose and packed object sizes in KiB. At or below 32 MiB,
@@ -353,6 +367,10 @@ remove those copies. No existing worktree seat migrates in place.
 Clone retirement removes the seat only after its harvested HEAD is present at
 the recorded branch in the operator repository. The branch survives removal.
 An unfetched clone is preserved, including its exchange provisions.
+Operator Git commands override repository hooks with a private empty directory,
+disable fsmonitor, and clear the SSH command. The sanitized environment carries
+the same settings into verification reads and local Git subprocesses. Harvest
+fetches without submodule recursion.
 
 When the project checkout has both `package.json` and `node_modules`, a managed
 seat receives `node_modules` as a symlink to the project checkout rather than a

@@ -11,7 +11,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { sanitizedGitEnv } = require('./git-env');
+const { sanitizedGitEnv, safeGitConfigArgs } = require('./git-env');
 const { mutateLane, resolveProject } = require('./state');
 
 // A permanent cleanup refusal: observed dirt, a changed HEAD, or an inconsistent
@@ -54,7 +54,7 @@ function isPermanentCleanupError(error) {
 function git(repoRoot, args, options = {}) {
   try {
     const { env = process.env, ...safeOptions } = options;
-    return execFileSync('git', ['-C', repoRoot, ...args], {
+    return execFileSync('git', [...safeGitConfigArgs(), '-C', repoRoot, ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       ...safeOptions,
@@ -99,7 +99,7 @@ function requireIgnoredManagedRoot(projectRoot, worktreesRoot) {
   const directoryForm = `${worktreesRoot}${path.sep}`;
   try {
     execFileSync('git', [
-      '-C', projectRoot, 'check-ignore', '--quiet', '--no-index', '--', directoryForm,
+      ...safeGitConfigArgs(), '-C', projectRoot, 'check-ignore', '--quiet', '--no-index', '--', directoryForm,
     ], { stdio: 'ignore', env: sanitizedGitEnv() });
   } catch (error) {
     if (error.status === 1) {
@@ -124,7 +124,7 @@ function requireExternalManagedRootOutsideGit(projectRoot, worktreesRoot) {
   ancestor = fs.realpathSync(ancestor);
   try {
     const containingRoot = execFileSync(
-      'git', ['-C', ancestor, 'rev-parse', '--show-toplevel'],
+      'git', [...safeGitConfigArgs(), '-C', ancestor, 'rev-parse', '--show-toplevel'],
       {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -298,7 +298,7 @@ function readOperatorIdentity(repoRoot) {
   env.GIT_CONFIG_NOSYSTEM = '1';
   const read = (key) => {
     try {
-      return execFileSync('git', ['-C', repoRoot, 'config', '--get', key], {
+      return execFileSync('git', [...safeGitConfigArgs(), '-C', repoRoot, 'config', '--get', key], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env,
       }).trim();
     } catch { return ''; }

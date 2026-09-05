@@ -7,7 +7,8 @@ const { commandEventResult, verifyCommandParent } = require('./state');
 // mutation is journaled before dispatch and confirmed by an exact receipt: the
 // client message id, the provider cwd, or the archived listing row. An
 // unconfirmed outcome is projected as unknown. It never replays an input whose
-// delivery is unknown and never widens a thread's sandbox or approval policy.
+// delivery is unknown. Managed clone turns grant writes only to their own Git
+// directory; approval remains never and network access remains disabled.
 
 const crypto = require('node:crypto');
 const path = require('node:path');
@@ -472,6 +473,20 @@ function completionWatch(ctx, client, threadId) {
   return completion;
 }
 
+// Linked worktrees share operator metadata, and external seats have no managed
+// write grant. Only an identity-checked managed clone may write its own .git.
+function cloneTurnSandbox(seat) {
+  if (seat?.kind !== 'clone' || seat.managed !== true) return {};
+  const gitDir = path.join(seat.path, '.git');
+  if (seat.gitDir !== gitDir) {
+    throw new TransmogrifyError('SEAT_MISMATCH', 'clone Git directory does not match its seat');
+  }
+  return { sandboxPolicy: {
+    type: 'workspaceWrite', writableRoots: [gitDir], networkAccess: false,
+    excludeTmpdirEnvVar: false, excludeSlashTmp: false,
+  } };
+}
+
 // Start the first turn with the lane's input and verify its input receipt.
 async function startFirstTurn(ctx, client, controls, threadId) {
   const { options, env, laneId, operationId } = ctx;
@@ -479,6 +494,7 @@ async function startFirstTurn(ctx, client, controls, threadId) {
   const turnStarted = await client.call('turn/start', {
     threadId,
     cwd: ctx.seat.path,
+    ...cloneTurnSandbox(ctx.seat),
     input: [{ type: 'text', text: options.input }],
     clientUserMessageId: operationId,
     ...(controls.model ? { model: controls.model } : {}),
@@ -1070,6 +1086,7 @@ async function dispatchResumedTurn(ctx, client, controls) {
     const started = await client.call('turn/start', {
       threadId: ctx.lane.providerId,
       cwd: ctx.lane.seat.path,
+      ...cloneTurnSandbox(ctx.lane.seat),
       input: [{ type: 'text', text: options.message }],
       clientUserMessageId: ctx.operation.operationId,
       ...(controls.model ? { model: controls.model } : {}),
