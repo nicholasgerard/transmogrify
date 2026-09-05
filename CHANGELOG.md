@@ -2,6 +2,9 @@
 
 ## 0.6.1 (in progress)
 
+- Add GPT-6 Astra to Codex execution guidance for `deep` and `max-quality`,
+  with a receipted GPT-5.6 Sol fallback on older live catalogs, explicit model
+  upgrade hints, and catalog-gated Ultra effort guidance.
 - A dispatched child's first message reads provenance box, exchange preamble,
   then packet again. The exchange preamble had been prepended after the
   provenance box was rendered, burying the `╭─ Transmogrify` block that names the

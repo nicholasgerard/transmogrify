@@ -10,7 +10,9 @@ when adding a provider adapter.
 - Every request is compiled against the provider's capability catalog before a
   lane is reserved or the provider is called.
 - Unsupported combinations fail closed with `EXECUTION_PROFILE_UNSUPPORTED`.
-  Transmogrify never substitutes another model, effort, speed, or provider.
+  Transmogrify never substitutes another effort, speed, or provider. A Codex
+  intent may declare an ordered model fallback for compatibility with older
+  live catalogs; explicit model requests never fall back.
 - A provider may still apply its own documented native fallback. That result
   stays unobserved unless the provider returns a receipt.
 - Use the lowest effort that reliably passes the task's checks. Max is for the
@@ -83,8 +85,14 @@ setting implicitly.
 | `provider-default` | No deliberate model or effort choice is needed. | Runtime default model and its advertised default effort. | Preserve the Claude host's model and effort defaults. |
 | `fast-loop` | Work is short, clear, repetitive, and easy to verify. | GPT-5.6 Luna, Low | Claude Haiku 4.5, no effort selector |
 | `balanced` | Everyday implementation, review, and debugging. | GPT-5.6 Terra, Medium | Claude Sonnet 5, Medium |
-| `deep` | Architecture, ambiguous debugging, migrations, or consequential analysis. | GPT-5.6 Sol, High | Claude Opus 5, High |
-| `max-quality` | The hardest bounded single-agent work justifies maximum reasoning. | GPT-5.6 Sol, Max | Claude Opus 5, Max |
+| `deep` | Architecture, ambiguous debugging, migrations, or consequential analysis. | GPT-6 Astra, High; GPT-5.6 Sol fallback | Claude Opus 5, High |
+| `max-quality` | The hardest bounded single-agent work justifies maximum reasoning. | GPT-6 Astra, Max; GPT-5.6 Sol fallback | Claude Opus 5, Max |
+
+Codex resolves an intent's ordered model preferences against the live catalog.
+It selects the first visible, current row. When an older runtime does not list
+GPT-6 Astra, `deep` and `max-quality` select GPT-5.6 Sol at the same effort and
+record `resolved.model.fallback: "gpt-6-astra"`. An explicit
+`--model gpt-6-astra` still fails when Astra is absent.
 
 ## Effort levels
 
@@ -97,7 +105,7 @@ Effort names are provider controls, not portable quality guarantees.
 | `high` | Difficult or multi-step work benefits from more analysis and verification. |
 | `xhigh` | Ambiguity, risk, or tradeoffs are substantial and quality matters more than latency. |
 | `max` | The hardest bounded single-agent work justifies the greatest supported reasoning depth. |
-| `ultra` | Codex only, when the live catalog advertises it and the work genuinely divides into independent parts. This is multi-agent execution, not deeper reasoning, and no intent selects it. |
+| `ultra` | Codex only, when the live catalog advertises it and the hardest high-value work justifies the strongest available reasoning even though it costs the most. No intent selects it. |
 
 ## Execution settings
 
@@ -138,21 +146,28 @@ row is not selectable even when the runtime still lists it.
 
 | Selector | Model | Best fit |
 | --- | --- | --- |
+| `gpt-6-astra` | GPT-6 Astra | Complex, ambiguous, or high-value work needing the strongest reasoning when the runtime offers it. |
 | `gpt-5.6-sol` | GPT-5.6 Sol | Complex, open-ended, ambiguous, difficult, or high-value work needing the strongest analysis and polish. |
 | `gpt-5.6-terra` | GPT-5.6 Terra | Everyday implementation and review needing strong reasoning and tool use. |
 | `gpt-5.6-luna` | GPT-5.6 Luna | Clear, repeatable, high-volume work with an explicit definition of done. |
 | `gpt-5.5` | GPT-5.5 | Work that explicitly needs previous-generation compatibility. |
 | `gpt-5.3-codex-spark` | GPT-5.3 Codex Spark | Near-instant text-only coding iteration when the account has access and lower capability is acceptable. |
 
-The live runtime remains authoritative. The verified app-server `0.151.0`
-catalog on 2026-09-02 exposed:
+The live runtime remains authoritative. Read-only `model/list` measurements on
+2026-09-05 found:
 
-- Sol, Terra, and Luna: `low`, `medium`, `high`, `xhigh`, `max`; Sol and Terra
-  also exposed `ultra`.
-- GPT-5.5 and Spark: `low`, `medium`, `high`, `xhigh`.
-- Fast (`priority`) for Sol, Terra, Luna, and GPT-5.5; no Fast tier for Spark.
-- GPT-5.4 rows with upgrade and retirement metadata, which Transmogrify
-  refuses.
+- App-server `0.153.4` listed GPT-6 Astra, the GPT-5.6 Sol, Terra, and Luna
+  family, GPT-5.5, GPT-5.4 Mini, and GPT-5.3 Codex Spark. It made Astra the
+  default. Astra advertised `low`, `medium`, `high`, `xhigh`, `max`, and
+  `ultra`, with Medium as its default effort and Fast (`priority`) as an
+  additional speed tier. Sol and Terra also advertised `ultra`.
+- App-server `0.151.0` listed six models and no GPT-6 Astra. It listed the
+  GPT-5.6 family, GPT-5.5, GPT-5.4 Mini, and GPT-5.3 Codex Spark. GPT-5.4 Mini
+  carried an upgrade hint to GPT-5.6 Luna; Mini and Spark advertised no Fast
+  tier.
+
+Both catalogs keep Fast explicit. Neutral intent guidance always resolves at
+Standard speed, including when it falls back from Astra to Sol.
 
 ### Codex Standard and Fast
 

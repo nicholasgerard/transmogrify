@@ -18,6 +18,15 @@ const {
   validateUnobservedProfile,
   withObservedExecution,
 } = require('../scripts/lib/execution-profile');
+const {
+  CODEX_GUIDANCE,
+  CODEX_SELECTION_GUIDE,
+  GUIDANCE_VERSION,
+} = require('../scripts/lib/execution-guidance');
+const {
+  measuredCodexModelList01510,
+  measuredCodexModelList01534,
+} = require('./fixtures/codex-model-lists');
 
 function model(overrides = {}) {
   return {
@@ -189,6 +198,159 @@ test('Codex intents use guidance policy then validate against live capabilities'
   assert.deepEqual(profile.resolved.effort, { level: 'max', selection: 'intent' });
 });
 
+test('measured Codex catalogs resolve every intent with Astra preference and Sol fallback', () => {
+  const currentModelList = measuredCodexModelList01534();
+  const legacyModelList = measuredCodexModelList01510();
+  assert.equal(currentModelList.data.length, 7);
+  assert.equal(legacyModelList.data.length, 6);
+  assert.deepEqual(Object.keys(currentModelList.data[0]), [
+    'id', 'model', 'upgrade', 'upgradeInfo', 'availabilityNux', 'displayName',
+    'description', 'modelSpecialty', 'hidden', 'supportedReasoningEfforts',
+    'defaultReasoningEffort', 'inputModalities', 'supportsPersonality',
+    'multiAgentVersion', 'additionalSpeedTiers', 'serviceTiers',
+    'defaultServiceTier', 'isDefault',
+  ]);
+  assert.equal(currentModelList.data.find((entry) => entry.isDefault).model, 'gpt-6-astra');
+  assert.equal(legacyModelList.data.some((entry) => entry.model === 'gpt-6-astra'), false);
+
+  const expected = {
+    'fast-loop': { selector: 'gpt-5.6-luna', effort: 'low' },
+    balanced: { selector: 'gpt-5.6-terra', effort: 'medium' },
+    deep: { selector: 'gpt-6-astra', effort: 'high' },
+    'max-quality': { selector: 'gpt-6-astra', effort: 'max' },
+  };
+  for (const [intent, selection] of Object.entries(expected)) {
+    const current = resolveCodexExecutionProfile({
+      request: { intent },
+      modelList: measuredCodexModelList01534(),
+      guidance: CODEX_GUIDANCE,
+    });
+    assert.deepEqual(current.resolved.model, {
+      catalogId: selection.selector,
+      selection: 'intent',
+      selector: selection.selector,
+    });
+    assert.deepEqual(current.resolved.effort, {
+      level: selection.effort,
+      selection: 'intent',
+    });
+
+    const legacy = resolveCodexExecutionProfile({
+      request: { intent },
+      modelList: measuredCodexModelList01510(),
+      guidance: CODEX_GUIDANCE,
+    });
+    const legacySelector = ['deep', 'max-quality'].includes(intent)
+      ? 'gpt-5.6-sol'
+      : selection.selector;
+    assert.deepEqual(legacy.resolved.model, {
+      catalogId: legacySelector,
+      ...(['deep', 'max-quality'].includes(intent) ? { fallback: 'gpt-6-astra' } : {}),
+      selection: 'intent',
+      selector: legacySelector,
+    });
+    assert.deepEqual(legacy.resolved.effort, {
+      level: selection.effort,
+      selection: 'intent',
+    });
+    assert.doesNotThrow(() => validateUnobservedProfile(legacy));
+  }
+});
+
+test('explicit Astra remains unsupported when the measured runtime does not list it', () => {
+  assertProfileError(
+    () => resolveCodexExecutionProfile({
+      request: { model: 'gpt-6-astra' },
+      modelList: measuredCodexModelList01510(),
+      guidance: CODEX_GUIDANCE,
+    }),
+    'UNSUPPORTED_MODEL',
+  );
+});
+
+test('Codex intent preferences skip non-selectable rows and retain the preferred failure', () => {
+  for (const lifecycle of ['hidden', 'upgrade-only']) {
+    const modelList = measuredCodexModelList01534();
+    const astra = modelList.data.find((entry) => entry.model === 'gpt-6-astra');
+    if (lifecycle === 'hidden') astra.hidden = true;
+    if (lifecycle === 'upgrade-only') astra.upgrade = 'gpt-next';
+    const profile = resolveCodexExecutionProfile({
+      request: { intent: 'deep' },
+      modelList,
+      guidance: CODEX_GUIDANCE,
+    });
+    assert.deepEqual(profile.resolved.model, {
+      catalogId: 'gpt-5.6-sol',
+      fallback: 'gpt-6-astra',
+      selection: 'intent',
+      selector: 'gpt-5.6-sol',
+    });
+  }
+
+  const absent = measuredCodexModelList01510();
+  absent.data = absent.data.filter((entry) => entry.model !== 'gpt-5.6-sol');
+  assertProfileError(
+    () => resolveCodexExecutionProfile({
+      request: { intent: 'deep' }, modelList: absent, guidance: CODEX_GUIDANCE,
+    }),
+    'UNSUPPORTED_MODEL',
+  );
+});
+
+test('explicit Codex upgrade-only selector names its catalog replacement', () => {
+  assert.throws(
+    () => resolveCodexExecutionProfile({
+      request: { model: 'gpt-5.4-mini' },
+      modelList: measuredCodexModelList01510(),
+      guidance: CODEX_GUIDANCE,
+    }),
+    (error) => {
+      assert.ok(error instanceof ExecutionProfileError);
+      assert.equal(error.code, 'MODEL_UPGRADE_REQUIRED');
+      assert.match(error.message, /use gpt-5\.6-luna instead/);
+      assert.equal(error.details.upgrade, 'gpt-5.6-luna');
+      assert.equal(error.details.lifecycle.replacement, 'gpt-5.6-luna');
+      return true;
+    },
+  );
+});
+
+test('Codex ultra effort is accepted only for measured models that advertise it', () => {
+  for (const selector of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra']) {
+    const profile = resolveCodexExecutionProfile({
+      request: { model: selector, effort: 'ultra' },
+      modelList: measuredCodexModelList01534(),
+      guidance: CODEX_GUIDANCE,
+    });
+    assert.deepEqual(profile.resolved.effort, { level: 'ultra', selection: 'explicit' });
+  }
+  assertProfileError(
+    () => resolveCodexExecutionProfile({
+      request: { model: 'gpt-5.6-luna', effort: 'ultra' },
+      modelList: measuredCodexModelList01534(),
+      guidance: CODEX_GUIDANCE,
+    }),
+    'UNSUPPORTED_EFFORT',
+  );
+});
+
+test('Codex selection guide describes Astra and costly ultra reasoning', () => {
+  assert.equal(GUIDANCE_VERSION, '2026-09-05');
+  assert.deepEqual(CODEX_GUIDANCE.intents.deep.models, ['gpt-6-astra', 'gpt-5.6-sol']);
+  assert.deepEqual(
+    CODEX_GUIDANCE.intents['max-quality'].models,
+    ['gpt-6-astra', 'gpt-5.6-sol'],
+  );
+  assert.match(
+    CODEX_SELECTION_GUIDE.models.find((entry) => entry.selector === 'gpt-6-astra').useWhen,
+    /strongest reasoning.*runtime offers it/,
+  );
+  assert.match(
+    CODEX_SELECTION_GUIDE.efforts.find((entry) => entry.effort === 'ultra').useWhen,
+    /costs the most/,
+  );
+});
+
 test('explicit model and effort override intent policy but remain catalog-validated', () => {
   const profile = resolveCodexExecutionProfile({
     request: { intent: 'deep', model: 'terra-id', effort: 'low' },
@@ -224,6 +386,23 @@ test('guidance cannot silently turn an intent into premium fast mode', () => {
     }),
     'IMPLICIT_FAST_FORBIDDEN',
   );
+});
+
+test('ordered intent guidance requires unique non-empty model preferences', () => {
+  for (const mapping of [
+    { models: [] },
+    { models: ['gpt-5.6-sol', 'gpt-5.6-sol'] },
+    { model: 'gpt-5.6-sol', models: ['gpt-5.6-sol'] },
+  ]) {
+    const guidance = codexGuidance();
+    guidance.intents.deep = { ...mapping, effort: 'high' };
+    assertProfileError(
+      () => resolveCodexExecutionProfile({
+        request: { intent: 'deep' }, modelList: modelList(), guidance,
+      }),
+      'INVALID_GUIDANCE',
+    );
+  }
 });
 
 test('Codex rejects stale models, unsupported efforts, and stale speed mappings', () => {
@@ -604,6 +783,25 @@ test('profile validation rejects a speed label whose native control requests ano
   const forgedCodex = structuredClone(codex);
   forgedCodex.resolved.speed.nativeControl.value = 'priority';
   assertProfileError(() => validateUnobservedProfile(forgedCodex), 'INVALID_PROFILE');
+});
+
+test('profile validation accepts only intent-owned fallback provenance', () => {
+  const profile = resolveCodexExecutionProfile({
+    request: { intent: 'deep' },
+    modelList: measuredCodexModelList01510(),
+    guidance: CODEX_GUIDANCE,
+  });
+  assert.equal(validateUnobservedProfile(profile).resolved.model.fallback, 'gpt-6-astra');
+
+  for (const mutate of [
+    (copy) => { copy.resolved.model.selection = 'explicit'; },
+    (copy) => { copy.resolved.model.fallback = copy.resolved.model.selector; },
+    (copy) => { copy.requested.intent = 'provider-default'; },
+  ]) {
+    const forged = structuredClone(profile);
+    mutate(forged);
+    assertProfileError(() => validateUnobservedProfile(forged), 'INVALID_PROFILE');
+  }
 });
 
 test('JSON-safe normalization and serialization are deterministic and reject lossy values', () => {

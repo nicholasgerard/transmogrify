@@ -533,6 +533,37 @@ function createClaudeCliCatalog(options = {}) {
   });
 }
 
+// A legacy single model and an ordered preference list normalize to one shape.
+// Preference order is meaningful, so duplicates are always guidance errors.
+function normalizeModelPreferences(mapping, intent) {
+  if (mapping.model !== undefined && mapping.models !== undefined) {
+    fail('INVALID_GUIDANCE', 'intent guidance cannot combine model and models', { intent });
+  }
+  if (mapping.models !== undefined) {
+    if (!Array.isArray(mapping.models) || mapping.models.length === 0) {
+      fail('INVALID_GUIDANCE', 'intent guidance models must be a non-empty array', { intent });
+    }
+    const models = mapping.models.map((selector, index) => requiredExactString(
+      selector,
+      `guidance.intents.${intent}.models[${index}]`,
+      'INVALID_GUIDANCE',
+    ));
+    if (new Set(models).size !== models.length) {
+      fail('INVALID_GUIDANCE', 'intent guidance models must be unique selectors', { intent });
+    }
+    return models;
+  }
+  const model = optionalExactString(
+    mapping.model,
+    `guidance.intents.${intent}.model`,
+    'INVALID_GUIDANCE',
+  );
+  if (model === null) {
+    fail('INVALID_GUIDANCE', 'intent guidance must select a model', { intent });
+  }
+  return [model];
+}
+
 // Normalize intent-to-selection guidance. Guidance may never map an intent to
 // Fast: premium speed stays an explicit caller decision.
 function normalizeGuidance(guidance = {}, provider) {
@@ -561,7 +592,12 @@ function normalizeGuidance(guidance = {}, provider) {
       fail('INVALID_GUIDANCE', 'guidance contains an unsupported intent mapping', { intent });
     }
     const mapping = requiredObject(intents[intent], `guidance.intents.${intent}`, 'INVALID_GUIDANCE');
-    assertKnownKeys(mapping, ['effort', 'model', 'speed'], `guidance.intents.${intent}`, 'INVALID_GUIDANCE');
+    assertKnownKeys(
+      mapping,
+      ['effort', 'model', 'models', 'speed'],
+      `guidance.intents.${intent}`,
+      'INVALID_GUIDANCE',
+    );
     if (mapping.speed === 'fast') {
       fail('IMPLICIT_FAST_FORBIDDEN', 'guidance cannot enable premium fast speed implicitly', { intent });
     }
@@ -569,12 +605,9 @@ function normalizeGuidance(guidance = {}, provider) {
       fail('INVALID_GUIDANCE', 'intent guidance cannot set speed; use an explicit request', { intent });
     }
     setOwn(normalizedIntents, intent, {
-      model: optionalExactString(mapping.model, `guidance.intents.${intent}.model`, 'INVALID_GUIDANCE'),
+      models: normalizeModelPreferences(mapping, intent),
       effort: optionalExactString(mapping.effort, `guidance.intents.${intent}.effort`, 'INVALID_GUIDANCE'),
     });
-    if (normalizedIntents[intent].model === null) {
-      fail('INVALID_GUIDANCE', 'intent guidance must select a model', { intent });
-    }
   }
 
   const normalizeSpeeds = (raw, label) => {
@@ -977,41 +1010,10 @@ function findCatalogModel(catalog, selector) {
   return null;
 }
 
-// Resolve the model from the explicit request, then intent guidance, then the
-// catalog's single selectable default. A hidden, retired, or superseded model is
-// refused, and an unlisted selector is accepted only under a
-// validated-passthrough policy whose pattern still admits it.
-function resolveModel(catalog, request, intentGuidance) {
-  let selector = request.model;
-  let selection = 'explicit';
-  if (selector === null && request.intent !== 'provider-default') {
-    selector = intentGuidance.model;
-    selection = 'intent';
-  }
-
-  if (selector === null) {
-    const defaults = catalog.models.filter((model) => (
-      model.isDefault && !model.hidden && model.lifecycle.status === 'current'
-    ));
-    if (defaults.length > 1) {
-      fail('AMBIGUOUS_DEFAULT_MODEL', 'catalog advertises multiple selectable default models', {
-        ids: defaults.map((model) => model.id).sort(),
-      });
-    }
-    if (defaults.length === 1) {
-      return {
-        model: defaults[0],
-        selector: defaults[0].selector,
-        catalogId: defaults[0].id,
-        selection: 'provider-default',
-      };
-    }
-    if (catalog.selectorPolicy.allowHostDefault) {
-      return { model: null, selector: null, catalogId: null, selection: 'provider-default' };
-    }
-    fail('NO_DEFAULT_MODEL', 'catalog does not advertise exactly one selectable default model', {});
-  }
-
+// Resolve one selector with the catalog's normal explicit-selection rules.
+// Upgrade-only rows remain failures so a catalog hint never becomes an
+// unreceipted substitution.
+function resolveModelSelector(catalog, selector, selection) {
   const catalogModel = findCatalogModel(catalog, selector);
   if (catalogModel !== null) {
     if (catalogModel.hidden) {
@@ -1021,13 +1023,17 @@ function resolveModel(catalog, request, intentGuidance) {
       });
     }
     if (catalogModel.lifecycle.status !== 'current') {
+      const upgrade = catalogModel.lifecycle.replacement;
       fail(
         catalogModel.lifecycle.status === 'retired' ? 'MODEL_RETIRED' : 'MODEL_UPGRADE_REQUIRED',
-        'selected model is not a current selectable catalog entry',
+        upgrade === null
+          ? 'selected model is not a current selectable catalog entry'
+          : `selected model is not current; use ${upgrade} instead`,
         {
           model: selector,
           catalogId: catalogModel.id,
           lifecycle: catalogModel.lifecycle,
+          ...(upgrade === null ? {} : { upgrade }),
         },
       );
     }
@@ -1052,6 +1058,54 @@ function resolveModel(catalog, request, intentGuidance) {
     fail('INVALID_MODEL_SELECTOR', 'model selector is not accepted by the provider CLI', { model: selector });
   }
   return { model: null, selector, catalogId: null, selection };
+}
+
+// Resolve an explicit request, then the first current visible intent preference,
+// then the catalog's single selectable default. If an intent uses a later
+// preference, the preferred selector is retained as fallback provenance.
+function resolveModel(catalog, request, intentGuidance) {
+  if (request.model !== null) {
+    return resolveModelSelector(catalog, request.model, 'explicit');
+  }
+
+  if (request.intent !== 'provider-default') {
+    const preferences = intentGuidance.models;
+    for (let index = 0; index < preferences.length; index += 1) {
+      const selector = preferences[index];
+      const catalogModel = findCatalogModel(catalog, selector);
+      if (catalogModel !== null && !catalogModel.hidden && catalogModel.lifecycle.status === 'current') {
+        return {
+          model: catalogModel,
+          selector: catalogModel.selector,
+          catalogId: catalogModel.id,
+          selection: 'intent',
+          ...(index === 0 ? {} : { fallback: preferences[0] }),
+        };
+      }
+    }
+    return resolveModelSelector(catalog, preferences[0], 'intent');
+  }
+
+  const defaults = catalog.models.filter((model) => (
+    model.isDefault && !model.hidden && model.lifecycle.status === 'current'
+  ));
+  if (defaults.length > 1) {
+    fail('AMBIGUOUS_DEFAULT_MODEL', 'catalog advertises multiple selectable default models', {
+      ids: defaults.map((model) => model.id).sort(),
+    });
+  }
+  if (defaults.length === 1) {
+    return {
+      model: defaults[0],
+      selector: defaults[0].selector,
+      catalogId: defaults[0].id,
+      selection: 'provider-default',
+    };
+  }
+  if (catalog.selectorPolicy.allowHostDefault) {
+    return { model: null, selector: null, catalogId: null, selection: 'provider-default' };
+  }
+  fail('NO_DEFAULT_MODEL', 'catalog does not advertise exactly one selectable default model', {});
 }
 
 // Resolve a named execution setting, which must exist in the catalog and be
@@ -1250,7 +1304,7 @@ function resolveExecutionProfile({ provider, request = {}, catalog, guidance = {
   const normalizedRequest = normalizeExecutionRequest(request);
   const normalizedGuidance = normalizeGuidance(guidance, normalizedProvider);
 
-  let intentGuidance = { model: null, effort: null };
+  let intentGuidance = { models: [], effort: null };
   if (normalizedRequest.intent !== 'provider-default') {
     intentGuidance = normalizedGuidance.intents[normalizedRequest.intent];
     if (intentGuidance === undefined) {
@@ -1286,6 +1340,7 @@ function resolveExecutionProfile({ provider, request = {}, catalog, guidance = {
         selector: modelResolution.selector,
         catalogId: modelResolution.catalogId,
         selection: modelResolution.selection,
+        ...(modelResolution.fallback === undefined ? {} : { fallback: modelResolution.fallback }),
       },
       effort: effortResolution,
       ...(settingResolution === null ? {} : { setting: {
@@ -1379,7 +1434,7 @@ function validateUnobservedProfile(profile) {
   const resolvedModel = requiredObject(resolved.model, 'profile.resolved.model', 'INVALID_PROFILE');
   assertKnownKeys(
     resolvedModel,
-    ['catalogId', 'selection', 'selector'],
+    ['catalogId', 'fallback', 'selection', 'selector'],
     'profile.resolved.model',
     'INVALID_PROFILE',
   );
@@ -1393,6 +1448,11 @@ function validateUnobservedProfile(profile) {
     'profile.resolved.model.catalogId',
     'INVALID_PROFILE',
   );
+  const fallback = optionalExactString(
+    resolvedModel.fallback,
+    'profile.resolved.model.fallback',
+    'INVALID_PROFILE',
+  );
   if (!['explicit', 'intent', 'provider-default'].includes(resolvedModel.selection)) {
     fail('INVALID_PROFILE', 'profile resolved model selection is invalid', {});
   }
@@ -1401,6 +1461,15 @@ function validateUnobservedProfile(profile) {
   }
   if (requested.model !== null && resolvedModel.selection !== 'explicit') {
     fail('INVALID_PROFILE', 'explicit requested model must remain explicit in resolution', {});
+  }
+  if (fallback !== null && (
+    resolvedModel.selection !== 'intent'
+    || requested.model !== null
+    || requested.intent === 'provider-default'
+    || modelSelector === null
+    || fallback === modelSelector
+  )) {
+    fail('INVALID_PROFILE', 'profile resolved model fallback provenance is invalid', {});
   }
 
   const resolvedEffort = requiredObject(resolved.effort, 'profile.resolved.effort', 'INVALID_PROFILE');
