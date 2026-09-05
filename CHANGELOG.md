@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.1 (in progress)
+## 0.6.1 (unreleased: awaiting the fresh-environment acceptance pass)
 
 - The completion wake says a child "finished its turn" rather than "completed its
   task", because an interrupted turn also completes; task success is never
