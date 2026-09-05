@@ -2,66 +2,62 @@
 
 ## 0.6.1 (in progress)
 
-- Grant each managed Codex clone turn write access to exactly its own `.git`,
-  including recovery turns. Keep ordinary clone metadata and leave linked
-  worktrees and external seats without an override. Neutralize repository hooks,
-  fsmonitor, and SSH helpers in operator Git commands and disable submodule
-  recursion during harvest fetch. Treat non-40-hex handback SHA reports as absent
-  so `harvest --commit` can recover failed child commits, and report whether the
-  child supplied a commit SHA.
-
-- Create managed seats as clones so children can commit within their sandbox.
-  Pin clone metadata and alternates, record the measured dissociation choice,
-  fetch and verify child handback SHAs under the repository lock, and refuse
-  non-fast-forward updates or deletion of unfetched work. Preserve legacy
-  worktree cleanup and the operator commit fallback.
-- Require exact compatibility evidence before Codex mutations, expire failed
-  measurements, and record turns-list capability only after an owned read.
-  Use the shared endpoint selector across runtime consumers, bind wake delivery
-  to its discovery receipt, and subscribe to each outstanding child's runtime.
-  Read watcher records safely and signal only an affirmatively matched process.
-- Enforce journal transition graphs, immutable terminal receipts, and revision
-  checks. Read private state through bounded owner-only descriptors. Publish
-  lifecycle command events before journal completion and repair missing events
-  after crashes. Verified parent context suppresses only redundant wakes;
-  acknowledgement remains explicit.
-
-- Add GPT-6 Astra to Codex execution guidance for `deep` and `max-quality`,
-  with a receipted GPT-5.6 Sol fallback on older live catalogs, explicit model
-  upgrade hints, and catalog-gated Ultra effort guidance.
-- A dispatched child's first message reads provenance box, exchange preamble,
-  then packet again. The exchange preamble had been prepended after the
-  provenance box was rendered, burying the `╭─ Transmogrify` block that names the
-  parent session.
-- Classify an absent Claude Code executable as an installable setup need and
-  report permission failures as a non-executable CLI instead of falling into
-  generic manual recovery.
-- Identify Claude and Codex desktop hosts from verified bundle identifiers at
-  relocated, system, or per-user app paths. Export the same read-only bundle
-  inventory and bundled CLI paths for later doctor and attachment reuse.
-- Describe newer Claude CLI measurement as vendor observations plus option
-  checks. The local follow-up acknowledgment fixture is no longer presented as
-  a live vendor probe.
-- Make the published start handoff verify Git, Node.js 20 or newer, npm, a
-  committed repository, and a visibly resolved repository root before it
-  creates any preparation directory.
-- Record whether a relay was launched or merely adopted. Stop only a launched
-  relay whose live process birth exactly matches its receipt.
+- Create managed seats as clones so children can commit on their assigned
+  branch and hand back the commit SHA for operator harvest.
+- Give every managed Codex clone turn, including recovery, write access to its
+  own Git directory without widening linked-worktree or external-seat access.
+- Keep `harvest --commit` available when a child cannot commit, and report
+  whether the child supplied a valid full commit SHA.
+- Add GPT-6 Astra to `deep` and `max-quality` guidance, with a receipted GPT-5.6
+  Sol fallback on older catalogs and catalog-gated Ultra effort guidance.
+- Guide setup from measured doctor results, preserving provider limitations and
+  executing only the first authorized action in a non-interactive invocation.
+- Classify a missing Claude executable as an installation need and an executable
+  permission failure as a separate setup problem.
+- Identify desktop hosts by verified bundle identifiers at relocated, system,
+  and per-user app paths.
+- Check Git, Node.js, npm, and a committed repository before the published start
+  handoff creates any preparation directory.
+- Present child messages in provenance, exchange contract, then packet order.
+- Align public documentation and examples with measured compatibility, doctor
+  probes, daemon and relay startup, persistence, and child commits.
+- Record the missing fresh-machine acceptance pass for 0.6.0 and retain that
+  release gate for 0.6.1.
+- Verify clone metadata, alternates, and handback SHAs before fetching commits;
+  refuse non-fast-forward updates and deletion of unfetched work.
+- Disable repository hooks, fsmonitor, SSH helpers, and recursive submodule
+  fetching during operator Git operations.
+- Require exact Codex compatibility evidence before mutations and expire failed
+  measurements; turns-list support requires a successful owned read.
+- Select runtime endpoints consistently, bind wakes to their discovery receipt,
+  and subscribe to each outstanding child's runtime.
+- Read watcher records safely and signal only an affirmatively matched process.
+- Stop only a relay launched by this installation whose process birth still
+  matches its receipt; adopted relays remain untouched.
 - Make Desktop persistence a receipt-backed transaction that preserves foreign
   login settings, rolls back partial writes, and refuses unowned removal.
-- Mark installer backups with owner-only receipts. Retention now moves only
-  valid receipted backups and refuses symlinked trash paths.
-- Receipt every created seat provision and refuse automatic cleanup when an
-  entry was replaced, gained unexpected output, or came from a version 0.6.0
-  name-only record.
+- Move installer backups into retention trash only with valid owner-only
+  receipts, and refuse symlinked trash paths.
+- Require matching creation receipts for seat provisions before cleanup;
+  replaced entries, extra output, and legacy name-only records block removal.
 - Require an affirmative quiescent provider observation before harvest.
-- Fsync durable handbacks before journaling them as copied and retain one
-  immutable content-addressed copy for every distinct harvested handback.
-- Compose doctor observations, typed setup plans, and guided setup execution:
-  distinguish missing Codex binaries, sign-in, and runtime state; execute one
-  non-interactive action per invocation; preserve provider limitations; use
-  launch-only and authorized persistence operations; and keep terminal summary
-  output separate from JSON.
+- Fsync durable handbacks before journaling them as copied and preserve an
+  immutable content-addressed copy for each distinct handback.
+- Enforce journal transition graphs, immutable terminal receipts, and revision
+  checks.
+- Read private state through bounded owner-only descriptors.
+- Publish lifecycle command events before journal completion and repair missing
+  events after crashes; verified parent context suppresses only redundant wakes
+  and acknowledgement remains explicit.
+- Describe newer Claude CLI measurement as vendor observations and option
+  checks; the local acknowledgment fixture does not prove live delivery.
+- Test the example handback with the real parser and forbid child push or branch
+  changes in the example packet.
+- Add a byte and word budget for the operator skill.
+- Check output schema keys within their operation sections, including nested
+  keys and explicit shared contracts.
+- Trigger both site workflows for the start generator's imported setup source
+  and test every root build input against every path filter.
 
 ## 0.6.0
 

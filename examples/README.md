@@ -1,304 +1,145 @@
 # Minimal managed-lane lifecycle
 
-This example starts from the installed skill root and exercises one lane from
-startup through durable handback and retirement. The operator host owns the
-packet, mailbox, and handback files; the executor lane reads authority from the
-packet and returns acknowledgments over its provider transport.
+The operator owns scope and lifecycle decisions. The child edits and commits
+inside its assigned clone, then writes a local handback. `harvest` verifies the
+commit and preserves the result before retirement. These commands illustrate
+one lane; replace every placeholder before use.
 
-## 1. Prepare the host records
-
-Set the stable host parameters. Replace the repository path and use a unique
-mailbox directory for each lane.
+## 1. Prepare and check the host
 
 ```bash
-set -euo pipefail
-
-export SKILL_ROOT="$(pwd -P)"
+export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
 export REPO_ROOT=/absolute/path/to/repository
-export WORKTREES=/absolute/path/outside-the-repository/transmogrify-worktrees
-export MAILBOX_DIR="$HOME/.local/state/transmogrify/mailboxes/example"
-export RUNTIME_URL=ws://127.0.0.1:8843
-export THREAD_NAME_FORMAT='::: <summary>'
-
-test -f "$SKILL_ROOT/SKILL.md"
-test "$(git -C "$REPO_ROOT" rev-parse --show-toplevel)" = "$REPO_ROOT"
+export WORKTREES="$HOME/.local/share/transmogrify/worktrees/example-repository"
+install -d -m 700 "$WORKTREES"
 git -C "$REPO_ROOT" rev-parse --verify HEAD
-case "$WORKTREES/" in
-  "$REPO_ROOT"/*)
-    git -C "$REPO_ROOT" check-ignore --quiet --no-index -- "$WORKTREES/"
-    ;;
-esac
 
-umask 077
-mkdir -p "$MAILBOX_DIR"
-test ! -e "$MAILBOX_DIR/packet.md"
-test ! -e "$MAILBOX_DIR/mailbox.md"
-test ! -e "$MAILBOX_DIR/handback.md"
-cp examples/packet.md "$MAILBOX_DIR/packet.md"
-cp examples/mailbox.md "$MAILBOX_DIR/mailbox.md"
-cp examples/handback.md "$MAILBOX_DIR/handback.md"
-```
-
-The ignore check must pass before Transmogrify creates an in-repository managed
-seat. Add `.worktrees/` to the target repository's `.gitignore`, or set
-`WORKTREES` to an absolute directory outside every Git worktree. Replace every
-placeholder in `packet.md`, including the exact mailbox and handback paths,
-before spawning.
-
-## 2. Run the read-only startup check
-
-For a Codex lane:
-
-```bash
 node "$SKILL_ROOT/scripts/doctor.js" \
+  --repo-root "$REPO_ROOT" --target all --explain
+```
+
+Use an absolute repository root. An external `WORKTREES` directory must be
+outside every Git worktree; an internal root must be Git-ignored. Use a unique
+root for this repository. The doctor reads provider and local state, probes
+Codex methods against the nil thread ID, and writes local compatibility
+receipts. It never mutates a real provider session. Follow its measured setup
+plan one authorized step at a time before spawning.
+
+Claude public lifecycle support uses CLI `2.1.258` or newer with compatibility
+evidence. Private archival separately requires the exact archive tuple.
+Codex runtime selection uses an explicit `--url`, `TRANSMOGRIFY_URL`, the live
+relay record, `TRANSMOGRIFY_PORT`, then the legacy default. These examples let
+the shared selector choose the endpoint.
+
+## 2. Create the parent and dispatch the packet
+
+Set the actual host provider and app; a Claude Code terminal host uses
+`claude` and `claude-code`. Pass the repository root so a Codex parent's thread
+can be checked against its seat.
+
+```bash
+node "$SKILL_ROOT/scripts/lane.js" parent-init \
   --repo-root "$REPO_ROOT" \
-  --target codex \
-  --url "$RUNTIME_URL"
+  --host-provider codex --host-app codex-desktop \
+  --name 'Example repository operator'
+
+# Copy contextFile from the result.
+export PARENT_CONTEXT=/absolute/path/to/parent-context.json
 ```
 
-For a Claude Code lane on the pinned macOS compatibility tuple:
+Customize [packet.md](packet.md) with the exact scope and acceptance command.
+Save it as an absolute, owner-only regular file accessible to the operator,
+then pass its content to spawn. Spawn writes the packet into the child's seat;
+the child does not need to read or write the operator's external mailbox.
 
 ```bash
-node "$SKILL_ROOT/scripts/doctor.js" \
-  --repo-root "$REPO_ROOT" \
-  --target claude
-```
-
-Doctor may create the installation's empty ownership registry. It does not
-start, stop, steer, archive, remove, or adopt a provider session.
-
-## 3. Create the parent context
-
-Create one durable parent identity before dispatch. Use the actual host provider,
-app surface, and visible parent task name; the private native task reference is
-optional and is never copied into a child prompt.
-
-```bash
-PARENT_JSON=$(node "$SKILL_ROOT/scripts/lane.js" parent-init \
-  --host-provider codex \
-  --host-app codex-desktop \
-  --name 'Example repository operator')
-printf '%s\n' "$PARENT_JSON"
-PARENT_CONTEXT=$(printf '%s' "$PARENT_JSON" | node -e \
-  "const fs=require('node:fs');process.stdout.write(JSON.parse(fs.readFileSync(0,'utf8')).contextFile)")
-test -f "$PARENT_CONTEXT"
-```
-
-After a restart, use `parent-list` to recover the same context instead of
-creating a replacement. Run `children` and `wait --timeout-ms 0` before making
-another dispatch so an older unacknowledged result cannot be forgotten.
-
-## 4. Spawn and retain the lane ID
-
-The following Codex example writes the public JSON receipt to the terminal and
-extracts its installation-scoped `laneId` without exposing provider IDs:
-
-```bash
-KICKOFF="Read the authorized packet at $MAILBOX_DIR/packet.md. Work only in the assigned seat. Return directive acknowledgments and the final structured handback over this lane; the operator host persists them outside the repository."
-
-SPAWN_JSON=$(
-  printf '%s\n' "$KICKOFF" |
-    node "$SKILL_ROOT/scripts/lane.js" spawn \
-      --repo-root "$REPO_ROOT" \
-      --worktrees "$WORKTREES" \
-      --url "$RUNTIME_URL" \
-      --target codex \
-      --name 'example: packet execution' \
-      --parent-context-file "$PARENT_CONTEXT" \
-      --intent balanced \
-      --input-file -
-)
-printf '%s\n' "$SPAWN_JSON"
-LANE_ID=$(printf '%s' "$SPAWN_JSON" | node -e \
-  "const fs=require('node:fs');process.stdout.write(JSON.parse(fs.readFileSync(0,'utf8')).laneId)")
-test -n "$LANE_ID"
-```
-
-The Codex example records the measured Desktop attachment receipt; run
-`desktop-attach.js ensure` first on macOS, or add `--allow-protocol-only` for
-a deliberately unattached lane. For Claude, change the target and name, omit
-the Codex-only `--url` option, and use the pinned Remote Control adapter:
-
-```bash
-SPAWN_JSON=$(
-  printf '%s\n' "$KICKOFF" |
-    node "$SKILL_ROOT/scripts/lane.js" spawn \
-      --repo-root "$REPO_ROOT" \
-      --worktrees "$WORKTREES" \
-      --target claude \
-      --name 'example: packet execution' \
-      --parent-context-file "$PARENT_CONTEXT" \
-      --intent balanced \
-      --input-file -
-)
-printf '%s\n' "$SPAWN_JSON"
-LANE_ID=$(printf '%s' "$SPAWN_JSON" | node -e \
-  "const fs=require('node:fs');process.stdout.write(JSON.parse(fs.readFileSync(0,'utf8')).laneId)")
-test -n "$LANE_ID"
-```
-
-Store `LANE_ID` and the returned `dispatchId` with the host packet and mailbox
-record. Never recover ownership from a display name. The native title is
-canonicalized to `::: example: packet execution`; the first provider message
-starts with the safe dispatch provenance block before `KICKOFF`.
-
-## 5. Listen, acknowledge, direct, and observe exact work
-
-Spawn produces a durable `child.spawned` event. Handle it, acknowledge it by
-exact event ID, and keep returning to this bounded loop while children remain:
-
-```bash
-EVENT_JSON=$(node "$SKILL_ROOT/scripts/lane.js" wait \
+node "$SKILL_ROOT/scripts/lane.js" spawn \
+  --repo-root "$REPO_ROOT" --worktrees "$WORKTREES" \
+  --target codex --name 'example: packet execution' \
   --parent-context-file "$PARENT_CONTEXT" \
-  --repo-root "$REPO_ROOT" \
-  --timeout-ms 60000)
-printf '%s\n' "$EVENT_JSON"
-EVENT_ID=$(printf '%s' "$EVENT_JSON" | node -e \
-  "const fs=require('node:fs'),j=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(j.events[0].eventId)")
+  --intent balanced --input-file /absolute/path/to/authorized-packet.md
 
-# Acknowledge only after the parent handled this exact event.
+# Copy laneId from the result; retain dispatchId with the operator's records.
+export LANE_ID=FULL_LANE_ID
+```
+
+Omit `--cwd` for a managed clone. An explicitly supplied existing seat is
+preserved at retirement. Codex requires a measured Desktop attachment for live
+app visibility. Use `--allow-protocol-only` only when that limitation is
+acceptable. For a Claude lane, change `--target codex` to `--target claude`.
+Never infer ownership from the visible `::: ` title.
+
+## 3. Wait, review, and acknowledge
+
+```bash
+node "$SKILL_ROOT/scripts/lane.js" wait \
+  --repo-root "$REPO_ROOT" --parent-context-file "$PARENT_CONTEXT" \
+  --until complete --timeout-ms 60000
+```
+
+Keep the parent active and repeat on normal timeout. The watcher can wake a
+parent through its recorded channel; the durable events remain authoritative.
+After handling each event, acknowledge its exact ID or the highest sequence
+that has been handled:
+
+```bash
 node "$SKILL_ROOT/scripts/lane.js" ack \
-  --parent-context-file "$PARENT_CONTEXT" \
-  --event "$EVENT_ID"
+  --parent-context-file "$PARENT_CONTEXT" --through HIGHEST_HANDLED_SEQUENCE
 ```
 
-Unacknowledged events are redelivered across timeout, compaction, and process
-restart. An idle/completed event is a prompt to inspect and harvest the child;
-it is not permission to archive or delete the lane.
+A timeout may contain no events. Never assume an `events[0]` exists.
+Unacknowledged events redeliver after restart. Recover the same parent with
+`parent-list`, inspect `children`, and run `wait --timeout-ms 0` before a new
+dispatch. A completion event prompts review; it does not authorize deletion.
 
-The templates include packet amendment 1 and its matching `directive 001`.
-After replacing their placeholders, send only the short directive reference.
-First inspect status. This Codex example chooses active-turn steering or an
-explicit boundary recovery from the measured Codex phase (Claude phases are
-`working`, `waiting`, `idle`, `stopped`; see
-[docs/DISPATCH.md](../docs/DISPATCH.md#status-phases)):
+For a scope change, amend the packet first and record the directive in the
+operator's [mailbox](mailbox.md). Send the exact authorized amendment text
+through stdin and retain the returned acknowledgment in that mailbox. Inspect
+`status` first: Codex `steer` requires `phase: executing`; `recover --input-file`
+starts a boundary turn only at `phase: idle`. Other phases require inspection
+or reconciliation. Claude `steer` queues during `executing`, `waiting`, or
+`idle`; the pre-measured CLI cannot resume a stopped session in place.
 
-```bash
-STATUS_JSON=$(node "$SKILL_ROOT/scripts/lane.js" status \
-  --repo-root "$REPO_ROOT" \
-  --lane "$LANE_ID")
-printf '%s\n' "$STATUS_JSON"
-PHASE=$(printf '%s' "$STATUS_JSON" | node -e \
-  "const fs=require('node:fs');process.stdout.write(JSON.parse(fs.readFileSync(0,'utf8')).phase)")
-
-if [ "$PHASE" = executing ]; then
-  ACTION=steer
-else
-  ACTION=recover
-fi
-
-printf '%s\n' 'Read directive 001 from the durable mailbox and acknowledge it before applying it.' |
-  node "$SKILL_ROOT/scripts/lane.js" "$ACTION" \
-    --repo-root "$REPO_ROOT" \
-    --lane "$LANE_ID" \
-    --input-file -
-```
-
-For a Claude lane, `steer` queues to the session's next safe point whether it
-is `working`, `waiting`, or `idle`. A stopped Claude lane is not resumed in
-place on the pinned CLI: retire it and spawn a new lane.
-
-The operator host appends the lane's exact acknowledgment and provider receipt
-to `mailbox.md`. It does not grant new authority from chat text alone.
-
-If the host exits during a mutation, observe before retrying:
+If delivery is uncertain, reconcile the exact lane before any retry:
 
 ```bash
 node "$SKILL_ROOT/scripts/lane.js" reconcile \
-  --repo-root "$REPO_ROOT" \
-  --target codex \
-  --lane "$LANE_ID" \
-  --url "$RUNTIME_URL"
+  --repo-root "$REPO_ROOT" --target codex --lane "$LANE_ID"
 ```
 
-Use `--target claude` and omit `--url` for a Claude lane. Reconciliation never
-blindly replays an operation whose delivery may have occurred.
+Use `--target claude` for Claude. Never replay a mutation whose delivery is
+unknown.
 
-## 6. Harvest, hash, and retire
+## 4. Harvest and retire
 
-Review the final lane output and committed repository state. Persist the exact
-reviewed result in `handback.md`, replacing the template fields. Confirm the
-managed seat was clean at harvest; a dirty or subsequently changed seat is
-intentionally preserved for manual review.
+The child uses [handback.md](handback.md) as a format example, replacing its
+illustrative SHA with the actual commit. Review the reported checks, changes,
+and Git status in the exact seat. The child must be affirmatively idle or
+stopped before harvest; unreadable provider state is not proof of quiescence.
 
 ```bash
-HARVEST_SHA=$(node -e \
-  "const fs=require('node:fs'),c=require('node:crypto');process.stdout.write(c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" \
-  "$MAILBOX_DIR/handback.md")
-test "${#HARVEST_SHA}" -eq 64
+node "$SKILL_ROOT/scripts/lane.js" harvest \
+  --repo-root "$REPO_ROOT" --lane "$LANE_ID"
 ```
 
-Wait for a Codex lane to become idle. If status still reports an active newest
-turn and the work should stop, interrupt it. This guarded form preserves the
-documented exit-2 refusal when the lane is already idle:
+Harvest parses the bounded handback, verifies its SHA against the seat HEAD,
+fetches the clone commit into the operator repository under a fast-forward
+check, and preserves an immutable durable handback. If the child could not
+commit, it omits the SHA and explains why; the operator can run the same command
+with `--commit` to commit the reviewed changes with provider attribution.
 
-```bash
-STATUS_JSON=$(node "$SKILL_ROOT/scripts/lane.js" status \
-  --repo-root "$REPO_ROOT" \
-  --lane "$LANE_ID" \
-  --url "$RUNTIME_URL")
-PHASE=$(printf '%s' "$STATUS_JSON" | node -e \
-  "const fs=require('node:fs');process.stdout.write(JSON.parse(fs.readFileSync(0,'utf8')).phase)")
+Harvest removes only matching recorded provisions and returns `retireCommand`
+with its `handbackSha256`. Run that exact command. For Claude, add
+`--private-archive` only when private archival is authorized for this run.
+A hand-computed digest is not a substitute for the durable harvest receipt.
 
-if [ "$PHASE" = executing ]; then
-  node "$SKILL_ROOT/scripts/lane.js" interrupt \
-    --repo-root "$REPO_ROOT" \
-    --lane "$LANE_ID" \
-    --url "$RUNTIME_URL"
-fi
-```
+Retirement archives the exact provider row and removes an eligible managed
+seat only when it was clean at harvest, remains clean and unchanged, and its
+commit is preserved in the operator repository. Replaced provisions and extra
+ignored output block cleanup. External seats remain. Claude local `rm` occurs
+only after the guarded seat removal has made its path absent.
 
-Once status reports idle, retire:
-
-```bash
-node "$SKILL_ROOT/scripts/lane.js" retire \
-  --repo-root "$REPO_ROOT" \
-  --lane "$LANE_ID" \
-  --url "$RUNTIME_URL" \
-  --harvested-output-sha256 "$HARVEST_SHA"
-```
-
-For Claude, retirement stops the exact session, then uses the explicitly
-authorized pinned archive path:
-
-```bash
-node "$SKILL_ROOT/scripts/lane.js" retire \
-  --repo-root "$REPO_ROOT" \
-  --lane "$LANE_ID" \
-  --private-archive \
-  --harvested-output-sha256 "$HARVEST_SHA"
-```
-
-Successful managed-seat retirement archives the exact native row, removes only
-the recorded clean worktree, and verifies cleanup. External seats are preserved.
-If retirement stops after provider archive, finish the recorded operation with
-exact-owned reconciliation rather than issuing a new retirement:
-
-```bash
-node "$SKILL_ROOT/scripts/lane.js" reconcile \
-  --repo-root "$REPO_ROOT" \
-  --target claude \
-  --lane "$LANE_ID" \
-  --finish-retirements \
-  --private-archive
-```
-
-Finish the lifecycle by handling and acknowledging the durable retirement
-event. Do this even after a parent restart; the same unacknowledged event will
-be returned until its exact ID is acknowledged:
-
-```bash
-EVENT_JSON=$(node "$SKILL_ROOT/scripts/lane.js" wait \
-  --parent-context-file "$PARENT_CONTEXT" \
-  --repo-root "$REPO_ROOT" \
-  --timeout-ms 60000)
-printf '%s\n' "$EVENT_JSON"
-EVENT_ID=$(printf '%s' "$EVENT_JSON" | node -e \
-  "const fs=require('node:fs'),j=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(j.events[0].eventId)")
-node "$SKILL_ROOT/scripts/lane.js" ack \
-  --parent-context-file "$PARENT_CONTEXT" \
-  --event "$EVENT_ID"
-```
-
-The templates are [packet.md](packet.md), [mailbox.md](mailbox.md), and
-[handback.md](handback.md).
+For a retryable local cleanup failure, rerun the exact retirement command.
+For a blocked invariant, preserve the seat for operator review. Handle and
+acknowledge the retirement event even when a matching parent context suppressed
+its wake; command completion never proves delivery to the parent.

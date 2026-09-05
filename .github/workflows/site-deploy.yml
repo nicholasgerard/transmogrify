@@ -11,6 +11,7 @@ on:
       - 'README.md'
       - 'SKILL.md'
       - 'package.json'
+      - 'scripts/lib/setup-plan.js'
   workflow_dispatch:
 
 permissions:

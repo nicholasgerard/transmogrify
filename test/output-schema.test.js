@@ -110,20 +110,66 @@ test('retire, reconcile, abandon, and wait results keep their declared keys only
   });
 });
 
-test('the schema command and docs/OUTPUT.md agree on operations and top-level keys', () => {
+function markdownSection(doc, heading) {
+  const lines = doc.split('\n');
+  const start = lines.indexOf(heading);
+  assert.notEqual(start, -1, `missing documentation section ${heading}`);
+  const level = /^#+/.exec(heading)[0].length;
+  const end = lines.findIndex((line, index) => index > start &&
+    /^#+ /.test(line) && /^#+/.exec(line)[0].length <= level);
+  return lines.slice(start + 1, end < 0 ? undefined : end).join('\n');
+}
+
+function missingOperationKeys(doc, operation, shape) {
+  const own = markdownSection(doc, `### \`${operation}\``);
+  // Only explicit shared-contract references admit keys from another section.
+  // A key in an unrelated operation must never satisfy this operation's docs.
+  const envelope = own.includes('Lane envelope') ? markdownSection(doc, '## Lane envelope') : '';
+  const plan = own.includes('(#doctor-explanation)') ? markdownSection(doc, '## Doctor explanation') : '';
+  const missing = [];
+  function check(value, prefix = '') {
+    for (const [key, child] of Object.entries(value)) {
+      if (!prefix && ['version', 'ok', 'operation'].includes(key)) continue;
+      const location = prefix ? `${prefix}.${key}` : key;
+      const shared = location === 'plan' || location.startsWith('plan.') ||
+        location === 'setup.plan' || location.startsWith('setup.plan.') ? plan : '';
+      const inherited = !prefix || location.startsWith('capabilities.') ||
+        location.startsWith('visibility.') ? envelope : '';
+      if (![own, shared, inherited].some((section) => section.includes(`\`${key}\``))) {
+        missing.push(`${operation}.${location}`);
+      }
+      if (child && typeof child === 'object') check(child, location);
+    }
+  }
+  check(shape);
+  return missing;
+}
+
+test('the schema command and docs/OUTPUT.md agree on per-operation schema keys', () => {
+  // The documentation consumer reads the real schema producer, not a fixture.
   const described = describeSchema();
   assert.equal(described.operation, 'schema');
   assert.deepEqual(described.operations, Object.keys(SCHEMAS));
   assert.deepEqual(publicResult(described).operations, described.operations);
   const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'OUTPUT.md'), 'utf8');
-  for (const [operation, shape] of Object.entries(SCHEMAS)) {
-    assert.match(doc, new RegExp(`^### \`${operation}\``, 'm'), `OUTPUT.md documents ${operation}`);
-    for (const key of Object.keys(shape)) {
-      if (['version', 'ok', 'operation'].includes(key)) continue;
-      assert.ok(doc.includes(`\`${key}\``), `OUTPUT.md names ${operation}.${key}`);
-    }
-  }
+  const missing = Object.entries(described.schemas)
+    .flatMap(([operation, shape]) => missingOperationKeys(doc, operation, shape));
+  assert.deepEqual(missing, [], 'every schema key belongs in its operation or an explicit shared contract');
   for (const phase of PHASES) assert.ok(doc.includes(`\`${phase}\``), `OUTPUT.md names phase ${phase}`);
+});
+
+test('output doc sync rejects a key moved into an unrelated operation', () => {
+  const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'OUTPUT.md'), 'utf8');
+  const section = markdownSection(doc, '### `harvest`');
+  const moved = doc.replace(section, section.replace('`childReportedCommit`', 'child commit report')) +
+    '\n`childReportedCommit` appears elsewhere.\n';
+  assert.deepEqual(missingOperationKeys(moved, 'harvest', describeSchema().schemas.harvest),
+    ['harvest.childReportedCommit']);
+  const status = markdownSection(doc, '### `status`');
+  const nestedMoved = doc.replace(status, status.replace('`exactSession`', 'exact session'));
+  assert.ok(nestedMoved.includes('`exactSession`'), 'the key still exists elsewhere in the document');
+  assert.deepEqual(missingOperationKeys(nestedMoved, 'status', describeSchema().schemas.status),
+    ['status.receipt.exactSession']);
 });
 
 test('the setup plan schema exposes only the documented explanation fields', () => {

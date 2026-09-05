@@ -26,6 +26,7 @@ Create or recover the parent context at the start of every orchestrating task:
 
 ```bash
 node "$SKILL_ROOT/scripts/lane.js" parent-init \
+  --repo-root "$REPO_ROOT" \
   --host-provider codex \
   --host-app codex-desktop \
   --name 'Release operator' \
@@ -103,7 +104,7 @@ Control spawn carries its own visibility receipt and never uses the flag.
 ## Provenance block
 
 The first provider message starts with this block, followed by one blank line
-and the child prompt:
+and the exchange preamble, then the child packet:
 
 ```text
 ╭─ Transmogrify · a task from your user's own session ──────
@@ -152,7 +153,7 @@ read back carries a derived `kind` and `terminal` flag so the parent can tell
 | Event | Kind | Meaning |
 | --- | --- | --- |
 | `child.spawned` | progress | The exact spawn operation completed and its provider identity is bound. |
-| `child.turn-completed` | complete | The input the parent sent has been fully processed: a Codex turn completed or was interrupted, or a Claude lane went from working to idle. Inspect its result before deciding whether to harvest, steer, or retire. |
+| `child.turn-completed` | complete | A Codex turn completed or was interrupted, or a Claude lane went from working to idle. This does not prove successful task completion; inspect its result before deciding whether to harvest, steer, or retire. |
 | `child.idle-observed` | complete | The lane was first observed idle with no preceding working phase. |
 | `child.needs-attention` | attention | The child is waiting for user input/approval or a safe reconciliation decision. |
 | `child.delivery-unknown` | attention | A provider mutation may have landed and must be reconciled without replay. |

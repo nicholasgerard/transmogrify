@@ -1,18 +1,19 @@
 name: Site
 
-# Scoped to `site/` so the lifecycle tools keep their own independent CI.
-# The root workflow (ci.yml) is unaffected by anything in this file.
+# Covers site sources and imported root build inputs. Lifecycle tests retain
+# their independent root workflow (ci.yml).
 on:
   push:
     branches: [main]
     paths:
       - 'site/**'
       - '.github/workflows/site.yml'
-      # The site renders the support matrix and compatibility pins from these
-      # at build time, so a change to them can break the build.
+      # Root inputs supply the support matrix, compatibility pins, version,
+      # and setup narration used by the generated start handoff.
       - 'README.md'
       - 'SKILL.md'
       - 'package.json'
+      - 'scripts/lib/setup-plan.js'
   pull_request:
     paths:
       - 'site/**'
@@ -20,6 +21,7 @@ on:
       - 'README.md'
       - 'SKILL.md'
       - 'package.json'
+      - 'scripts/lib/setup-plan.js'
   workflow_dispatch:
 
 permissions:

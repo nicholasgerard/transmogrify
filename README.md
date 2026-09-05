@@ -1,7 +1,7 @@
 # Transmogrify
 
 Transmogrify is an agent skill and a set of zero-framework Node tools for
-operating worktree-seated Codex and Claude Code lanes. It gives either Codex or
+operating Codex and Claude Code lanes in isolated Git seats. It gives either Codex or
 Claude a provider-neutral lifecycle—spawn, steer, status, stop, recover,
 durable output harvest, retire, and reconcile—and records each lane's
 native-visibility state from a measured receipt: Claude lanes carry a Remote
@@ -82,15 +82,16 @@ verified builds and receipts are in the
   [official Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
 - Standalone Codex tools are CI-tested on macOS and Linux; Windows is not a
   supported host in this release.
-- For Claude targets: Apple Silicon macOS and the pinned Claude Code CLI
-  `2.1.258`, signed into a first-party `claude.ai` account. Native archive also
-  requires the pinned Claude Desktop `1.40609.1` build. Native mobile behavior
-  was verified with Claude for iOS `1.260828.1` (`33349478298`). Unmeasured CLI builds
-  fail closed for lifecycle mutations; unmeasured Desktop builds disable only
-  the private archive step. Install the pinned CLI with
-  `claude install 2.1.258`, then run `claude auth login` and
-  `claude auth status`; the commands are defined in Anthropic's
-  [CLI reference](https://code.claude.com/docs/en/cli-usage).
+- For Claude targets: Apple Silicon macOS and Claude Code CLI `2.1.258` or
+  newer, signed into a first-party `claude.ai` account. Public lifecycle
+  compatibility uses a measured minimum plus probes, with no maximum version.
+  Known executable hashes use pre-measured evidence; other builds must pass
+  vendor observations and option checks. Failed measurements block mutations.
+  Private archive separately requires the exact CLI hash and Claude Desktop
+  `1.40609.1` build in the archive compatibility tuple. Native mobile behavior
+  was verified with Claude for iOS `1.260828.1` (`33349478298`). Run
+  `claude auth login` and `claude auth status` after installation; see
+  [Claude compatibility](docs/CLAUDE-CODE.md#compatibility-receipts).
 - One operator runtime dependency: `ws`. The isolated static website package
   under `site/` has build-time dependencies and is not installed with the skill.
 - The target repository must be its exact absolute Git worktree root and must
@@ -130,7 +131,7 @@ staging or replacing a target.
 
 A successful default install writes both host copies. The one-line handoff does
 not select a host: a new session in Claude Desktop or the ChatGPT app can load
-the same Transmogrify setup. Inspect both hosts without changing anything:
+the same Transmogrify setup. Inspect both hosts with provider reads and local diagnostic receipt writes:
 
 ```bash
 export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
@@ -189,11 +190,22 @@ node "$SKILL_ROOT/scripts/doctor.js" \
   --target codex
 ```
 
-The doctor is read-only with respect to both providers. It creates or validates
-the installation-owned registry and, for each requested target, performs an
-initialize-only Codex handshake or Claude public preflight and agent listing.
-It prints aggregate owned and pending counts. It never starts, stops, restarts,
-steers, archives, removes, or adopts a provider session.
+The doctor creates or validates the local ownership registry and writes local
+compatibility receipts. For Codex it initializes a short-lived client, reads
+`thread/list`, and probes `turn/steer`, `thread/name/set`, and `thread/archive`
+against the nil thread ID only. These probes must return the measured not-found
+responses; they never target a real session. `thread/turns/list` stays
+unmeasured until an exact-owned read validates it. Results are cached by probe
+set and runtime version; failed measurements expire after 24 hours.
+
+For Claude it checks the executable version and digest, public auth status,
+and `agents --json --all`. A new executable also receives help-based settings
+and follow-up option checks. The local acknowledgment fixture is a parser
+check, not a live delivery probe. It inventories Codex CLI versions and, when
+the runtime is unavailable, reads the selected CLI's `login status`. It reads
+Desktop attachment, process ancestry, and local receipts and prints aggregate
+owned and pending counts. It never starts, stops, restarts, steers, archives,
+removes, or adopts a real provider session.
 
 For Codex, `ok:true` means the selected WebSocket runtime matches the pinned
 protocol contract. `nativeVisibility` is a separate measured receipt:
@@ -201,15 +213,14 @@ protocol contract. `nativeVisibility` is a separate measured receipt:
 that runtime, with the client pid, the connection, the app version, and
 whether that build is on the tested list; otherwise the Desktop state that was
 observed and the next action, normally `desktop-attach.js ensure`. After a
-Desktop restart or update, rerun the doctor: a surviving independent runtime
-shows as unattached until Desktop is relaunched against it, while exact-owned
-recovery and retirement on that runtime remain available.
+Desktop restart or update, rerun the doctor: attachment must be measured again, including when persistence is configured.
+Exact-owned recovery and retirement on a surviving runtime remain available.
 Runtime selection is the same here and in `desktop-attach.js`: explicit
-`--url`, `TRANSMOGRIFY_URL`, the live relay record, then legacy port 8843.
+`--url`, `TRANSMOGRIFY_URL`, the live relay record, `TRANSMOGRIFY_PORT`, then legacy port 8843.
 
 The doctor also prints `setup.ownerActions`: every precondition only the owner
 can satisfy, each with the exact command and a `blocking` flag. A blocking
-action (a logged-out or unpinned Claude CLI, a Codex runtime that needs
+action (a logged-out, below-minimum, or failed-measurement Claude CLI, a Codex runtime that needs
 authorization) stops lanes on that provider until it is done; an advisory one
 (Codex Desktop not attached) only withholds native visibility, so Codex lanes
 remain available protocol-only. `setup.ready` is true when nothing blocks.
@@ -218,7 +229,7 @@ The registry is private local control state. Transmogrify creates its
 directories with mode `0700` and JSON records with mode `0600`; existing state
 paths must retain those owner-only permissions.
 
-Use `--target all` to preflight both providers on the pinned macOS Claude
+Use `--target all` to preflight both providers on a supported Apple Silicon macOS
 host, or `--target claude` when only the Claude surface is needed. A
 Codex-only Linux host should keep `--target codex`.
 
@@ -272,7 +283,11 @@ per-user LaunchAgent it would install. After owner review,
 `persist --authorize` sets the login-session URL and writes
 `~/Library/LaunchAgents/sh.transmogrify.attach.plist`; the agent ensures the
 daemon and relay before reapplying the URL at login. `unpersist --authorize`
-removes both changes. Persistence never relaunches a running Desktop app.
+restores the receipted prior login value and removes only its matching owned
+LaunchAgent. Persistence refuses foreign values or files and rolls back partial
+writes. It never relaunches a running Desktop app. Login persistence and mobile
+reattachment after restart still need the live acceptance recorded in
+[Roadmap](ROADMAP.md#acceptance-program-turnkey-bidirectional-operation).
 
 ## Quick start
 
@@ -288,8 +303,8 @@ node "$SKILL_ROOT/scripts/doctor.js" \
 node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT"
 ```
 
-In a non-interactive host, do not run the second command until the user agrees
-to the plan's first step; add only its matching consent flag. Once the doctor
+In a non-interactive host, authorize the first step with its matching flag when
+it requires consent. A step marked `consent: none` needs no flag. Once the doctor
 shows the requested hosts ready, use an absolute repository root and pass
 prompt text through stdin so it does not appear in the operator command's
 arguments. The Claude CLI currently requires the initial background-session
@@ -305,6 +320,7 @@ git -C "$REPO_ROOT" rev-parse --show-toplevel
 git -C "$REPO_ROOT" rev-parse --verify HEAD
 
 node "$SKILL_ROOT/scripts/lane.js" parent-init \
+  --repo-root "$REPO_ROOT" \
   --host-provider "$HOST_PROVIDER" \
   --host-app "$HOST_APP" \
   --name 'Repository operator'
@@ -329,10 +345,10 @@ Desktop state it saw; `--allow-protocol-only` is the explicit admission that
 this particular lane may run without a native-app receipt. Do not use it when
 the requested outcome requires Desktop/mobile visibility; run
 `desktop-attach.js ensure` instead. Claude Code spawn does not use this flag;
-its pinned Remote Control adapter carries the native visibility receipt.
+its measured Remote Control adapter carries the native visibility receipt.
 
 Use `--target claude` for a named Claude Code Remote Control lane. Omit
-`--cwd` to get a managed worktree under `WORKTREES`, or pass an absolute
+`--cwd` to get a managed clone under `WORKTREES`, or pass an absolute
 `--cwd` to use an existing Git worktree inside that root, which is then
 preserved at retirement. The root rules (Git-ignored when inside the
 repository, outside every other worktree when external, owned by you with mode
@@ -379,13 +395,25 @@ node "$SKILL_ROOT/scripts/lane.js" status \
   --lane LANE_ID
 ```
 
-Harvest is a workflow phase, not a provider-generic transcript command.
-Require the child to write a bounded `handback.md` or another project-defined
-artifact in its owned worktree. The parent reads that exact seat, reviews the
-Git diff and status, persists the needed result outside fragile chat history,
-and hashes the accepted artifact or handback. Pass that lowercase SHA-256 to
-`retire`. A provider-native task read can accelerate review, but it is not the
-portable harvest contract and never substitutes for repository evidence.
+Every child receives `.transmogrify/packet.md` and writes
+`.transmogrify/handback.md` inside its seat. In a managed clone the child commits
+on its assigned branch and reports a title, body, and full commit SHA. It never
+pushes or changes branches. The clone's own `.git` is writable; operator state
+and shared Git metadata remain outside its write boundary.
+
+After reviewing the child's work and confirming it is idle, run:
+
+```bash
+node "$SKILL_ROOT/scripts/lane.js" harvest \
+  --repo-root "$REPO_ROOT" --lane LANE_ID
+```
+
+Harvest validates the handback and seat HEAD, fetches the clone commit into the
+operator repository with a fast-forward check, saves a durable handback,
+removes exact recorded provisions, and prints the retirement command. Use
+`harvest --commit` as the fallback when a child could not commit; the child must
+explain that in `Not verified` and omit its SHA. A manually hashed file does not
+replace this journaled harvest receipt.
 
 Standalone Codex lanes use the fixed `workspace-write` sandbox and approval
 policy `never`; approval-required actions return to the host rather than
@@ -409,8 +437,8 @@ node "$SKILL_ROOT/scripts/lane.js" retire \
 ```
 
 Retirement is ordered and provider-safe: the managed worktree must be clean at
-harvest and unchanged at cleanup, any tracked, untracked, or ignored file
-counts as dirt, and observed dirt or a changed HEAD permanently blocks
+harvest and unchanged at cleanup, any tracked, untracked, or ignored file other than an exact receipted
+provision counts as dirt, and observed dirt or a changed HEAD permanently blocks
 automatic cleanup and preserves the seat. Because `claude rm` can delete a
 background session and its worktree, the Claude adapter runs it only after its
 own guarded seat removal has made the path absent. A transient local failure
@@ -425,19 +453,19 @@ a complete packet, handback, digest, and retirement walkthrough in
 
 | Tool | Purpose |
 | --- | --- |
-| `scripts/transmogrify.js` | One entry point: `transmogrify.js <doctor|attach|runtime|probe|lane|rpc|listen|watch|maintain>` forwards to the tool below and shares its exit status |
+| `scripts/transmogrify.js` | One entry point: `transmogrify.js <doctor|setup|attach|runtime|probe|lane|rpc|listen|watch|maintain>` forwards to the tool below and shares its exit status |
 | `scripts/doctor.js` | Read-only startup discovery and aggregate ownership check |
-| `scripts/lane.js` | Provider-neutral spawn, steer, status, interrupt/stop, recover, retire, reconcile, and abandon |
+| `scripts/lane.js` | Provider-neutral spawn, steer, status, interrupt/stop, recover, harvest, retire, reconcile, and abandon |
 | `scripts/maintain.js` | Bounded maintenance: the read-only doctor plus each available provider's exact-owned reconcile; `--retention` moves aged, worktree-released operation journals and superseded install backups into recoverable trash |
 | `scripts/runtime-up.sh` | Ensure the managed Codex daemon and loopback relay, or report the standalone fallback as JSON |
 | `scripts/lib/relay.js` | Own the loopback TCP-to-daemon-socket relay by pid and process birth |
 | `scripts/desktop-attach.js` | Measure or ensure Desktop attachment, and persist or remove the owner-approved login environment and LaunchAgent |
 | `scripts/lane-status-listen.js` | Listen for state transitions on exact owned Codex lanes |
-| `scripts/watch.js` | Per-parent watcher, started by `spawn`: reads a working child every few seconds and an idle one only when nudged (by the parent's own commands, a Claude child's session hook, or a Codex runtime notification), records the durable events, and wakes the parent once per round through its recorded channel ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)) |
+| `scripts/watch.js` | Per-parent watcher, started by `spawn`: reads a working child every few seconds and an idle one every thirty seconds or when nudged (by the parent's own commands, a Claude child's session hook, or a Codex runtime notification), records the durable events, and wakes the parent once per round through its recorded channel ([docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)) |
 | `scripts/rpc.js` | Default-deny, read-only Codex diagnostics |
 
 Every command exits 0 for a confirmed result, 2 for a usage error or a safe
-refusal that attempted nothing, 3 for a failure or an uncertain outcome after
+refusal (including a retryable local cleanup after verified provider retirement), 3 for a failure or an uncertain outcome after
 an attempt, and 1 only for an unexpected internal error. Failures print one
 JSON envelope on stderr with a fixed message per code. Success output is an
 allowlist per operation ([docs/OUTPUT.md](docs/OUTPUT.md)): a key that is not
@@ -457,7 +485,8 @@ declared public never prints. Provider-touching lane operations accept
 | `status` | Codex, Claude | Reads and revalidates exact owned identity |
 | `interrupt` | Codex | Cancels only the newest exact active turn |
 | `stop` | Claude | Stops the whole exact background session |
-| `recover` | Codex, Claude | Codex observes/reconciles by default or resumes the same thread with input; Claude resumes the same recorded session |
+| `recover` | Codex, Claude | Codex observes/reconciles by default or resumes the same thread with input; Claude attempts the recorded session and contains a fork; stopped-session in-place resume is unavailable on the pre-measured CLI |
+| `harvest` | Codex, Claude | Verifies and fetches a clone commit, preserves the local handback, and prints retirement; `--commit` is the operator fallback |
 | `retire` | Codex, Claude | Requires a harvest digest; Claude also requires `--private-archive` and defers local removal unless a managed seat is safely removed first; a manually removed blocked seat requires exact-lane `--accept-manual-seat-removal` |
 | `reconcile` | Codex, Claude | Repairs exact-owned pending state and eligible cleanup; never name-adopts or replays an unknown mutation |
 | `abandon` | Codex, Claude | Closes a stranded pending spawn, steer, stop, recover, resume, or interrupt as failed on the owner's authority with an unknown provider outcome; never a retirement |
@@ -519,12 +548,12 @@ to a public channel.
 
 ## Security model
 
-Transmogrify accepts only a root-path loopback WebSocket endpoint and does not
-configure app-server authentication for that local mode. Treat that accepted
-configuration as a local control plane. Bind it
-only to loopback and trust every local client before connecting sensitive work.
-The Claude lifecycle adapter refuses an unknown CLI build, account, session,
-worker, or execution identity. Its optional native-archive step additionally
+Transmogrify accepts root-path loopback WebSocket endpoints and canonical local
+Unix-socket endpoints. It does not configure app-server authentication for these
+local transports. Treat them as a local control plane; bind TCP listeners only
+to loopback and trust local clients before connecting sensitive work.
+The Claude lifecycle adapter requires compatible build measurement and exact
+account, session, worker, and execution identity. Its optional native-archive step additionally
 pins the Desktop build and private response shape, reads one narrowly named
 macOS Keychain item only during explicitly authorized retirement, and never
 prints the credential. Full details are in [SECURITY.md](SECURITY.md).
