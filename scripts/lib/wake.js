@@ -191,7 +191,7 @@ async function discoverCodexWake(options, env = process.env) {
 function wakeMessage(events, options = {}) {
   const batch = Array.isArray(events) ? events : [events];
   const kindText = (event) => ({
-    complete: 'completed its task and is idle (harvest now, steer again, or retire)',
+    complete: 'finished its turn and is idle (harvest now, steer again, or retire)',
     attention: 'needs your attention',
     terminal: `reached a terminal state (${String(event.type || '').replace(/^child\./, '')})`,
     progress: 'reported progress',

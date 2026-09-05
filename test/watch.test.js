@@ -104,7 +104,7 @@ test('watchOnce wakes the parent once per event of a kind that needs it and keep
   assert.equal(first.wakes[0].kind, 'complete');
   assert.equal(first.wakes[0].delivered, true);
   assert.equal(delivered[0].bridgeId, BRIDGE);
-  assert.match(delivered[0].text, /completed its task and is idle/);
+  assert.match(delivered[0].text, /finished its turn and is idle/);
   assert.match(delivered[0].text, new RegExp(`--parent-context-file "${context.file}"`));
   assert.equal(delivered[0].clientUserMessageId, first.wakes[0].eventId);
   assert.equal(first.working, false);

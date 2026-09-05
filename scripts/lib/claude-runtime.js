@@ -124,9 +124,9 @@ const OWNER_ACTIONS = new Map([
     'Retire the lane with a harvest digest, or spawn a new lane.'],
   ['REMOTE_CONTROL_UNAVAILABLE',
     'The session never registered Remote Control, usually because the Claude login broke at launch. ' +
-    'Run claude auth status and, if it is logged out, claude auth login. Then stop and remove that ' +
-    'exact session with claude stop and claude rm (claude agents --all lists it under this lane title), ' +
-    'run reconcile again so the lane settles, and retire the lane to free its seat.'],
+    'Run claude auth status and, if it is logged out, claude auth login. Then run reconcile again so ' +
+    'the lane settles, and retire the lane: retirement stops and removes the exact recorded session ' +
+    'and frees the seat through the guarded cleanup. Never remove a session by its title.'],
 ]);
 
 // The cause recorded when a spawn cannot be verified: the failing check's code

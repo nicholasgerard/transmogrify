@@ -2,6 +2,12 @@
 
 ## 0.6.1 (in progress)
 
+- The completion wake says a child "finished its turn" rather than "completed its
+  task", because an interrupted turn also completes; task success is never
+  inferred from a wake.
+- The Remote Control failure advice no longer points at a session by its title
+  or at `claude rm` before guarded cleanup; retirement removes the exact recorded
+  session.
 - Align lifecycle references, troubleshooting, and site copy with clone harvest,
   measured attachment, durable acknowledgements, and setup behavior; add public
   documentation regression assertions.
