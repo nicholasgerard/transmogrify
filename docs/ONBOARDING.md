@@ -139,10 +139,12 @@ GUI state. Every branch has a test with a fake ancestry and environment.
 
 `doctor.js --explain` (and `setup.plan` in the JSON) adds, beside the
 existing machine-readable result, an ordered plan of steps with, for each:
-`what` (one plain sentence), `why` (one sentence), `consent` (`none`,
-`install`, `sign-in`, `start-runtime`, `relaunch-desktop`), and the exact
-command Transmogrify will run. The plan is computed for both hosts at
-once, from the host context, so "install from Codex and be ready in Claude
+`action` (a fixed setup operation), `what` (one plain sentence), `why` (one
+sentence that states the benefit and what remains if declined), `consent`
+(`none`, `install`, `sign-in`, `start-runtime`, `relaunch-desktop`, or
+`persist-attach`), and the exact command Transmogrify will run. Runtime-start
+steps name the supported Codex binary the doctor measured. The plan is
+computed for both hosts at once, from the host context, so "install from Codex and be ready in Claude
 Desktop" is one plan. `docs/OUTPUT.md` documents the shape; the schema
 test covers it.
 
@@ -155,16 +157,20 @@ the refusal paths are covered without invoking a live installer, sign-in,
 runtime, or Desktop action.
 
 New `scripts/setup.js` (also `transmogrify.js setup`): runs the doctor's
-plan step by step. Each step that needs consent is executed only with its
-explicit flag (`--install-claude-cli`, `--install-codex-cli`,
+plan step by step. A non-interactive invocation runs exactly the first step
+and returns the newly measured plan. Each step that needs consent is executed
+only with its explicit flag (`--install-claude-cli`, `--install-codex-cli`,
 `--sign-in`, `--start-runtime`, `--relaunch-desktop`, `--persist-attach`) or
 an interactive yes when a TTY is present; the agent asks the user one step at
 a time with the `why` text. Installation uses the vendors' documented
 standalone installers, verified from their official docs on 2026-09-04;
 sign-in uses `claude auth login` and `codex login` and waits for the user. The
-runtime uses `ensurePreferredRuntime`, and Desktop attachment uses
-`desktop-attach.js ensure --relaunch-desktop` and `persist`. Setup never
-modifies the CLI hosting the current session, never adopts a foreign runtime,
+runtime uses `ensurePreferredRuntime` with the binary named by the plan. A
+compatible runtime that wins the launch race is reused after the doctor
+verifies it. Opening a stopped Desktop uses `desktop-attach.js ensure
+--launch-only`; relaunch uses `ensure --relaunch-desktop`; persistence uses
+`persist --authorize`. Setup never modifies the CLI hosting the current
+session,
 and reruns the doctor after each step so the summary is always measured, never
 assumed.
 
@@ -176,9 +182,12 @@ and now ends with the readiness and next-session handoff in plain words.
 `install.sh` installs both hosts by default already; the start handoff
 must stop selecting one. The state root, the runtime, the parent contexts,
 and the child hooks are shared. After setup, the summary says what is
-ready in each app and that a new session in the other app picks it up
-without more work (a skill installed under `~/.claude/skills` and
-`~/.agents/skills` is loaded by the next session of each host).
+ready in each app and that a new session in the other app picks it up.
+The structured result reports `ready`, `ready-with-limitations`,
+`needs-action`, or `unsupported` across requested providers that this platform
+supports, with one status for each provider. A skill installed under
+`~/.claude/skills` and `~/.agents/skills` is loaded by the next session of
+each host without more work.
 
 ### 6. The start handoff
 

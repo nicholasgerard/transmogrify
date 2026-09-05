@@ -10,6 +10,7 @@ const {
   codexCliBinaries,
   main,
   parseDoctorArgs,
+  renderDoctorOutput,
   renderSetupSummary,
 } = require('../scripts/doctor');
 const {
@@ -123,9 +124,6 @@ test('doctor reuses only read-only provider surfaces and emits aggregate ownersh
     version: '0.151.0',
     pinnedVersionLine: true,
     compatibility: 'good',
-    compatibleMethods: [
-      'thread/list', 'thread/turns/list', 'turn/steer', 'thread/name/set', 'thread/archive',
-    ],
   });
   assert.equal(result.providers.claude.reuse, 'installed-cli-session-surface');
   assert.equal(result.providers.claude.reusable, true);
@@ -491,7 +489,6 @@ test('doctor detects but will not recommend reusing an unverified Codex version'
     version: '0.148.0',
     pinnedVersionLine: false,
     compatibility: 'failed',
-    compatibleMethods: [],
     failingMethod: 'minimum-version',
   });
   assert.equal(result.providers.codex.setup.reason, 'runtime-unsupported');
@@ -513,8 +510,10 @@ test('doctor arguments honor the documented environment fallbacks and reject uns
     claudeBin: '/tmp/claude',
     timeoutMs: 20_000,
     explain: false,
+    json: false,
   });
   assert.equal(parseDoctorArgs(['--repo-root', '/tmp/repo', '--explain'], {}).explain, true);
+  assert.equal(parseDoctorArgs(['--repo-root', '/tmp/repo', '--json'], {}).json, true);
   assert.throws(() => parseDoctorArgs(['--repo-root', 'relative'], {}), /absolute path/);
   assert.throws(() => parseDoctorArgs([
     '--repo-root', '/tmp/repo', '--target', 'other',
@@ -555,6 +554,7 @@ test('doctor explain attaches a plan and renders the four-line TTY summary', asy
         connection: '127.0.0.1:1->127.0.0.1:2', observedAt: '2026-09-03T10:00:00.000Z',
       },
       desktop: { bundleId: 'com.openai.codex', version: '26.901.20858', build: '7658', buildTested: true },
+      persisted: true,
       nextAction: 'none',
     }),
     detectHostContext: () => ({
@@ -566,6 +566,9 @@ test('doctor explain attaches a plan and renders the four-line TTY summary', asy
   assert.deepEqual(explained.setup.plan.steps, []);
   assert.match(explained.setup.plan.context, /live streaming shows there/);
   assert.match(renderSetupSummary(explained), /^Found: .+\nReady: .+\nNeeded: .+\nNext: /);
+  assert.equal(renderDoctorOutput(explained, { explain: true, json: false }, true), renderSetupSummary(explained));
+  assert.doesNotThrow(() => JSON.parse(renderDoctorOutput(explained, { explain: true, json: true }, true)));
+  assert.doesNotThrow(() => JSON.parse(renderDoctorOutput(explained, { explain: true, json: false }, false)));
 });
 
 test('doctor exposes a non-mutating help entrypoint', async () => {
@@ -611,6 +614,8 @@ test('doctor names the owner action for every unmet setup precondition', async (
   assert.match(blocked.providers.codex.setup.ownerAction, /desktop-attach\.js ensure --relaunch-desktop/);
   assert.deepEqual(blocked.setup, {
     ready: false,
+    outcome: 'needs-action',
+    providers: { claude: 'needs-action', codex: 'ready-with-limitations' },
     ownerActions: [
       { provider: 'codex', reason: 'desktop-unattached', blocking: false, ownerAction: blocked.providers.codex.setup.ownerAction },
       { provider: 'claude', reason: 'not-logged-in', blocking: true, ownerAction: 'Run `claude auth login`, then rerun the doctor.' },
@@ -635,11 +640,19 @@ test('doctor names the owner action for every unmet setup precondition', async (
   assert.equal(JSON.stringify(blocked).includes('private@example.invalid'), false);
   assert.equal(JSON.stringify(blocked).includes('/Users/private/.claude'), false);
 
+  fs.writeFileSync(`${fixture.repoRoot}/codex`, '#!/bin/sh\n', { mode: 0o700 });
   const unavailable = await main([
     '--repo-root', fixture.repoRoot,
     '--target', 'codex',
     '--url', 'ws://127.0.0.1:65534',
-  ], fixture.env, {});
+  ], fixture.env, {
+    codexCliCandidates: [{ path: `${fixture.repoRoot}/codex`, source: 'PATH' }],
+    execFileSync(executable, args) {
+      if (args[0] === '--version') return 'codex-cli 0.155.0\n';
+      if (args.join(' ') === 'login status') return 'Logged in\n';
+      throw new Error(`unexpected ${executable} ${args.join(' ')}`);
+    },
+  });
   assert.equal(unavailable.providers.codex.setup.reason, 'runtime-unavailable');
   assert.equal(unavailable.providers.codex.setup.blocking, true);
   assert.equal(unavailable.setup.ready, false);
@@ -662,7 +675,12 @@ test('doctor names the owner action for every unmet setup precondition', async (
     }),
   });
   assert.equal(ready.ok, true);
-  assert.deepEqual(ready.setup, { ready: true, ownerActions: [] });
+  assert.deepEqual(ready.setup, {
+    ready: true,
+    outcome: 'ready',
+    providers: { claude: 'ready', codex: 'ready' },
+    ownerActions: [],
+  });
   assert.equal(ready.providers.claude.setup, undefined);
   assert.equal(ready.providers.codex.setup, undefined);
 });
@@ -748,8 +766,8 @@ test('doctor inventories every distinct Codex CLI candidate using only --version
     },
   });
   assert.deepEqual(binaries.filter((binary) => binary.path.startsWith(fs.realpathSync(root))), [
-    { path: fs.realpathSync(first), sources: ['PATH'], version: '0.148.0' },
-    { path: fs.realpathSync(second), sources: ['PATH', 'TRANSMOGRIFY_BIN'], version: '0.153.0' },
+    { path: fs.realpathSync(first), sources: ['PATH'], version: '0.148.0', supported: false },
+    { path: fs.realpathSync(second), sources: ['PATH', 'TRANSMOGRIFY_BIN'], version: '0.153.0', supported: true },
   ]);
   assert.equal(binaries.some((binary) => binary.sources.includes('codex-desktop')), true);
   assert.equal(calls.every((call) => JSON.stringify(call[1]) === '["--version"]'), true);

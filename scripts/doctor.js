@@ -21,13 +21,13 @@ const {
   createClaudeSurface,
   parseAgents,
 } = require('./lib/claude-surface');
-const { measureCodexCompatibility } = require('./lib/codex-compat');
+const { measureCodexCompatibility, supportedRuntimeVersion } = require('./lib/codex-compat');
 const {
   check: desktopAttachCheck,
   resolveRuntimeUrl: resolveDesktopRuntimeUrl,
 } = require('./lib/desktop-attach');
 const { detectHostContext } = require('./lib/host-context');
-const { computeSetupPlan } = require('./lib/setup-plan');
+const { computeSetupPlan, setupReadiness } = require('./lib/setup-plan');
 const { ensureRegistry, readRegistry } = require('./lib/state');
 const { VERSION } = require('./lib/version');
 const { EXIT, isUsageCode, publicErrorMessage } = require('./lib/public-error');
@@ -55,6 +55,8 @@ const CLAUDE_SETUP_FALLBACK = 'Run \`claude --version\` and \`claude auth status
 // withhold native visibility, because a Codex lane can still be spawned
 // protocol-only with --allow-protocol-only.
 const CODEX_SETUP_ACTIONS = new Map([
+  ['cli-not-found', { blocking: true, ownerAction: 'Install a supported Codex command-line tool, then rerun the doctor.' }],
+  ['codex-not-logged-in', { blocking: true, ownerAction: 'Sign in to Codex, then rerun the doctor.' }],
   ['runtime-unavailable', { blocking: true, ownerAction: 'Reuse an existing Codex app-server runtime through TRANSMOGRIFY_URL, or authorize this installation to start one with \`runtime-up.sh\`, then rerun the doctor.' }],
   ['sandbox-loopback-denied', { blocking: true, ownerAction: 'Grant the doctor and lane commands loopback access on this host, then rerun the doctor.' }],
   ['desktop-unattached', { blocking: false, ownerAction: 'Allow Transmogrify to relaunch Codex Desktop attached to the runtime (\`desktop-attach.js ensure --relaunch-desktop\`), or set TRANSMOGRIFY_DESKTOP_RELAUNCH=auto. Attachment makes Codex lanes appear and stream live in Desktop; declining leaves them protocol-only and not live-visible there.' }],
@@ -97,20 +99,24 @@ function parseCodexCliVersion(raw) {
   return match ? match[1] : null;
 }
 
-// Inventory each distinct executable from the three discovery surfaces. The
-// only child command is --version; discovery never starts an app-server.
+// Inventory each distinct executable from the three discovery surfaces.
+// Discovery never starts an app-server; unavailable runtimes add one
+// read-only login-status call against the selected supported executable.
 function codexCliBinaries(env = process.env, dependencies = {}) {
-  const candidates = [];
-  for (const directory of String(env.PATH || '').split(path.delimiter)) {
-    if (directory && path.isAbsolute(directory)) candidates.push({ path: path.join(directory, 'codex'), source: 'PATH' });
-  }
-  candidates.push({
-    path: '/Applications/ChatGPT.app/Contents/Resources/codex',
-    source: 'codex-desktop',
-  });
-  if (env.TRANSMOGRIFY_BIN && path.isAbsolute(env.TRANSMOGRIFY_BIN)) {
-    candidates.push({ path: env.TRANSMOGRIFY_BIN, source: 'TRANSMOGRIFY_BIN' });
-  }
+  const candidates = dependencies.codexCliCandidates || (() => {
+    const discovered = [];
+    for (const directory of String(env.PATH || '').split(path.delimiter)) {
+      if (directory && path.isAbsolute(directory)) discovered.push({ path: path.join(directory, 'codex'), source: 'PATH' });
+    }
+    discovered.push({
+      path: '/Applications/ChatGPT.app/Contents/Resources/codex',
+      source: 'codex-desktop',
+    });
+    if (env.TRANSMOGRIFY_BIN && path.isAbsolute(env.TRANSMOGRIFY_BIN)) {
+      discovered.push({ path: env.TRANSMOGRIFY_BIN, source: 'TRANSMOGRIFY_BIN' });
+    }
+    return discovered;
+  })();
   const binaries = new Map();
   for (const candidate of candidates) {
     let resolved;
@@ -137,9 +143,36 @@ function codexCliBinaries(env = process.env, dependencies = {}) {
         timeout: 5000,
       }));
     } catch {}
-    binaries.set(resolved, { path: resolved, sources: [candidate.source], version });
+    binaries.set(resolved, {
+      path: resolved,
+      sources: [candidate.source],
+      version,
+      supported: version === null ? null : supportedRuntimeVersion(version),
+    });
   }
   return [...binaries.values()];
+}
+
+function codexLoginStatus(cliBinaries, env = process.env, dependencies = {}) {
+  const binary = cliBinaries.find((candidate) => candidate.supported === true);
+  if (!binary) return { binary: null, signedIn: null };
+  const run = dependencies.execFileSync || execFileSync;
+  try {
+    const output = run(binary.path, ['login', 'status'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: env.PATH || '/usr/bin:/bin' },
+      maxBuffer: 4096,
+      timeout: 5000,
+    });
+    return { binary: binary.path, signedIn: !/\b(?:not logged in|signed out)\b/i.test(String(output)) };
+  } catch (error) {
+    const output = `${String(error?.stdout || '')}\n${String(error?.stderr || '')}`;
+    return {
+      binary: binary.path,
+      signedIn: /\b(?:not logged in|signed out)\b/i.test(output) ? false : null,
+    };
+  }
 }
 function attachmentSetupReason(attachment) {
   return new Map([
@@ -152,7 +185,7 @@ function attachmentSetupReason(attachment) {
     ['toolUnavailable', 'desktop-tool-unavailable'],
   ]).get(attachment?.state) || null;
 }
-function setupSummary(providers) {
+function setupSummary(providers, hostContext) {
   const ownerActions = [];
   for (const provider of ['codex', 'claude']) {
     const setup = providers[provider]?.setup;
@@ -162,7 +195,7 @@ function setupSummary(providers) {
       });
     }
   }
-  return { ready: !ownerActions.some((action) => action.blocking), ownerActions };
+  return { ...setupReadiness(providers, hostContext), ownerActions };
 }
 const HELP = `usage: doctor.js --repo-root <absolute-path> [options]
 
@@ -171,7 +204,8 @@ options:
   --url <loopback-ws-url>     Codex app-server endpoint
   --claude-bin <absolute>     exact Claude CLI executable
   --timeout-ms <milliseconds> bounded provider probe timeout
-  --explain                    add an ordered plain-language setup plan`;
+  --explain                    add an ordered plain-language setup plan
+  --json                       print JSON even when --explain runs on a terminal`;
 
 function usage(message) {
   const error = new Error(message);
@@ -197,6 +231,7 @@ function parseDoctorArgs(argv, env = process.env, dependencies = {}) {
       'claude-bin': { type: 'string' },
       'timeout-ms': { type: 'string' },
       explain: { type: 'boolean' },
+      json: { type: 'boolean' },
     },
   });
   const repoRoot = parsed.values['repo-root'] || env.REPO_ROOT;
@@ -237,7 +272,11 @@ function parseDoctorArgs(argv, env = process.env, dependencies = {}) {
   if (claudeBin && !path.isAbsolute(claudeBin)) {
     usage('--claude-bin or CLAUDE_BIN must be an absolute path');
   }
-  return { repoRoot, target, url, claudeBin, timeoutMs, explain: parsed.values.explain === true };
+  return {
+    repoRoot, target, url, claudeBin, timeoutMs,
+    explain: parsed.values.explain === true,
+    json: parsed.values.json === true,
+  };
 }
 
 // Lane and pending-operation counts per backend. Counts only; no lane id,
@@ -340,6 +379,31 @@ function nativeVisibilityFor(receipt) {
   };
 }
 
+function claudeBuildMeasurement(measurement) {
+  if (!measurement || typeof measurement !== 'object') return null;
+  return {
+    result: measurement.result,
+    source: measurement.source,
+    measuredAt: measurement.measuredAt,
+  };
+}
+
+function unavailableRuntime(cliBinaries, env, dependencies) {
+  const login = codexLoginStatus(cliBinaries, env, dependencies);
+  return {
+    state: 'unavailable',
+    supportedBinaryAvailable: login.binary !== null,
+    accountSignedIn: login.signedIn,
+    ...(login.binary ? { binary: login.binary } : {}),
+  };
+}
+
+function unavailableCodexSetup(runtime) {
+  if (!runtime.supportedBinaryAvailable) return codexSetup('cli-not-found');
+  if (runtime.accountSignedIn === false) return codexSetup('codex-not-logged-in');
+  return codexSetup('runtime-unavailable');
+}
+
 // One initialize handshake plus the Desktop attachment read, then close.
 // Reusable means the runtime is at the minimum version and passed the cached
 // method probe. Mutation-shaped probes address only the nil thread id.
@@ -392,6 +456,9 @@ async function probeCodex(options, env, dependencies) {
       reuse: reusable ? 'existing-compatible-protocol-runtime' : 'blocked-unverified-runtime',
       probe: 'initialize-handshake-method-compatibility-and-desktop-attachment-read',
       cliBinaries,
+      runtime: reusable
+        ? { state: 'reusable' }
+        : { state: 'unsupported', failingMethod: compatibility.failingMethod || 'minimum-version' },
       nativeVisibility: nativeVisibilityFor(attachment),
       ...(attachmentSetup ? { setup: attachmentSetup } : {}),
       pinned: {
@@ -403,12 +470,14 @@ async function probeCodex(options, env, dependencies) {
         version: userAgent[2],
         pinnedVersionLine: client.verifiedRuntime === true,
         compatibility: compatibility.result,
-        compatibleMethods: compatibility.probes.filter((entry) => entry.ok).map((entry) => entry.method),
         ...(compatibility.failingMethod ? { failingMethod: compatibility.failingMethod } : {}),
       },
     };
   } catch (error) {
     const sandboxDenied = error?.cause?.code === 'EPERM' || error?.code === 'EPERM';
+    const runtime = sandboxDenied
+      ? { state: 'sandbox-denied' }
+      : unavailableRuntime(cliBinaries, env, dependencies);
     return {
       provider: 'codex',
       requested: true,
@@ -417,6 +486,7 @@ async function probeCodex(options, env, dependencies) {
       reuse: 'unavailable',
       probe: 'initialize-handshake-only',
       cliBinaries,
+      runtime,
       nativeVisibility: {
         verified: false,
         nativeDispatchReady: false,
@@ -435,7 +505,7 @@ async function probeCodex(options, env, dependencies) {
           nextAction: 'obtain-scoped-host-authorization-or-use-a-full-lifecycle-native-channel',
         } : {}),
       },
-      setup: codexSetup(sandboxDenied ? 'sandbox-loopback-denied' : 'runtime-unavailable'),
+      setup: sandboxDenied ? codexSetup('sandbox-loopback-denied') : unavailableCodexSetup(runtime),
     };
   } finally {
     client?.close?.();
@@ -470,7 +540,7 @@ async function probeClaude(options, env, dependencies) {
       observed: {
         cliVersion: runtime.cliVersion,
         cliSha256: runtime.cliSha256,
-        buildMeasurement: runtime.cliMeasurement || null,
+        buildMeasurement: claudeBuildMeasurement(runtime.cliMeasurement),
         agentListReadable: true,
       },
     };
@@ -526,8 +596,9 @@ function maintenanceCommands(options, ownership, providers) {
   return commands;
 }
 
-// Run the requested probes and assemble the report. ok is true only when every
-// requested provider is reusable; providerMutationsAttempted is always false.
+// Run the requested probes and assemble the report. Unsupported providers do
+// not make a supported ready provider fail; providerMutationsAttempted is
+// always false.
 async function doctor(options, env = process.env, dependencies = {}) {
   const ensure = dependencies.ensureRegistry || ensureRegistry;
   const read = dependencies.readRegistry || readRegistry;
@@ -553,16 +624,15 @@ async function doctor(options, env = process.env, dependencies = {}) {
       ? notRequested('claude', claudePinned, 'public-build-measurement-and-agent-list-only')
       : await probeClaude(options, env, dependencies),
   };
-  const requested = Object.values(providers).filter((provider) => provider.requested);
-  const setup = setupSummary(providers);
+  const inspectHost = dependencies.detectHostContext || detectHostContext;
+  const hostContext = inspectHost(env, dependencies.hostContextDependencies || dependencies);
+  const setup = setupSummary(providers, hostContext);
   if (options.explain) {
-    const inspectHost = dependencies.detectHostContext || detectHostContext;
-    const hostContext = inspectHost(env, dependencies.hostContextDependencies || dependencies);
     setup.plan = computeSetupPlan({ providers, setup }, hostContext);
   }
   return {
     version: 1,
-    ok: requested.every((provider) => provider.reusable === true),
+    ok: setup.ready,
     mode: 'read-only-provider-probe',
     providerMutationsAttempted: false,
     registry: {
@@ -586,8 +656,15 @@ function renderSetupSummary(result) {
     .filter(([, provider]) => provider.requested && provider.reusable)
     .map(([provider]) => provider === 'codex' ? 'the Codex runtime' : 'Claude Code');
   const readyText = ready.length > 0 ? `${ready.join(' and ')} ${ready.length === 1 ? 'is' : 'are'} ready.` : 'No lane host is ready yet.';
+  const unsupported = Object.entries(result.setup?.providers || {})
+    .filter(([, status]) => status === 'unsupported')
+    .map(([provider]) => provider === 'claude' ? 'Claude lanes' : 'Codex lanes');
+  const supportedCount = Object.values(result.setup?.providers || {})
+    .filter((status) => !['unsupported', 'not-requested'].includes(status)).length;
   const neededText = plan.steps.length === 0
-    ? 'No setup changes are needed.'
+    ? (unsupported.length > 0
+      ? `${unsupported.join(' and ')} are unavailable on this machine; ${supportedCount > 0 ? 'no setup changes are needed for the supported provider.' : 'no requested provider can run here.'}`
+      : 'No setup changes are needed.')
     : plan.steps.map((entry) => entry.what).join(' ');
   const nextAction = plan.steps[0]?.what || 'You can start lanes now.';
   const nextText = plan.context ? `${plan.context} ${nextAction}` : nextAction;
@@ -597,6 +674,11 @@ function renderSetupSummary(result) {
     `Needed: ${neededText}`,
     `Next: ${nextText}`,
   ].join('\n');
+}
+
+function renderDoctorOutput(result, options, isTTY = process.stdout.isTTY === true) {
+  if (isTTY && options.explain && !options.json) return renderSetupSummary(result);
+  return JSON.stringify(result, null, 2);
 }
 
 async function main(argv = process.argv.slice(2), env = process.env, dependencies = {}) {
@@ -610,8 +692,10 @@ if (require.main === module) {
       console.log(result.help);
       return;
     }
-    if (process.stdout.isTTY && result.setup?.plan) console.log(renderSetupSummary(result));
-    console.log(JSON.stringify(result, null, 2));
+    console.log(renderDoctorOutput(result, {
+      explain: process.argv.includes('--explain'),
+      json: process.argv.includes('--json'),
+    }));
     if (!result.ok) process.exitCode = 3;
   }).catch((error) => {
     const code = publicFailureCode(error);
@@ -631,10 +715,12 @@ module.exports = {
   CLAUDE_BACKEND,
   CODEX_BACKEND,
   codexCliBinaries,
+  codexLoginStatus,
   doctor,
   main,
   ownershipSummary,
   parseDoctorArgs,
   publicFailureCode,
   renderSetupSummary,
+  renderDoctorOutput,
 };

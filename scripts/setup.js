@@ -6,8 +6,6 @@
 // recognized step maps to one fixed implementation below. After every action,
 // the doctor measures the machine again before setup considers the step done.
 
-const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { createInterface } = require('node:readline/promises');
@@ -16,6 +14,7 @@ const { doctor, parseDoctorArgs } = require('./doctor');
 const { detectHostContext } = require('./lib/host-context');
 const { runtimeUrl } = require('./lib/codex-runtime');
 const { publicResult } = require('./lib/output-schema');
+const { ACTIONS: PLAN_ACTIONS } = require('./lib/setup-plan');
 const {
   PUBLIC_ERROR_MESSAGES, exitCodeForError, publicErrorMessage,
 } = require('./lib/public-error');
@@ -42,10 +41,11 @@ const ACTIONS = Object.freeze({
   signInClaude: 'sign-in-claude',
   signInCodex: 'sign-in-codex',
   startRuntime: 'start-runtime',
-  attachDesktop: 'attach-desktop',
-  relaunchDesktop: 'relaunch-desktop',
+  openApp: 'open-app',
+  relaunchApp: 'relaunch-app',
   persistAttach: 'persist-attach',
 });
+const KNOWN_ACTIONS = new Set(PLAN_ACTIONS);
 
 class SetupError extends Error {
   constructor(code, reason, step, message) {
@@ -149,76 +149,35 @@ async function signInProvider(provider, env, dependencies) {
   return runProcess(command[0], command[1], env, dependencies);
 }
 
-function executableOnPath(name, env = process.env) {
-  for (const directory of String(env.PATH || '').split(path.delimiter)) {
-    if (!directory) continue;
-    const candidate = path.join(directory, name);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return fs.realpathSync(candidate);
-    } catch {}
-  }
-  return null;
-}
-
-function runtimeOptions(env = process.env) {
+function runtimeOptions(binary, env = process.env, dependencies = {}) {
   // The same precedence every Codex command uses: TRANSMOGRIFY_URL, the live
   // relay record, then the legacy loopback port.
-  const url = runtimeUrl({}, env);
-  const managedFallback = path.join(env.CODEX_HOME || path.join(env.HOME || os.homedir(), '.codex'),
-    'packages', 'standalone', 'current', 'codex');
-  let bin = env.TRANSMOGRIFY_BIN || executableOnPath('codex', env);
-  if (!bin && fs.existsSync(managedFallback)) bin = managedFallback;
+  const url = runtimeUrl({}, env, dependencies.runtimeUrlDependencies || dependencies);
   return {
     url,
     probe: path.join(__dirname, 'runtime-probe.js'),
-    ...(bin ? { bin } : {}),
+    ...(binary ? { bin: binary } : {}),
     ...(env.TRANSMOGRIFY_LOG ? { log: env.TRANSMOGRIFY_LOG } : {}),
     ...(env.TRANSMOGRIFY_RELAY_PORT ? { relayPort: env.TRANSMOGRIFY_RELAY_PORT } : {}),
   };
 }
 
-async function startRuntime(env, dependencies) {
+async function startRuntime(step, env, dependencies) {
   const ensure = dependencies.ensureRuntime || ensurePreferredRuntime;
-  const result = await ensure(runtimeOptions(env), { ...dependencies.runtimeDependencies, env });
-  const foreign = result?.owned === false ||
-    (result?.runtime === 'standalone-fallback' && ['reused', 'race-reused'].includes(result.state));
-  if (foreign) {
-    throw new SetupError(
-      'RUNTIME_MISMATCH',
-      'foreign-runtime',
-      null,
-      'a compatible runtime appeared, but this setup did not start it',
-    );
-  }
-  return result;
+  return ensure(runtimeOptions(step.binary, env, dependencies), {
+    ...dependencies.runtimeDependencies,
+    env,
+  });
 }
 
 async function runDesktopAttach(operation, env, dependencies) {
-  const args = operation === ACTIONS.attachDesktop
-    ? ['ensure']
-    : operation === ACTIONS.relaunchDesktop
+  const args = operation === ACTIONS.openApp
+    ? ['ensure', '--launch-only']
+    : operation === ACTIONS.relaunchApp
       ? ['ensure', '--relaunch-desktop']
-      : ['persist'];
+      : ['persist', '--authorize'];
   if (dependencies.desktopAttach) return dependencies.desktopAttach({ operation, args, env });
   return runProcess(process.execPath, [path.join(__dirname, 'desktop-attach.js'), ...args], env, dependencies);
-}
-
-function actionForStep(step) {
-  const command = String(step?.command || '');
-  if (step?.consent === 'install' && command.includes('--install-claude-cli')) return ACTIONS.installClaude;
-  if (step?.consent === 'install' && command.includes('--install-codex-cli')) return ACTIONS.installCodex;
-  if (step?.consent === 'sign-in' && /^claude\s+auth\s+login(?:\s|$)/.test(command)) return ACTIONS.signInClaude;
-  if (step?.consent === 'sign-in' && /^codex\s+login(?:\s|$)/.test(command)) return ACTIONS.signInCodex;
-  if (step?.consent === 'start-runtime') return ACTIONS.startRuntime;
-  if (step?.consent === 'relaunch-desktop') return ACTIONS.relaunchDesktop;
-  if (step?.consent === 'persist-attach' || command.includes('desktop-attach.js') && /\bpersist\b/.test(command)) {
-    return ACTIONS.persistAttach;
-  }
-  if (step?.consent === 'none' && command.includes('desktop-attach.js') && /\bensure\b/.test(command)) {
-    return ACTIONS.attachDesktop;
-  }
-  return null;
 }
 
 function flagAuthorizes(action, options) {
@@ -226,9 +185,14 @@ function flagAuthorizes(action, options) {
   if (action === ACTIONS.installCodex) return options.installCodexCli;
   if ([ACTIONS.signInClaude, ACTIONS.signInCodex].includes(action)) return options.signIn;
   if (action === ACTIONS.startRuntime) return options.startRuntime;
-  if (action === ACTIONS.relaunchDesktop) return options.relaunchDesktop;
+  if (action === ACTIONS.relaunchApp) return options.relaunchDesktop;
   if (action === ACTIONS.persistAttach) return options.persistAttach;
-  return action === ACTIONS.attachDesktop;
+  return action === ACTIONS.openApp;
+}
+
+function authorizationKey(action) {
+  if ([ACTIONS.signInClaude, ACTIONS.signInCodex].includes(action)) return 'sign-in';
+  return action;
 }
 
 function hostOwnsCli(action, hostContext) {
@@ -254,12 +218,10 @@ function stepReceipt(step, outcome) {
 }
 
 function appReadiness(report) {
-  const claudeReady = report?.providers?.claude?.reusable === true;
-  const codexReady = report?.providers?.codex?.reusable === true;
-  const live = report?.providers?.codex?.nativeVisibility?.verified === true;
+  const statuses = report?.setup?.providers || {};
   return {
-    claude: claudeReady ? 'ready' : 'needs setup',
-    codex: codexReady ? (live ? 'ready with live app updates' : 'ready without live app updates') : 'needs setup',
+    claude: statuses.claude || 'needs-action',
+    codex: statuses.codex || 'needs-action',
     nextSession: 'A new session in the other app picks up this setup.',
   };
 }
@@ -279,7 +241,9 @@ function setupResult(report, options, completed, extra = {}) {
     ok: extra.ok ?? true,
     operation: 'setup',
     dryRun: options.dryRun,
-    ready: report?.setup?.ready === true && plan.steps.length === 0,
+    ready: report?.setup?.ready === true,
+    outcome: report?.setup?.outcome || 'needs-action',
+    providers: report?.setup?.providers || {},
     plan,
     completed,
     apps: appReadiness(report),
@@ -287,13 +251,13 @@ function setupResult(report, options, completed, extra = {}) {
   });
 }
 
-async function executeAction(action, env, dependencies) {
+async function executeAction(action, step, env, dependencies) {
   if (action === ACTIONS.installClaude) return installProvider('claude', env, dependencies);
   if (action === ACTIONS.installCodex) return installProvider('codex', env, dependencies);
   if (action === ACTIONS.signInClaude) return signInProvider('claude', env, dependencies);
   if (action === ACTIONS.signInCodex) return signInProvider('codex', env, dependencies);
-  if (action === ACTIONS.startRuntime) return startRuntime(env, dependencies);
-  if ([ACTIONS.attachDesktop, ACTIONS.relaunchDesktop, ACTIONS.persistAttach].includes(action)) {
+  if (action === ACTIONS.startRuntime) return startRuntime(step, env, dependencies);
+  if ([ACTIONS.openApp, ACTIONS.relaunchApp, ACTIONS.persistAttach].includes(action)) {
     return runDesktopAttach(action, env, dependencies);
   }
   throw new SetupError('POLICY_REFUSAL', 'manual-action-required');
@@ -306,12 +270,15 @@ async function runSetup(options, env = process.env, dependencies = {}) {
   const inspectHost = dependencies.detectHostContext || detectHostContext;
   const hostContext = dependencies.hostContext || inspectHost(env, dependencies.hostContextDependencies || {});
   const narration = dependencies.narrate || ((line) => console.error(line));
+  const input = dependencies.stdin || process.stdin;
+  const interactive = input.isTTY === true;
+  const consumedFlags = new Set();
 
   for (let count = 0; count < 20; count += 1) {
     const step = report?.setup?.plan?.steps?.[0];
     if (!step) return setupResult(report, options, completed);
-    const action = actionForStep(step);
-    if (!action) {
+    const action = step?.action;
+    if (!KNOWN_ACTIONS.has(action)) {
       return setupResult(report, options, completed, {
         ok: false,
         code: 'POLICY_REFUSAL',
@@ -330,9 +297,13 @@ async function runSetup(options, env = process.env, dependencies = {}) {
 
     narration(step.what);
     narration(`Why: ${step.why}`);
-    let authorized = flagAuthorizes(action, options);
-    const input = dependencies.stdin || process.stdin;
-    if (!authorized && input.isTTY === true) authorized = await interactiveConsent(step, dependencies);
+    const key = authorizationKey(action);
+    let authorized = step.consent === 'none';
+    if (!authorized && flagAuthorizes(action, options) && !consumedFlags.has(key)) {
+      authorized = true;
+      consumedFlags.add(key);
+    }
+    if (!authorized && interactive) authorized = await interactiveConsent(step, dependencies);
     if (!authorized) {
       if (completed.length > 0) return setupResult(report, options, completed);
       return setupResult(report, options, completed, {
@@ -344,7 +315,7 @@ async function runSetup(options, env = process.env, dependencies = {}) {
     }
 
     try {
-      await executeAction(action, env, dependencies);
+      await executeAction(action, step, env, dependencies);
     } catch (error) {
       const coded = error instanceof SetupError ? error : new SetupError(
         stableErrorCode(error?.code), 'step-failed', step,
@@ -357,10 +328,10 @@ async function runSetup(options, env = process.env, dependencies = {}) {
       });
     }
     completed.push(stepReceipt(step, 'confirmed'));
-    const previous = `${step.what}\0${step.command}`;
+    const previous = `${step.action}\0${step.binary || ''}`;
     report = await inspect(options, env, dependencies);
     const next = report?.setup?.plan?.steps?.[0];
-    if (next && `${next.what}\0${next.command}` === previous) {
+    if (next && `${next.action}\0${next.binary || ''}` === previous) {
       return setupResult(report, options, completed, {
         ok: false,
         code: 'PROVIDER_UNAVAILABLE',
@@ -368,6 +339,7 @@ async function runSetup(options, env = process.env, dependencies = {}) {
         refusal: { what: next.what, consent: next.consent, reason: 'step-not-verified' },
       });
     }
+    if (!interactive) return setupResult(report, options, completed);
   }
   return setupResult(report, options, completed, {
     ok: false,
@@ -413,7 +385,6 @@ module.exports = {
   HELP,
   INSTALL_COMMANDS,
   SetupError,
-  actionForStep,
   appReadiness,
   main,
   parseSetupArgs,

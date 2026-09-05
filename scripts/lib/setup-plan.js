@@ -1,45 +1,37 @@
 'use strict';
 
-// Convert the doctor's measured reasons into one ordered, user-facing plan.
-// This module describes actions only; setup.js is the later execution gate.
+// Convert the doctor's measured provider records into one ordered,
+// user-facing plan. Commands are display data; setup.js dispatches only on
+// the typed action and passes the selected Codex binary separately.
 
 const TERMINAL_CONTEXT = 'This is built for the desktop apps; live streaming shows there, everything else works here.';
 const IDE_CONTEXT = 'Install both hosts, then open Claude Desktop or the ChatGPT app; Cursor support is not available yet.';
 const UNSUPPORTED_CONTEXT = 'Claude lanes require Apple Silicon macOS; Codex lanes still work here in protocol-only mode.';
+
+const ACTIONS = Object.freeze([
+  'install-claude',
+  'install-codex',
+  'sign-in-claude',
+  'sign-in-codex',
+  'start-runtime',
+  'open-app',
+  'relaunch-app',
+  'persist-attach',
+]);
 
 const COMMANDS = Object.freeze({
   installClaude: 'node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --install-claude-cli',
   signInClaude: 'claude auth login',
   installCodex: 'node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --install-codex-cli',
   signInCodex: 'codex login',
-  startRuntime: '"$SKILL_ROOT/scripts/runtime-up.sh"',
-  attachDesktop: 'node "$SKILL_ROOT/scripts/desktop-attach.js" ensure',
-  relaunchDesktop: 'node "$SKILL_ROOT/scripts/desktop-attach.js" ensure --relaunch-desktop',
-  persistAttach: 'node "$SKILL_ROOT/scripts/desktop-attach.js" persist',
+  startRuntime: 'node "$SKILL_ROOT/scripts/setup.js" --repo-root "$REPO_ROOT" --start-runtime',
+  openApp: 'node "$SKILL_ROOT/scripts/desktop-attach.js" ensure --launch-only',
+  relaunchApp: 'node "$SKILL_ROOT/scripts/desktop-attach.js" ensure --relaunch-desktop',
+  persistAttach: 'node "$SKILL_ROOT/scripts/desktop-attach.js" persist --authorize',
 });
 
-function step(order, what, why, consent, command) {
-  return { order, what, why, consent, command };
-}
-
-function compatibleBundledCodexBinary(doctorResult, hostContext) {
-  const sources = [
-    doctorResult?.providers?.codex?.cliBinaries,
-    doctorResult?.providers?.codex?.observed?.cliBinaries,
-    doctorResult?.cliBinaries,
-    hostContext?.cliBinaries?.codex,
-  ];
-  const candidates = sources.flatMap((source) => {
-    if (Array.isArray(source)) return source;
-    if (source && typeof source === 'object') return Object.values(source);
-    return [];
-  });
-  return candidates.some((candidate) => {
-    if (!candidate || typeof candidate !== 'object') return false;
-    const source = String(candidate.source || candidate.kind || '').toLowerCase();
-    const supported = candidate.supported === true || candidate.compatible === true || candidate.reusable === true;
-    return supported && (source.includes('bundled') || source.includes('desktop'));
-  });
+function step(order, action, what, why, consent, command, extra = {}) {
+  return { order, action, what, why, consent, command, ...extra };
 }
 
 function contextSentence(hostContext) {
@@ -57,85 +49,97 @@ function contextSentence(hostContext) {
   return null;
 }
 
-function stepsForAction(action, doctorResult, hostContext) {
-  const { provider, reason } = action;
-  if (provider === 'claude') {
-    if (reason === 'cli-not-found') {
-      return [
-        step(10, 'Install Claude Code.', 'Claude lanes need the Claude Code command-line tool.', 'install', COMMANDS.installClaude),
-        step(20, 'Sign in to Claude Code.', 'Claude lanes run through your Claude account.', 'sign-in', COMMANDS.signInClaude),
-      ];
-    }
-    if (['not-logged-in', 'account-not-first-party'].includes(reason)) {
-      return [step(20, 'Sign in to Claude Code.', 'Claude lanes need a signed-in claude.ai account.', 'sign-in', COMMANDS.signInClaude)];
-    }
-    if (['cli-unpinned', 'cli-unsupported', 'cli-below-minimum', 'cli-outdated', 'cli-not-executable'].includes(reason)) {
-      return [step(10, 'Install a supported Claude Code release.', 'The installed Claude Code tool cannot pass the required checks.', 'install', COMMANDS.installClaude)];
-    }
-    if (reason === 'auth-status-unreadable') {
-      return [step(20, 'Repair the Claude Code sign-in.', 'Claude Code cannot confirm which account is signed in.', 'sign-in', COMMANDS.signInClaude)];
-    }
-    if (reason === 'custom-config-dir') {
-      return [step(5, 'Use the default Claude Code configuration for Transmogrify.', 'Only the default configuration can be verified safely.', 'none', 'unset CLAUDE_CONFIG_DIR')];
-    }
-    if (reason === 'unsupported-platform') return [];
+function providerStatus(provider, observation, hostContext) {
+  if (observation?.requested === false) return 'not-requested';
+  if (provider === 'claude' && (observation?.setup?.reason === 'unsupported-platform' ||
+      hostContext?.platform?.claudeLanesSupported === false)) return 'unsupported';
+  if (observation?.reusable !== true) return 'needs-action';
+  if (provider === 'codex' && observation?.nativeVisibility?.verified !== true) {
+    return 'ready-with-limitations';
   }
+  return 'ready';
+}
 
-  if (provider === 'codex') {
-    if (reason === 'cli-not-found') {
-      return [
-        step(30, 'Install the Codex command-line tool.', 'Codex lanes need a compatible tool to host their shared runtime.', 'install', COMMANDS.installCodex),
-        step(40, 'Sign in to Codex.', 'The Codex runtime needs your signed-in Codex account.', 'sign-in', COMMANDS.signInCodex),
-      ];
-    }
-    if (['not-logged-in', 'codex-not-logged-in'].includes(reason)) {
-      return [step(40, 'Sign in to Codex.', 'The Codex runtime needs your signed-in Codex account.', 'sign-in', COMMANDS.signInCodex)];
-    }
-    if (['runtime-unavailable', 'runtime-unsupported'].includes(reason)) {
-      const what = compatibleBundledCodexBinary(doctorResult, hostContext)
-        ? 'Start a shared Codex runtime with the compatible tool bundled in the Codex app.'
-        : 'Start a compatible shared Codex runtime.';
-      return [step(50, what, 'Codex lanes need a measured local runtime for reliable control.', 'start-runtime', COMMANDS.startRuntime)];
-    }
-    if (reason === 'desktop-unattached') {
-      if (hostContext?.app === 'codex-desktop') return [];
-      return [step(
-        70,
-        'Reconnect the Codex app to the shared runtime by relaunching it.',
-        'Live lane updates appear in the app only after it reconnects, and relaunching ends what the app is doing now.',
-        'relaunch-desktop',
-        COMMANDS.relaunchDesktop,
-      )];
-    }
-    if (reason === 'desktop-not-running') {
-      return [step(60, 'Open the Codex app on the shared runtime.', 'Live lane updates appear in the app only while it is connected.', 'none', COMMANDS.attachDesktop)];
-    }
-    if (reason === 'desktop-not-installed') {
-      return [step(30, 'Install the ChatGPT app for live Codex lane updates.', 'Codex lanes still work without the app, but they cannot stream into a desktop interface.', 'install', action.ownerAction)];
-    }
-    if (reason === 'desktop-attached-elsewhere') {
-      const nextAction = doctorResult?.providers?.codex?.nativeVisibility?.nextAction;
-      return [step(55, 'Use the shared runtime that the Codex app already uses.', 'Keeping one runtime avoids splitting lanes between connections.', 'none', nextAction || action.ownerAction)];
-    }
-    if (reason === 'desktop-attach-disabled') {
-      return [step(55, 'Enable live Codex app attachment.', 'Live lane updates cannot appear in the app while attachment is disabled.', 'none', 'unset TRANSMOGRIFY_DESKTOP_ATTACH')];
-    }
-    if (reason === 'desktop-unsupported-platform') return [];
-    if (reason === 'sandbox-loopback-denied') {
-      return [step(45, 'Allow this session to connect to local services.', 'The doctor cannot verify the Codex runtime until local connections are allowed.', 'none', action.ownerAction)];
-    }
-    if (reason === 'desktop-tool-unavailable') {
-      return [step(55, 'Restore the system tools used to verify the Codex app connection.', 'The app connection cannot be trusted until it can be measured.', 'none', action.ownerAction)];
-    }
+function setupReadiness(providers, hostContext) {
+  const statuses = Object.fromEntries(['claude', 'codex'].map((provider) => [
+    provider,
+    providerStatus(provider, providers?.[provider], hostContext),
+  ]));
+  const requested = Object.values(statuses).filter((status) => status !== 'not-requested');
+  const supported = requested.filter((status) => status !== 'unsupported');
+  let outcome;
+  if (requested.length > 0 && supported.length === 0) outcome = 'unsupported';
+  else if (supported.includes('needs-action')) outcome = 'needs-action';
+  else if (requested.includes('unsupported') || supported.includes('ready-with-limitations') || hostContext?.surface === 'ide') {
+    outcome = 'ready-with-limitations';
+  } else outcome = 'ready';
+  return {
+    ready: outcome === 'ready' || outcome === 'ready-with-limitations',
+    outcome,
+    providers: statuses,
+  };
+}
+
+function supportedCodexBinary(doctorResult) {
+  return doctorResult?.providers?.codex?.cliBinaries?.find((candidate) =>
+    candidate && candidate.supported === true && typeof candidate.path === 'string') || null;
+}
+
+function claudeSteps(reason) {
+  if (reason === 'cli-not-found') {
+    return [
+      step(10, 'install-claude', 'Install Claude Code.',
+        'This gives you Claude lanes; declining leaves Codex lanes available.', 'install', COMMANDS.installClaude),
+      step(20, 'sign-in-claude', 'Sign in to Claude Code.',
+        'This connects Claude lanes to your account; declining leaves Codex lanes available.', 'sign-in', COMMANDS.signInClaude),
+    ];
   }
+  if (['not-logged-in', 'account-not-first-party', 'auth-status-unreadable'].includes(reason)) {
+    return [step(20, 'sign-in-claude', 'Sign in to Claude Code.',
+      'This connects Claude lanes to a verified account; declining leaves Codex lanes available.', 'sign-in', COMMANDS.signInClaude)];
+  }
+  if (['cli-unpinned', 'cli-unsupported', 'cli-below-minimum', 'cli-outdated', 'cli-not-executable'].includes(reason)) {
+    return [step(10, 'install-claude', 'Install a supported Claude Code release.',
+      'This gives Claude lanes a compatible host; declining leaves Codex lanes available.', 'install', COMMANDS.installClaude)];
+  }
+  return [];
+}
 
-  return [step(
-    90,
-    `Resolve the remaining ${provider === 'claude' ? 'Claude' : 'Codex'} setup requirement.`,
-    `The ${provider === 'claude' ? 'Claude' : 'Codex'} host cannot be made ready until this check passes.`,
-    'none',
-    action.ownerAction,
-  )];
+function codexSteps(action, doctorResult, hostContext) {
+  const runtime = doctorResult?.providers?.codex?.runtime;
+  const binary = supportedCodexBinary(doctorResult);
+  if (action.reason === 'cli-not-found') {
+    return [
+      step(30, 'install-codex', 'Install the Codex command-line tool.',
+        'This gives Codex lanes a compatible runtime host; declining leaves Claude lanes available.', 'install', COMMANDS.installCodex),
+      step(40, 'sign-in-codex', 'Sign in to Codex.',
+        'This connects the Codex runtime to your account; declining leaves Claude lanes available.', 'sign-in', COMMANDS.signInCodex),
+    ];
+  }
+  if (['not-logged-in', 'codex-not-logged-in'].includes(action.reason)) {
+    return [step(40, 'sign-in-codex', 'Sign in to Codex.',
+      'This connects the Codex runtime to your account; declining leaves Claude lanes available.', 'sign-in', COMMANDS.signInCodex)];
+  }
+  if (action.reason === 'runtime-unavailable' && runtime?.state === 'unavailable' && binary) {
+    const bundled = binary.sources.includes('codex-desktop');
+    const what = bundled
+      ? 'Start a shared Codex runtime with the compatible tool bundled in the Codex app.'
+      : 'Start a compatible shared Codex runtime.';
+    return [step(50, 'start-runtime', what,
+      'This gives Codex lanes a measured local runtime; declining leaves Claude lanes available.',
+      'start-runtime', COMMANDS.startRuntime, { binary: binary.path })];
+  }
+  if (action.reason === 'desktop-unattached' && hostContext?.app !== 'codex-desktop') {
+    return [step(70, 'relaunch-app', 'Reconnect the Codex app to the shared runtime by relaunching it.',
+      'This makes live lane updates appear in the app; declining leaves Codex lanes available in protocol-only mode.',
+      'relaunch-desktop', COMMANDS.relaunchApp)];
+  }
+  if (action.reason === 'desktop-not-running' && runtime?.state === 'reusable') {
+    return [step(60, 'open-app', 'Open the Codex app on the shared runtime.',
+      'This shows live lane updates in the app; declining leaves Codex lanes available in protocol-only mode.',
+      'none', COMMANDS.openApp)];
+  }
+  return [];
 }
 
 function attachmentAction(doctorResult) {
@@ -163,33 +167,42 @@ function computeSetupPlan(doctorResult, hostContext) {
     action.provider === measuredAttachment.provider && action.reason === measuredAttachment.reason)) {
     actions.push(measuredAttachment);
   }
+  const hostAllowsDesktopActions = hostContext?.surface !== 'ide';
+  const steps = actions.flatMap((action) => {
+    if (action.provider === 'claude') {
+      if (hostContext?.platform?.claudeLanesSupported === false) return [];
+      return claudeSteps(action.reason);
+    }
+    if (action.provider === 'codex') return codexSteps(action, doctorResult, hostContext);
+    return [];
+  });
+  const visibility = doctorResult?.providers?.codex?.nativeVisibility;
+  if (hostAllowsDesktopActions && visibility?.verified === true && visibility.persisted === false) {
+    steps.push(step(80, 'persist-attach', 'Keep the Codex app connected to the shared runtime after login.',
+      'This makes future app sessions reuse the shared runtime; declining leaves the current attachment and protocol-only lanes available.',
+      'persist-attach', COMMANDS.persistAttach));
+  }
   const seen = new Set();
-  const persistence = doctorResult?.providers?.codex?.nativeVisibility?.receipt?.persisted === false
-    ? [step(
-      80,
-      'Keep the Codex app connected to the shared runtime after login.',
-      'Persistent attachment makes new Codex app sessions reuse the measured shared runtime automatically.',
-      'persist-attach',
-      COMMANDS.persistAttach,
-    )]
-    : [];
-  const steps = [...actions.flatMap((action) => stepsForAction(action, doctorResult, hostContext)), ...persistence]
+  const ordered = steps
+    .filter((entry) => hostAllowsDesktopActions || !['open-app', 'relaunch-app', 'persist-attach'].includes(entry.action))
     .sort((left, right) => left.order - right.order)
     .filter((entry) => {
-      const key = `${entry.what}\0${entry.command}`;
+      const key = `${entry.action}\0${entry.binary || ''}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     })
     .map(({ order, ...entry }) => entry);
-  return { context: contextSentence(hostContext), steps };
+  return { context: contextSentence(hostContext), steps: ordered };
 }
 
 module.exports = {
+  ACTIONS,
   COMMANDS,
   IDE_CONTEXT,
   TERMINAL_CONTEXT,
   UNSUPPORTED_CONTEXT,
   computeSetupPlan,
   contextSentence,
+  setupReadiness,
 };

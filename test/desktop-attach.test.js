@@ -18,7 +18,7 @@ const {
   stableNodePath,
   unpersist,
 } = require('../scripts/lib/desktop-attach');
-const { main, parseCli } = require('../scripts/desktop-attach');
+const { cliFailure, main, parseCli } = require('../scripts/desktop-attach');
 
 const APP = '/Applications/ChatGPT.app';
 const DESKTOP_PID = 96049;
@@ -410,8 +410,10 @@ test('the CLI parses operations strictly and reports the disabled state with exi
   assert.throws(() => parseCli(['ensure', '--timeout-ms', '0']), /positive integer/);
   assert.deepEqual(parseCli(['persist', '--dry-run']), {
     operation: 'persist', url: undefined, relaunch: false, timeoutMs: undefined,
-    dryRun: true, authorize: false,
+    launchOnly: false, dryRun: true, authorize: false,
   });
+  assert.equal(parseCli(['ensure', '--launch-only']).launchOnly, true);
+  assert.throws(() => parseCli(['ensure', '--launch-only', '--relaunch-desktop']), /cannot be combined/);
   assert.throws(() => parseCli(['ensure', '--dry-run']), /persist and unpersist only/);
   assert.throws(() => parseCli(['unpersist', '--url', 'ws://127.0.0.1:8844']), /does not apply/);
   const disabled = await main(['check'], { TRANSMOGRIFY_DESKTOP_ATTACH: 'off' }, scenario().dependencies);
@@ -429,11 +431,19 @@ test('the CLI parses operations strictly and reports the disabled state with exi
   assert.equal(parsed.ok, false);
   assert.equal(parsed.attachment.state, 'disabled');
   const usage = await new Promise((resolve) => {
-    execFile(process.execPath, [script, 'ensure', '--bogus'], { encoding: 'utf8' }, (error, out) =>
-      resolve({ code: error?.code ?? 0, stdout: out }));
+    execFile(process.execPath, [script, 'ensure', '--bogus'], { encoding: 'utf8' }, (error, out, err) =>
+      resolve({ code: error?.code ?? 0, stdout: out, stderr: err }));
   });
   assert.equal(usage.code, 2);
-  assert.equal(JSON.parse(usage.stdout).code, 'USAGE_ERROR');
+  assert.equal(usage.stdout, '');
+  assert.equal(JSON.parse(usage.stderr).code, 'USAGE_ERROR');
+  const projected = cliFailure(Object.assign(new Error('secret raw exception'), {
+    code: 'ATTACHED_ELSEWHERE', details: { state: 'private-state', suggestedRuntimeUrl: 'ws://127.0.0.1:9999', secret: 'hidden' },
+  }));
+  assert.deepEqual(projected, {
+    version: 1, ok: false, code: 'ATTACHED_ELSEWHERE',
+    message: 'Codex Desktop is attached to a different runtime',
+  });
 });
 
 test('persist dry-run prints the exact LaunchAgent and launchctl setting without mutation', async () => {

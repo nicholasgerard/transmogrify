@@ -76,7 +76,7 @@ const RECONCILE_ENTRY = {
 const PROFILE_FIELDS = { requestedProfile: true, resolvedProfile: true, observedProfile: true };
 const SETUP_PLAN = {
   context: true,
-  steps: { what: true, why: true, consent: true, command: true },
+  steps: { action: true, what: true, why: true, consent: true, command: true, binary: true },
 };
 const SETUP_STEP = { what: true, consent: true, outcome: true };
 
@@ -94,6 +94,7 @@ function laneShape(receipt, extra = {}) {
 const SCHEMAS = Object.freeze({
   setup: {
     version: true, ok: true, operation: true, dryRun: true, ready: true,
+    outcome: true, providers: { claude: true, codex: true },
     code: true, message: true, plan: SETUP_PLAN, completed: SETUP_STEP,
     refusal: { what: true, consent: true, reason: true },
     apps: { claude: true, codex: true, nextSession: true },
@@ -191,7 +192,7 @@ const SCHEMAS = Object.freeze({
       cleanupBlocked: true, unattendedChildren: true,
     },
     setup: {
-      ready: true,
+      ready: true, outcome: true, providers: { claude: true, codex: true },
       ownerActions: { provider: true, reason: true, blocking: true, ownerAction: true },
       plan: SETUP_PLAN,
     },

@@ -9,7 +9,7 @@
 // app's own quit after explicit or standing owner authorization.
 
 const { parseArgs } = require('node:util');
-const { exitCodeForError, isUsageCode } = require('./lib/public-error');
+const { exitCodeForError, failureBody, publicErrorMessage } = require('./lib/public-error');
 const {
   DEFAULT_ATTACH_TIMEOUT_MS,
   DISABLE_ENV,
@@ -38,6 +38,8 @@ options:
                             live relay record, then legacy port 8843)
   --relaunch-desktop        authorize quitting a running unattached Desktop
                             for this run (or set ${RELAUNCH_ENV}=auto)
+  --launch-only             launch a stopped Desktop only; never start runtime
+                            infrastructure or relaunch a running app
   --timeout-ms <ms>         attachment wait after a launch
                             (default ${DEFAULT_ATTACH_TIMEOUT_MS})
   --dry-run                 show the exact persistence write and environment
@@ -74,6 +76,7 @@ function parseCli(argv) {
     options: {
       url: { type: 'string' },
       'relaunch-desktop': { type: 'boolean' },
+      'launch-only': { type: 'boolean' },
       'timeout-ms': { type: 'string' },
       'dry-run': { type: 'boolean' },
       authorize: { type: 'boolean' },
@@ -85,8 +88,12 @@ function parseCli(argv) {
   }
   const operation = parsed.positionals[0];
   if (operation !== 'ensure' &&
-      (parsed.values['relaunch-desktop'] !== undefined || parsed.values['timeout-ms'] !== undefined)) {
-    usage('--relaunch-desktop and --timeout-ms apply to ensure only');
+      (parsed.values['relaunch-desktop'] !== undefined || parsed.values['launch-only'] !== undefined ||
+       parsed.values['timeout-ms'] !== undefined)) {
+    usage('--relaunch-desktop, --launch-only, and --timeout-ms apply to ensure only');
+  }
+  if (parsed.values['relaunch-desktop'] === true && parsed.values['launch-only'] === true) {
+    usage('--relaunch-desktop and --launch-only cannot be combined');
   }
   if (!['persist', 'unpersist'].includes(operation) &&
       (parsed.values['dry-run'] !== undefined || parsed.values.authorize !== undefined)) {
@@ -106,6 +113,7 @@ function parseCli(argv) {
     operation,
     url: parsed.values.url,
     relaunch: parsed.values['relaunch-desktop'] === true,
+    launchOnly: parsed.values['launch-only'] === true,
     timeoutMs,
     dryRun: parsed.values['dry-run'] === true,
     authorize: parsed.values.authorize === true,
@@ -124,6 +132,16 @@ async function main(argv = process.argv.slice(2), env = process.env, dependencie
   return applyPersisted(options, env, dependencies);
 }
 
+function cliFailure(error) {
+  const failure = failureBody(error);
+  return {
+    version: failure.version,
+    ok: failure.ok,
+    code: failure.code,
+    message: publicErrorMessage(failure.code),
+  };
+}
+
 // An unattached observation is a result, not an exception: it prints as JSON and
 // exits 3. A refusal before acting exits 2 and a failure after acting exits 3.
 if (require.main === module) {
@@ -135,16 +153,10 @@ if (require.main === module) {
     console.log(JSON.stringify(result, null, 2));
     if (!result.ok) process.exitCode = 3;
   }).catch((error) => {
-    const code = isUsageCode(error?.code) ? 'USAGE_ERROR' : (error?.code || 'DESKTOP_ATTACH_FAILED');
-    console.log(JSON.stringify({
-      version: 1,
-      ok: false,
-      code,
-      message: error?.message || String(error),
-      ...(error?.details ? { details: error.details } : {}),
-    }, null, 2));
-    process.exitCode = exitCodeForError(code);
+    const failure = cliFailure(error);
+    console.error(JSON.stringify(failure, null, 2));
+    process.exitCode = exitCodeForError(failure.code);
   });
 }
 
-module.exports = { HELP, main, parseCli };
+module.exports = { HELP, cliFailure, main, parseCli };

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 (in progress)
+
+- Compose doctor observations, typed setup plans, and guided setup execution:
+  distinguish missing Codex binaries, sign-in, and runtime state; execute one
+  non-interactive action per invocation; preserve provider limitations; use
+  launch-only and authorized persistence operations; and keep terminal summary
+  output separate from JSON.
+
 ## 0.6.0
 
 - A Claude lane spawned by a measured CLI persists the same exact runtime

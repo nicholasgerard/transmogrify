@@ -129,7 +129,7 @@ test('the schema command and docs/OUTPUT.md agree on operations and top-level ke
 test('the setup plan schema exposes only the documented explanation fields', () => {
   assert.deepEqual(SETUP_PLAN, {
     context: true,
-    steps: { what: true, why: true, consent: true, command: true },
+    steps: { action: true, what: true, why: true, consent: true, command: true, binary: true },
   });
   const projected = publicResult({
     version: 1, ok: true, operation: 'maintain', dryRun: true,
@@ -139,29 +139,31 @@ test('the setup plan schema exposes only the documented explanation fields', () 
       plan: {
         context: 'A terminal context.',
         privateSignal: 'secret',
-        steps: [{ what: 'Do one thing.', why: 'It is needed.', consent: 'none', command: 'do-it', secret: 'hidden' }],
+        steps: [{ action: 'open-app', what: 'Do one thing.', why: 'It is needed.', consent: 'none', command: 'do-it', binary: '/tmp/codex', secret: 'hidden' }],
       },
     },
   });
   assert.deepEqual(projected.setup.plan, {
     context: 'A terminal context.',
-    steps: [{ what: 'Do one thing.', why: 'It is needed.', consent: 'none', command: 'do-it' }],
+    steps: [{ action: 'open-app', what: 'Do one thing.', why: 'It is needed.', consent: 'none', command: 'do-it', binary: '/tmp/codex' }],
   });
 });
 
 test('setup output keeps receipts and refusals but drops runner internals', () => {
   assert.deepEqual(publicResult({
     version: 1, ok: false, operation: 'setup', dryRun: false, ready: false,
+    outcome: 'needs-action', providers: { claude: 'needs-action', codex: 'ready-with-limitations', private: 'hidden' },
     code: 'POLICY_REFUSAL', message: 'method refused by read-only policy',
-    plan: { context: 'A host.', steps: [{ what: 'Install.', why: 'Needed.', consent: 'install', command: 'fixed' }] },
+    plan: { context: 'A host.', steps: [{ action: 'install-claude', what: 'Install.', why: 'Needed.', consent: 'install', command: 'fixed' }] },
     completed: [{ what: 'Checked.', consent: 'none', outcome: 'confirmed', private: 'hidden' }],
     refusal: { what: 'Install.', consent: 'install', reason: 'consent-required', private: 'hidden' },
     apps: { claude: 'needs setup', codex: 'ready', nextSession: 'Open the other app.', private: 'hidden' },
     childProcess: { pid: 1234 },
   }), {
     version: 1, ok: false, operation: 'setup', dryRun: false, ready: false,
+    outcome: 'needs-action', providers: { claude: 'needs-action', codex: 'ready-with-limitations' },
     code: 'POLICY_REFUSAL', message: 'method refused by read-only policy',
-    plan: { context: 'A host.', steps: [{ what: 'Install.', why: 'Needed.', consent: 'install', command: 'fixed' }] },
+    plan: { context: 'A host.', steps: [{ action: 'install-claude', what: 'Install.', why: 'Needed.', consent: 'install', command: 'fixed' }] },
     completed: [{ what: 'Checked.', consent: 'none', outcome: 'confirmed' }],
     refusal: { what: 'Install.', consent: 'install', reason: 'consent-required' },
     apps: { claude: 'needs setup', codex: 'ready', nextSession: 'Open the other app.' },
