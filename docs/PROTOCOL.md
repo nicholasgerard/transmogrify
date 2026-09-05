@@ -53,7 +53,10 @@ parameters, and otherwise unrecognized envelopes are protocol violations: the
 client closes the connection and projects every pending call as
 transport-unknown.
 
-`scripts/doctor.js` performs only this handshake and closes. A runtime outside
+`scripts/doctor.js` performs the handshake, a validated `thread/list` read,
+and nil-ID method probes, and writes local compatibility receipts before
+closing. See [Runtime compatibility evidence](#runtime-compatibility-evidence).
+A runtime outside
 the supported `0.151.0`-or-newer range remains visible through the doctor's bounded
 version report, but `rpc.js` and lifecycle mutations refuse it.
 
@@ -75,7 +78,8 @@ bytes, caps and rotates its private log, and records its pid plus measured
 process birth under the Transmogrify state root. Start reuses that exact live
 record. An unrecorded listener is adopted only after the TCP and Unix endpoints
 complete supported app-server handshakes with identical runtime identities.
-Stop signals only the pid whose process birth still matches the record.
+Stop requires a record with `origin: launched` and a matching process birth;
+an adopted relay is refused without signalling.
 
 The default relay is `ws://127.0.0.1:8844/`; `TRANSMOGRIFY_RELAY_PORT` selects a
 different deterministic port. Runtime selection is explicit `--url`, then
@@ -124,8 +128,9 @@ successful handshake.
 
 **Mechanism, unverified as a vendor contract.** Codex Desktop becomes a client
 of a standalone app-server when the app is launched with
-`CODEX_APP_SERVER_WS_URL` set to that endpoint. Launched normally it starts its
-own private bundled stdio child
+`CODEX_APP_SERVER_WS_URL` set to that endpoint. Persistence can supply this
+environment on a normal launch. Without it, Desktop starts its own private
+bundled stdio child
 (`Contents/Resources/codex -c features.code_mode_host=true app-server`) and
 reports as unattached. The variable is read by the app's launcher and is not
 published in OpenAI's app-server reference, so Transmogrify treats it as an
@@ -146,8 +151,9 @@ when the command itself runs inside a Desktop-hosted session, because the
 relaunch would end that session, and it reports `ATTACHED_ELSEWHERE`,
 `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, and `DESKTOP_QUIT_TIMEOUT` rather than
 forcing an outcome. It quits Desktop only through the app's own application
-quit, never kills a process, and never starts, stops, or reconfigures the
-runtime.
+quit and never kills a process. `ensure` may start a missing runtime or relay;
+it never stops or reconfigures an existing runtime. `--launch-only` requires an
+already-live selected relay and never starts a runtime or relay.
 
 A runtime this installation launches carries
 `-c mcp_servers.codex_app={command="",enabled=false}`, which keeps the
@@ -240,7 +246,8 @@ identifiers remain the ownership authority.
 Every managed spawn is reserved under an exact installation-owned parent context
 before provider mutation. The first child message begins with the bounded
 Transmogrify provenance block defined in [Dispatch and lineage](DISPATCH.md),
-followed by the caller's input. The block contains safe display labels and
+followed by the exchange preamble, then the caller's packet. The block contains
+safe display labels and
 durable Transmogrify references; it never contains repository paths, provider
 credentials, or provider-private IDs. Provider acknowledgement applies to the
 entire prefixed input, and the durable operation receipt hashes that exact
@@ -280,7 +287,10 @@ replay. A server-supported idempotency key would close this window.
 
 **Implementation contract.** When the thread ID is durable but the first
 `turn/start` has no receipt, the spawn journal stays open and reconciliation
-never replays the input. Only an exact retirement closes it: the adapter
+never replays the input. Reconciliation also settles proven first-turn input
+absence after the grace period (60 seconds by default) as `notDelivered`
+(`spawnInputAbsent`) and fails the lane without touching the thread.
+An exact retirement can also close the journal: the adapter
 re-inspects the thread, refuses while the newest turn is `inProgress`, pages
 `thread/items/list` for the exact client-message receipt one more time, and then
 either completes the journal with the recovered turn or marks it failed as
@@ -303,13 +313,15 @@ rendered as a user message in the native Codex app. Steering a thread whose
 newest turn was not active returned the operation-specific JSON-RPC precondition
 error, which `lane.js steer` reports as `NO_ACTIVE_TURN` with exit 2.
 
-**Schema-derived, not yet live-verified.** `v2/TurnSteerParams.json` accepts
-an optional `clientUserMessageId` with the same shape as
+**Schema-derived.** `v2/TurnSteerParams.json` accepts an optional
+`clientUserMessageId` with the same shape as
 `TurnStartParams.clientUserMessageId`, and `v2/TurnSteerResponse.json` carries
 only `turnId`. The adapter sends the steer operation id as that marker and
 reconciliation looks for it among the target turn's `userMessage` items, so a
-steer whose outcome was lost can be settled from the persisted receipt. The
-first live steer recovery should be recorded here.
+steer whose outcome was lost can be settled from the persisted receipt.
+**Live-verified, 2026-09-03:** the marker persisted on a `userMessage` item;
+see [the notification receipts](NOTIFICATIONS.md#receipts-and-open-experiments).
+That marker receipt does not by itself prove a live lost-response recovery.
 
 `thread/read {includeTurns:true}` returned `list_turns is not supported yet`
 even though `includeTurns` appears in `v2/ThreadReadParams.json`. Use
@@ -384,10 +396,13 @@ before any provider mutation. The adapter proves the newest turn is inactive,
 sends archive once, scans the complete bounded archived listing, and requires
 exactly one matching thread whose schema-required `cwd` equals the durable lane
 seat. Missing, malformed, mismatched, or duplicate exact rows fail closed before
-provider retirement is marked verified. A managed worktree is removed only when
+provider retirement is marked verified. A managed seat is removed only when
 it was clean at harvest, its current HEAD matches the harvest receipt, and its
-current tracked, untracked, and ignored-file census is clean. An external seat
-is never removed. Once a harvest or cleanup check observes dirt or changed HEAD,
+current tracked, untracked, and ignored-file census is clean except for exact
+receipted provisions, which are removed before seat cleanup. Clone cleanup also
+requires the fetched HEAD on the preserved branch in the operator repository.
+An external seat is never removed. Once a harvest or cleanup check observes
+dirt or changed HEAD,
 automatic cleanup is permanently blocked pending manual review; later
 cleanliness does not make the seat eligible again.
 
@@ -426,8 +441,8 @@ monotonic: phase transitions atomically replace the record, existing detail keys
 are immutable, and later phases may add new receipt keys. The record is durable,
 but it is not an append-only transition log.
 
-Every operation record names one of seven types (`spawn`, `steer`, `stop`,
-`recover`, `resume`, `interrupt`, `retire`) and holds only a state
+Every operation record names one of eight types (`spawn`, `steer`, `stop`,
+`recover`, `resume`, `interrupt`, `harvest`, `retire`) and holds only a state
 enumerated for that type; a write outside the table is refused before it
 reaches disk. Records carry `schemaVersion` (absent means 1). The registry
 and the records are migrated on read when an upgrade path exists; a state
@@ -435,6 +450,12 @@ directory written by a newer Transmogrify is refused with an upgrade
 instruction rather than reinterpreted. `abandon` is the only owner-authorized
 way to close a journal without a provider receipt: it ends a non-retirement
 operation as failed with the owner's reason and an unknown provider outcome.
+
+The `harvest` transition graph is `planned → copying` without a commit, or
+`planned → staged → commitDispatching → committed → copying` for a commit;
+`staged → committed` also recovers an already observed commit. Both paths
+continue `copying → copied`, then either `copied → complete` or
+`copied → cleanupDispatching → cleanupComplete → complete`.
 
 State directories are current-user-owned mode `0700`, and JSON records are mode
 `0600`. Managed `WORKTREES` roots are current-user-owned mode `0700`; configured
@@ -455,7 +476,8 @@ example Claude stop verified with archive not attempted, without claiming the
 whole retirement succeeded.
 
 Every command shares one exit table: 0 for a confirmed result, 2 for a usage
-error or a safe refusal that attempted nothing, 3 for a failure or an
+error, a safe refusal, or retryable local cleanup after verified provider
+retirement (`CLEANUP_RETRYABLE`), 3 for a failure or an
 uncertain outcome after an attempt, and 1 only for an unexpected internal
 error. A `doctor.js` result that is not ready and a `desktop-attach.js check`
 that finds no attachment are reported as results and exit 3 without any
@@ -469,12 +491,13 @@ Claude runtime and worker epochs are append-only identity receipts inside the
 current lane record. Reconciliation may add a verified CLI transition only when
 the account, config, provider IDs, seat, worker binary, process birth, and
 socket identity remain exact; it never overwrites the spawn runtime. See
-[Claude Code integration](CLAUDE-CODE.md#measured-compatibility-tuple).
+[Claude Code integration](CLAUDE-CODE.md#compatibility-receipts).
 
 Parent/child delivery is also durable state, not a transient process callback.
 An exact parent context owns immutable dispatch reservations and sequenced child
-events. The parent must acknowledge an event by its exact ID and digest; a
-missing or malformed acknowledgement cannot suppress redelivery. Every
+events. The parent acknowledges with `ack --event <event-id>` or
+`ack --through <sequence>`; the command derives each event's digest itself.
+A missing or malformed acknowledgement cannot suppress redelivery. Every
 unacknowledged event is returned again after a parent restart regardless of a
 newer observation cursor. Observation may reconcile an exact incomplete spawn
 journal, but it never infers provider creation from a title or elapsed time and
@@ -488,7 +511,8 @@ beyond the adapter. `v2/ThreadShellCommandParams.json` describes unsandboxed
 full-access command execution. `v2/FsRemoveParams.json` accepts an absolute path
 and recursive removal. `v2/ThreadDeleteParams.json` deletes by thread ID.
 
-Transmogrify's accepted root-path loopback configuration is therefore an
+Transmogrify accepts canonical `ws+unix:<normalized absolute socket path>`
+endpoints as well as root-path loopback WebSocket URLs. These form an
 unauthenticated local control plane, not a safe general-purpose localhost API.
 Codex documents authenticated remote WebSockets, but Transmogrify rejects
 non-loopback endpoints and URL credentials. Bind the selected local runtime to
@@ -567,7 +591,7 @@ probe set. No raw runtime error text is stored in the receipt.
 | Codex Desktop, attached and streaming | `26.825.51511` (`7377`, 2026-09-01); `26.901.20858` (`7658`, 2026-09-02) |
 | Codex Desktop bundle | `com.openai.codex` |
 | ChatGPT for iOS | `1.2026.230` (`32543289983`) |
-| Claude Code CLI | `2.1.258`; full tuple in [Claude Code integration](CLAUDE-CODE.md#measured-compatibility-tuple) |
+| Claude Code CLI | `2.1.258`; full tuple in [Claude Code integration](CLAUDE-CODE.md#compatibility-receipts) |
 
 What those receipts cover:
 

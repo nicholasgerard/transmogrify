@@ -4,10 +4,10 @@ The public marketing and documentation site for Transmogrify: a static
 [Astro](https://astro.build) build with no server, no database, and no
 framework runtime in the browser.
 
-This package is self-contained. It has its own `package.json` and lockfile, and
-nothing it depends on reaches the repository root — the lifecycle tools keep
-their `ws`-only runtime dependency contract, and `npm pack` at the root does not
-include `site/`.
+This package has its own `package.json` and lockfile. The build reads root
+metadata and imports `scripts/lib/setup-plan.js` for setup narration. The
+lifecycle tools keep their `ws`-only runtime dependency contract, and
+`npm pack` at the root does not include `site/`.
 
 ```
 site/
@@ -284,8 +284,9 @@ The design lives in the markup inside that script, not in the PNGs.
 
 ## CI
 
-`.github/workflows/site.yml` is scoped to `site/` (plus `README.md`, `SKILL.md`,
-and the root `package.json`, because the build reads facts from them). On Node
+Both `.github/workflows/site.yml` and `.github/workflows/site-deploy.yml`
+filter on `site/`, `README.md`, `SKILL.md`, the root `package.json`, and
+`scripts/lib/setup-plan.js`, because the build consumes these inputs. On Node
 22 and 24 it installs from the lockfile and checks the default, analytics-free
 build. Node 24 also builds a fake-ID analytics variant and applies the consent
 and output audits before rebuilding the default artifact. CI asserts there is

@@ -16,8 +16,9 @@ instructions, one collects the result.
 
 Those scripts use each provider's own interface. Codex lanes go over JSON-RPC
 to a shared `codex app-server`. Claude lanes run as named Remote Control
-sessions. Because they are real sessions, they appear in the apps you already
-have open, and they keep running after the agent that started them is gone.
+sessions. Codex app visibility requires measured Desktop attachment to the
+lane's runtime; protocol-only lanes remain available. Claude sessions use
+Remote Control. Lanes keep running after the agent that started them is gone.
 
 Before it starts anything, Transmogrify writes down which lane, which worktree,
 and which operation it is about to run. Later commands look that record up

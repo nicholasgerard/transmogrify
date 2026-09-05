@@ -9,7 +9,7 @@ to Codex or Claude child). The durable event store in
 follows is how events reach the parent fast and how the parent tells "done"
 from "still going".
 
-## Three layers
+## Four layers
 
 1. **Durable events** (exists). Every child observation that changes state
    records an at-least-once event for the parent; the parent acknowledges
@@ -23,13 +23,12 @@ from "still going".
    reads a working child every three seconds, an idle child every thirty,
    and a parent with nothing outstanding once a minute; a parent command
    that changes a child (spawn, steer, recover, interrupt, stop, retire)
-   nudges it to read that child at once, so an idle child is never polled
-   for a change only its parent can cause. A single
-   instance per parent is enforced by a pid-and-birth record; a stale
+   nudges it to read that child at once, in addition to the thirty-second
+   idle polling interval. A single instance per parent is enforced by a pid-and-birth record; a stale
    record is replaced. A watcher started after a stop wakes the parent once
-   more for every event still unacknowledged, never for acknowledged ones. Subscribing to the app-server's own
-   `thread/status/changed` notifications instead of polling is a later
-   optimization, not a semantic change.
+   more for every event still unacknowledged, never for acknowledged ones.
+   App-server notification subscriptions already accelerate observation;
+   polling remains the fallback.
 The Codex watcher maintains one notification subscription for each endpoint
 recorded by its outstanding owned children. Thread notification filters are
 separate for each endpoint. A removed endpoint closes its subscription.
@@ -113,9 +112,9 @@ Every event carries `kind` and `terminal`:
 | `kind` | Events | Meaning for the parent |
 | --- | --- | --- |
 | `progress` | `child.spawned` | the child exists and is working; nothing to do |
-| `complete` | `child.turn-completed` | the input the parent sent has been fully processed and the child is idle; harvest now, steer again, or retire |
+| `complete` | `child.turn-completed` | the turn ended, possibly by interruption, and the child is idle; inspect the result before harvest or retirement because completion does not prove task success |
 | `attention` | `child.needs-attention`, `child.delivery-unknown`, `child.cleanup-blocked` | the child is blocked on approval or input, or a mutation must be reconciled |
-| `terminal` | `child.failed`, `child.stopped`, `child.retired` | no further work will come from this child |
+| `terminal` | `child.failed`, `child.stopped`, `child.retired` | a failure, stop, interruption, or retirement was recorded; `child.stopped` can report a turn interruption and does not prove the session ended |
 
 `terminal: true` only on the last row. `child.turn-completed` is emitted for
 both providers (a Claude lane that goes from working to idle completes a
@@ -133,7 +132,7 @@ carries the lane id, the dispatch id, and the exact command to run next
 
 `children --observe` refreshes every child's live phase (one bounded
 `status` per child) and prints, per child, the normalized `phase`, the
-`kind` of its latest event, and whether that event is acknowledged.
+`latestEventKind`, and the `unacknowledgedEvents` count.
 `status --lane` remains the exact single-child read.
 
 ## Turnkey rules
@@ -169,8 +168,8 @@ calls) about 0.5 s; one Claude census (`claude agents --json --all`) about
 0.3 s; one Codex read (a fresh loopback connection plus two calls) well
 under 0.1 s; one registry or journal read about 20 ms. The levers, all in
 place: one wake per round instead of one per event; the parent's own
-completed commands suppressing redundant wakes when parent association is verified; polling only while a child
-is working, with idle children read on the parent's nudge; settled children skipped after their terminal events are recorded and acknowledged; a short idle exit; one runtime measurement and one census per
+completed commands suppressing redundant wakes when parent association is verified; polling working children every three seconds and idle children every thirty
+seconds, with parent nudges prompting earlier reads; settled children skipped after their terminal events are recorded and acknowledged; a short idle exit; one runtime measurement and one census per
 round instead of per child (`lib/observer-cache.js`, the memo follows the
 CLI file and ages out after ten minutes), and one shared loopback
 connection per round for Codex reads; a subscription to the app-server's
@@ -181,8 +180,8 @@ change, while polling stays as the safety net. A Claude child spawned for a pare
 carries session hooks (through the CLI's `--settings`, a private file per
 lane under the state root) whose only action is to touch the parent's
 watcher nudge file when its turn ends, its session ends, or it raises a
-notification, so the watcher reads it at once and never polls it while it
-works or waits; verified live on the pinned CLI on 2026-09-03 (`Stop`,
+notification, so the watcher reads it at once while timer polling remains
+as the fallback for working and waiting children; verified live on the pinned CLI on 2026-09-03 (`Stop`,
 `SessionEnd`, and `UserPromptSubmit` fired through `--settings`).
 `TRANSMOGRIFY_CHILD_HOOKS=off` launches children without hooks.
 

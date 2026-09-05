@@ -2,9 +2,9 @@
 
 Transmogrify fails closed when provider identity, runtime identity, ownership,
 or a destructive cleanup precondition cannot be proved. Every command shares
-one exit table: 2 means a usage error or a safe refusal that attempted
-nothing; 3 means a failure or an uncertain outcome after an attempt, which
-requires observation before any retry; 1 is an unexpected internal error.
+one exit table: 2 means a usage error, a safe refusal, or retryable local
+cleanup after verified provider retirement (`CLEANUP_RETRYABLE`); 3 means a failure or an
+uncertain outcome after an attempt, which requires observation before any retry; 1 is an unexpected internal error.
 
 Set the installed skill root before running lifecycle commands. Use the Claude
 path for a Claude-only installation.
@@ -70,7 +70,8 @@ sentinel. Install a single host from the source checkout with:
 
 The default install covers both hosts. Its final line tells you that Claude
 Desktop and the ChatGPT app can load the skill, and a new session in the other
-app picks it up. Inspect the remaining machine setup without changing it:
+app picks it up. The doctor may create the registry and write local
+compatibility receipts; real provider sessions remain untouched:
 
 ```bash
 export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
@@ -328,11 +329,10 @@ attachment. Attachment is a separate measured receipt: on macOS,
 `scripts/desktop-attach.js check` reports whether the Codex Desktop process
 holds an ESTABLISHED loopback connection to the selected runtime, and
 `doctor.js` turns that into `nativeVisibility.verified`. Desktop joins a runtime
-only when it is launched with `CODEX_APP_SERVER_WS_URL` pointing at it; a normal
-launch starts a private bundled app-server instead. If Desktop was restarted or
-updated while an independent app-server survived, the two are different
-processes even though the old endpoint still responds, and the doctor shows
-`desktop-attachment:unattached`.
+when launched with `CODEX_APP_SERVER_WS_URL` pointing at it; persistence can
+supply that environment on a normal launch. After a restart or update, run a
+fresh `desktop-attach.js check` to remeasure attachment. A surviving endpoint
+alone does not prove whether Desktop reattached or started a private runtime.
 
 ```bash
 node "$SKILL_ROOT/scripts/desktop-attach.js" check
@@ -421,10 +421,10 @@ exact owned thread has no current turn. It is not evidence that the thread is
 foreign, broken, or safe to delete. Inspect status and continue at an explicit
 turn boundary.
 
-A native row whose title lacks the `::: ` marker, or that shows a "controlled
-from another app" banner with no live activity, was not created by this
-installation's current runtime. Never rename, adopt, or replay it. Continue
-harvesting and retiring only the exact registry-owned lanes through their
+A title without the `::: ` marker or a "controlled from another app" banner
+proves neither ownership nor non-ownership. Use exact registry and runtime
+receipts to identify a lane; never rename, adopt, or replay it based on its
+title or banner. Continue harvesting and retiring only the exact registry-owned lanes through their
 recorded runtime, and do not resume new Codex dispatches until a current-launch
 visibility check passes.
 
@@ -494,8 +494,10 @@ POST dispatch is archive-unknown and requires observation, not replay.
 ## Ownership or identity refused
 
 Every mutating command resolves an exact registry-owned lane, then proves the
-live provider still matches its receipt. Each refusal exits 2 and mutates
-nothing:
+live provider still matches its receipt. A pre-dispatch identity refusal
+exits 2 without provider mutation. A mismatch discovered after dispatch can
+leave partial or unknown provider effects and exit 3; inspect the phase
+receipts and reconcile before retrying:
 
 | Code | Meaning | Do |
 | --- | --- | --- |
@@ -525,7 +527,7 @@ its receipts could not be verified. The refusal and the lane's journal carry
 | Cause | Meaning | Repair |
 | --- | --- | --- |
 | `TRANSCRIPT_RECEIPT_PENDING` | The session had not written its first message inside the 30 s verification window | Run `reconcile --target claude --lane <laneId>`; it binds the lane from the durable receipt once the transcript has caught up |
-| `REMOTE_CONTROL_UNAVAILABLE` | The worker never registered Remote Control, almost always because the Claude login broke at launch (`claude auth status` shows logged out, the session log shows `/rc failed`) | Restore the login with `claude auth login`; the lane cannot be bound. Stop and remove that exact session (`claude agents --all` lists it under the lane title), run `reconcile` so the lane settles as `spawnJobAbsent`, then `retire` it with a harvest digest to free its seat |
+| `REMOTE_CONTROL_UNAVAILABLE` | The worker never registered Remote Control, almost always because the Claude login broke at launch (`claude auth status` shows logged out, the session log shows `/rc failed`) | Restore the login with `claude auth login`. Identify any remaining job only from exact dispatch and runtime receipts, never its title. Reconcile to `spawnJobAbsent` once the exact job is absent, then harvest and retire the lane through guarded seat cleanup. Never run `claude rm` before the managed-seat removal guard has passed |
 | `spawnJobAbsent` (reconcile outcome) | The dispatched job is absent from every census more than a minute after launch | Nothing to repair: the journal is closed, the parent receives `child.failed`, and `retire` frees the managed seat without any provider mutation |
 
 Reconcile never replays a spawn. A lane whose job is still listed keeps its
@@ -542,9 +544,10 @@ as `forkedCopyStopped`, and left the lane stopped with its original session.
 Retire the lane with a harvest digest, or spawn a new lane; do not resume by
 hand. A recovery whose dispatch window passes with no running session and no
 copy settles on the next `reconcile` as `recoveryNotAchieved`, also leaving
-the lane stopped. The stopped fork's local record can be removed with
-`claude rm <job>` after review, and its Remote Control row archived in the
-app.
+the lane stopped. Manual `claude rm <job>` requires the same guard as
+retirement: verify the exact local record and prove its managed seat path is
+already absent after guarded cleanup. Never remove an external seat this way.
+Review the exact Remote Control row before archiving it in the app.
 
 ## Harvest is not quiescent
 

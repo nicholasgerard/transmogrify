@@ -15,6 +15,7 @@ message transport and does not expand the packet's authority.
   Timestamp: ISO-8601 timestamp. Provider receipt: exact owned lane and
   operation ID.
 
-Send only a short steer that cites `directive 001`; keep the full durable text
-here. The operator host owns writes to this file and transcribes the lane's
+Keep the full durable text here and send the amendment text itself through
+`steer` or boundary `recover --input`, citing `directive 001`. An external
+mailbox path alone may be unreadable to a restricted child. The operator host owns writes to this file and transcribes the lane's
 acknowledgment from the exact control receipt.
