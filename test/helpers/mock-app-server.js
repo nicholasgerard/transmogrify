@@ -4,6 +4,7 @@ const { once } = require('node:events');
 const fs = require('node:fs');
 const http = require('node:http');
 const { WebSocketServer } = require('ws');
+const { measuredReply } = require('./measured-codex');
 
 const NO_RESPONSE = Symbol('NO_RESPONSE');
 
@@ -40,7 +41,8 @@ async function startMockAppServer(handler = defaultHandler, options = {}) {
           },
         };
       } else {
-        response = await handler(request, socket, requests);
+        response = (options.compatibilityProbes === false ? null : measuredReply(request)) ||
+          await handler(request, socket, requests);
       }
 
       if (response === NO_RESPONSE) return;

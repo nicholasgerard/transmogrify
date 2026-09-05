@@ -13,6 +13,7 @@ const { UUID_PATTERN, readOwnedJson } = require('./record-guards');
 const { createClaudeSurface } = require('./claude-surface');
 const { walkProcessAncestry } = require('./process-ancestry');
 const { VERSION } = require('./version');
+const { runtimeUrl, compatibilityClient } = require('./codex-runtime');
 
 const CHANNELS = Object.freeze(['claude-bridge', 'codex-thread', 'none']);
 const BRIDGE_PATTERN = /^(?:session_|cse_)(?:staging_)?[0-9A-Za-z]{1,64}$/;
@@ -98,8 +99,7 @@ async function threadCarriesCommand(client, threadId, markers) {
 // the repository qualifies only with the caller's one-time nonce in its items;
 // a single active thread with that cwd is reported as an unverified candidate.
 async function discoverCodexWake(options, env = process.env) {
-  const url = validateUrl(options.url || env.TRANSMOGRIFY_URL ||
-    `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
+  const url = validateUrl(runtimeUrl(options, env, options.runtimeUrlDependencies));
   const createClient = options.clientFactory || ((config) => new AppServerClient(config));
   const client = createClient({
     url,
@@ -132,6 +132,7 @@ async function discoverCodexWake(options, env = process.env) {
       }
       return {
         channel: 'codex-thread',
+        runtime: { url, userAgent: initialized.userAgent },
         threadId: thread.id,
         cwd: typeof thread.cwd === 'string' ? thread.cwd : null,
         receipt: { source: 'env-thread-id+command-item', observedAt: new Date().toISOString() },
@@ -158,6 +159,7 @@ async function discoverCodexWake(options, env = process.env) {
         if (await threadCarriesCommand(client, row.id, markers)) {
           return {
             channel: 'codex-thread',
+            runtime: { url, userAgent: initialized.userAgent },
             threadId: row.id,
             cwd: row.cwd,
             receipt: { source: 'nonce-command-item', observedAt: new Date().toISOString() },
@@ -169,6 +171,7 @@ async function discoverCodexWake(options, env = process.env) {
     if (candidates.length === 1) {
       return {
         channel: 'codex-thread',
+        runtime: { url, userAgent: initialized.userAgent },
         threadId: candidates[0].id,
         cwd: candidates[0].cwd,
         receipt: { source: 'sole-active-thread-with-repository-cwd', observedAt: new Date().toISOString() },
@@ -235,24 +238,35 @@ async function deliverWake(wake, text, options = {}, env = process.env) {
     }
   }
   if (wake?.channel === 'codex-thread') {
-    const url = validateUrl(options.url || env.TRANSMOGRIFY_URL ||
-      `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
+    if (!wake.runtime?.url || !wake.runtime?.userAgent) {
+      throw new WakeError('WAKE_UNDELIVERED', 'parent runtime receipt is missing');
+    }
+    const url = validateUrl(wake.runtime.url);
     const createClient = options.clientFactory || ((config) => new AppServerClient(config));
-    const client = createClient({
+    const rawClient = createClient({
       url,
       timeoutMs: options.timeoutMs ?? 30000,
       clientInfo: { name: 'transmogrify-wake', title: 'transmogrify wake', version: VERSION },
     });
+    const client = compatibilityClient(rawClient, options, env);
     try {
-      await client.connect();
+      const initialized = await client.connect();
+      if (initialized.userAgent !== wake.runtime.userAgent) {
+        throw new WakeError('WAKE_UNDELIVERED', 'parent runtime identity changed');
+      }
       if (!client.verifiedRuntime) throw new WakeError('WAKE_UNDELIVERED', 'runtime is outside the verified line');
       const read = await client.call('thread/read', { threadId: wake.threadId, includeTurns: false });
       const thread = read?.thread || read;
-      if (thread?.cwd !== wake.cwd) throw new WakeError('WAKE_UNDELIVERED', 'parent thread cwd changed', { cause: 'cwd-mismatch' });
+      if (thread?.id !== wake.threadId || thread?.cwd !== wake.cwd) throw new WakeError('WAKE_UNDELIVERED', 'parent thread cwd changed', { cause: 'cwd-mismatch' });
       const turns = await client.call('thread/turns/list', {
         threadId: wake.threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded',
-      }).catch(() => null);
-      const newest = turns?.data?.[0];
+      });
+      if (!Array.isArray(turns?.data)) throw new WakeError('WAKE_UNDELIVERED', 'parent turn read was invalid');
+      const newest = turns.data[0];
+      if (newest && (typeof newest.id !== 'string' ||
+          !['inProgress', 'completed', 'interrupted', 'failed'].includes(newest.status))) {
+        throw new WakeError('WAKE_UNDELIVERED', 'parent turn read was invalid');
+      }
       const input = [{ type: 'text', text }];
       if (newest?.status === 'inProgress') {
         await client.call('turn/steer', { threadId: wake.threadId, expectedTurnId: newest.id, input });

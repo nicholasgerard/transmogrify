@@ -485,7 +485,9 @@ test('lane CLI reports a dispatched Codex archive error as mutation-unknown', as
   assert.equal(error.code, 'RPC_ERROR');
   assert.equal(error.delivery, 'unknown');
   assert.deepEqual(error.effect, { providerMutation: 'unknown' });
-  assert.equal(server.requests.filter((request) => request.method === 'thread/archive').length, 1);
+  // The compatibility probe archives the nil thread first; only the lane's own archive counts.
+  assert.equal(server.requests.filter((request) => request.method === 'thread/archive' &&
+    request.params?.threadId !== '00000000-0000-0000-0000-000000000000').length, 1);
   const pending = pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env);
   assert.equal(pending.state, 'unknown');
   assert.equal(pending.details.archiveFailurePhase, 'dispatch');

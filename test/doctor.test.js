@@ -131,12 +131,11 @@ test('doctor reuses only read-only provider surfaces and emits aggregate ownersh
   assert.equal(result.providers.claude.observed.agentListReadable, true);
   assert.equal(result.providers.claude.pinned.cliVersion, PINNED_CLI_VERSION);
   assert.equal(result.providers.claude.pinned.cliSha256, PINNED_CLI_SHA256);
-  await waitForRequests(server, 7);
+  await waitForRequests(server, 6);
   assert.deepEqual(server.requests.map((request) => request.method), [
     'initialize',
     'initialized',
     'thread/list',
-    'thread/turns/list',
     'turn/steer',
     'thread/name/set',
     'thread/archive',
@@ -201,12 +200,11 @@ test('doctor creates the outside-repository registry and skips unrequested provi
   assert.equal(result.providers.claude.available, null);
   assert.equal(claudeTouched, false);
   assert.deepEqual(result.nextSafeMaintenanceCommands, []);
-  await waitForRequests(server, 7);
+  await waitForRequests(server, 6);
   assert.deepEqual(server.requests.map((request) => request.method), [
     'initialize',
     'initialized',
     'thread/list',
-    'thread/turns/list',
     'turn/steer',
     'thread/name/set',
     'thread/archive',
@@ -755,6 +753,7 @@ test('doctor reports a supported-version Codex method failure as runtime-unsuppo
     }
     return { result: {} };
   }, {
+    compatibilityProbes: false,
     initializeResult: {
       codexHome: '/tmp/codex-home',
       platformFamily: 'unix',

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
+const { runtimeUrl } = require('./lib/codex-runtime');
+
 // Read-only identity and compatibility probe for a loopback Codex app-server.
 // It completes the initialize handshake, prints the returned user-agent, and
 // exits 3 when the handshake or the supported-version check (0.151.0 or newer) fails, 2 on a
@@ -21,8 +23,7 @@ function help() {
 }
 
 const args = process.argv.slice(2);
-let rawUrl = process.env.TRANSMOGRIFY_URL ||
-  `ws://127.0.0.1:${process.env.TRANSMOGRIFY_PORT || '8843'}`;
+let rawUrl;
 let timeoutRaw = '3000';
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index];
@@ -41,7 +42,7 @@ let timeoutMs;
 try {
   if (!/^[1-9][0-9]*$/.test(timeoutRaw)) throw new Error('--timeout-ms must be a canonical positive integer');
   timeoutMs = validateTimeout(Number(timeoutRaw));
-  url = validateUrl(rawUrl);
+  url = validateUrl(runtimeUrl({ url: rawUrl }));
 } catch (error) {
   usage(error.message);
 }

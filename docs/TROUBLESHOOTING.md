@@ -37,6 +37,7 @@ endpoint. Add `--url` only to override that selection.
 | `boundary:sandbox-loopback-denied`, `runtime-unsupported`, occupied or incompatible endpoint | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
 | `NATIVE_VISIBILITY_REQUIRED`, `DESKTOP_RELAUNCH_REQUIRED`, `DESKTOP_HOST_SESSION`, `ATTACHED_ELSEWHERE`, `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, `DESKTOP_QUIT_TIMEOUT` | [Codex Desktop is not attached](#codex-desktop-is-not-attached) |
 | `NO_ACTIVE_TURN`, unmarked or foreign native rows | [Codex lane and native row symptoms](#codex-lane-and-native-row-symptoms) |
+| `RUNTIME_UNSUPPORTED` | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
 | `NOT_OWNED`, `RUNTIME_MISMATCH`, `OWNERSHIP_MISMATCH`, `SEAT_MISMATCH`, `EXECUTION_EPOCH_UNBOUND`, `ADAPTER_MISMATCH` | [Ownership or identity refused](#ownership-or-identity-refused) |
 | `DELIVERY_UNCERTAIN` on a Claude steer | [Claude steer delivery is uncertain](#claude-steer-delivery-is-uncertain) |
 | Mobile task fails after a Desktop restart | [Codex mobile Remote access](#codex-mobile-remote-access) |
@@ -268,11 +269,19 @@ with `-c mcp_servers.codex_app={command="",enabled=false}` so the Desktop-only
 listener keeps its own configuration.
 
 `runtime-unsupported` means either the app-server is older than `0.151.0` or
-its first compatibility measurement rejected a required method or parameter
-shape. The doctor names the first failed method. It probes `thread/list`,
-`thread/turns/list`, `turn/steer`, `thread/name/set`, and `thread/archive`
-against bounded reads or the nil thread ID, then caches the result once per
-runtime version under the private state root. It also lists every executable
+its compatibility measurement rejected a required method or parameter shape.
+The doctor names the first failed method. Lifecycle clients also refuse with
+`RUNTIME_UNSUPPORTED` before a mutation when the connected version lacks a
+`good` receipt. A successful `thread/list` read and the exact measured
+not-found refusals for `turn/steer`, `thread/name/set`, and `thread/archive`
+provide the required evidence. Unknown-method and missing-field errors do not
+qualify. Turns-list capability remains unmeasured until a validated read on an
+exact owned thread succeeds.
+
+The private cache is keyed by runtime version and probe-set version. A failed
+record expires after 24 hours. Transport and deadline failures are retried on
+the next measurement without a persistent failure record. A changed probe set
+also causes remeasurement. It also lists every executable
 found on `PATH`, in Codex Desktop, and through `TRANSMOGRIFY_BIN`, with the
 result of `--version`. A listed CLI is discovery evidence, not permission to
 start it.

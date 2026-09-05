@@ -383,7 +383,7 @@ async function discoverWakeForHost(hostProvider, options, env) {
   }
   if (discovered.channel === 'codex-thread' && !discovered.unverified) {
     return {
-      record: { channel: 'codex-thread', id: discovered.threadId, cwd: discovered.cwd ?? null, receipt: discovered.receipt },
+      record: { channel: 'codex-thread', id: discovered.threadId, cwd: discovered.cwd ?? null, receipt: discovered.receipt, runtime: discovered.runtime },
       summary: { channel: 'codex-thread', source: discovered.receipt.source },
     };
   }

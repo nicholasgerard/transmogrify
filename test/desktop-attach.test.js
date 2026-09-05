@@ -680,3 +680,28 @@ test('the LaunchAgent prefers a stable Node alias that resolves to the running e
   // An explicit nodePath still wins.
   assert.match(launchAgentContents('ws://127.0.0.1:8844/', { nodePath: '/exact/node', scriptPath: '/skill/scripts/desktop-attach.js' }), /<string>\/exact\/node<\/string>/);
 });
+
+for (const selection of ['relay only', 'relay and environment', 'neither']) {
+  test(`ensure uses the common runtime selector without launching when already attached: ${selection}`, async (t) => {
+    const { createStateFixture } = require('./helpers/state-fixture');
+    const { writeRelayRecord, runningRelay } = require('../scripts/lib/relay');
+    const fixture = createStateFixture(t);
+    const env = { ...fixture.env };
+    delete env.TRANSMOGRIFY_DESKTOP_ATTACH;
+    delete env.TRANSMOGRIFY_URL;
+    delete env.TRANSMOGRIFY_PORT;
+    let relay;
+    if (selection !== 'neither') relay = writeRelayRecord({ version: 1, host: '127.0.0.1', port: 19001,
+      url: 'ws://127.0.0.1:19001/', pid: 321, processBirth: 'birth', origin: 'launched',
+      socketPath: '/tmp/daemon.sock', startedAt: '2026-09-05T00:00:00Z' }, env);
+    if (selection === 'relay and environment') env.TRANSMOGRIFY_URL = 'ws://127.0.0.1:19002';
+    const expected = new URL(require('../scripts/lib/codex-runtime').runtimeUrl({}, env, { processMatches: () => true })).href;
+    const mocked = scenario({ attached: true, runtimePort: Number(new URL(expected).port), relayRecord: relay });
+    const result = await ensure({}, env, { ...mocked.dependencies,
+      runningRelay: (selectedEnv) => runningRelay(selectedEnv, { processMatches: () => true }),
+    });
+    assert.equal(result.receipt.runtimeUrl, expected);
+    assert.equal(result.action, 'reused');
+    assert.deepEqual(mocked.state.launches, []);
+  });
+}

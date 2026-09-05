@@ -11,6 +11,9 @@
 // docs/NOTIFICATIONS.md.
 
 const fs = require('node:fs');
+const crypto = require('node:crypto');
+const { readOwnedJson } = require('./lib/record-guards');
+const { runtimeUrl } = require('./lib/codex-runtime');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { parseArgs } = require('node:util');
@@ -19,7 +22,7 @@ const { observeParentChildren, outstandingDispatches, resolveDispatchLane } = re
 const { createObserverCache } = require('./lib/observer-cache');
 const { AppServerClient, validateUrl } = require('./lib/app-server');
 const { VERSION } = require('./lib/version');
-const { processBirth, processMatches } = require('./lib/state');
+const { processBirth, processMatches, processIdentity } = require('./lib/state');
 const { deliverWake, wakeMessage } = require('./lib/wake');
 const { sleep } = require('./lib/async');
 const { EXIT, exitCodeForError, failureBody, usageError } = require('./lib/public-error');
@@ -116,10 +119,11 @@ async function sleepUntilNudged(ms, paths, dependencies, triggers = null) {
 // timer and never fails the watcher: polling continues meanwhile.
 function createCodexSubscription(url, dependencies = {}) {
   const createClient = dependencies.subscriptionClient || ((config) => new AppServerClient(config));
-  const state = { client: null, threadIds: new Set(), triggered: false, connectedAt: null, failures: 0, timer: null, stopped: false };
+  const state = { client: null, threadIds: new Set(), triggered: false, connectedAt: null, failures: 0, timer: null, stopped: false, connecting: false };
   const threadIdOf = (params) => params?.threadId || params?.thread?.id || params?.turn?.threadId || null;
   async function connect() {
-    if (state.stopped || state.client) return;
+    if (state.stopped || state.client || state.connecting || state.timer) return;
+    state.connecting = true;
     const client = createClient({
       url, timeoutMs: 20000, clientInfo: { name: 'transmogrify-watch', title: 'transmogrify watch', version: VERSION },
     });
@@ -127,10 +131,14 @@ function createCodexSubscription(url, dependencies = {}) {
       await client.connect();
       if (!client.verifiedRuntime) { client.close(); throw Object.assign(new Error('unverified runtime'), { code: 'UNVERIFIED_RUNTIME' }); }
     } catch {
+      state.connecting = false;
+      client.close();
       state.failures += 1;
       schedule();
       return;
     }
+    state.connecting = false;
+    if (state.stopped) { client.close(); return; }
     state.client = client;
     state.connectedAt = Date.now();
     client.on('notification', ({ method, params }) => {
@@ -165,22 +173,57 @@ function createCodexSubscription(url, dependencies = {}) {
   };
 }
 
-// Provider ids of the outstanding Codex children on one endpoint, for the
-// subscription's allow-list.
-function codexThreadIds(outstanding, env) {
-  const ids = [];
+// Group outstanding owned Codex threads by their recorded endpoint so each
+// subscription receives only its own thread allow-list.
+function codexEndpoints(outstanding, env) {
+  const endpoints = new Map();
   for (const dispatch of outstanding) {
     if (dispatch.child.targetProvider !== 'codex') continue;
     try {
       const lane = resolveDispatchLane(dispatch, env).lane;
-      if (lane?.providerId) ids.push(lane.providerId);
+      if (!lane?.providerId || !lane.runtime?.endpoint) continue;
+      const url = validateUrl(runtimeUrl({ url: lane.runtime.endpoint }, env));
+      if (!endpoints.has(url)) endpoints.set(url, []);
+      endpoints.get(url).push(lane.providerId);
     } catch { /* not an owned lane right now */ }
   }
-  return ids;
+  return endpoints;
+}
+
+function createCodexSubscriptions(dependencies = {}) {
+  const subscriptions = new Map();
+  return {
+    watch(endpoints) {
+      for (const [url, subscription] of subscriptions) {
+        if (!endpoints.has(url)) { subscription.stop(); subscriptions.delete(url); }
+      }
+      for (const [url, ids] of endpoints) {
+        if (!subscriptions.has(url)) subscriptions.set(url, createCodexSubscription(url, dependencies));
+        const subscription = subscriptions.get(url);
+        subscription.watch(ids);
+        if (!subscription.connected()) subscription.start();
+      }
+    },
+    pending() { return [...subscriptions.values()].some((subscription) => subscription.pending()); },
+    consume() { for (const subscription of subscriptions.values()) subscription.consume(); },
+    stop() { for (const subscription of subscriptions.values()) subscription.stop(); subscriptions.clear(); },
+  };
 }
 
 function readRecord(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  const read = readOwnedJson(file, { maxBytes: 128 * 1024, modeMask: 0o077 });
+  if (read.status !== 'ok') return null;
+  const record = read.value;
+  if (!record || (record.version !== undefined && record.version !== 1) || !Number.isSafeInteger(record.pid) || record.pid < 1 ||
+      !(record.processBirth === null || typeof record.processBirth === 'string') ||
+      typeof record.parentRef !== 'string' || !Number.isFinite(Date.parse(record.startedAt)) ||
+      !Array.isArray(record.wakedEventIds) || record.wakedEventIds.length > 500 ||
+      record.wakedEventIds.some((id) => typeof id !== 'string') ||
+      !record.wakeAttempts || typeof record.wakeAttempts !== 'object' || Array.isArray(record.wakeAttempts) ||
+      Object.values(record.wakeAttempts).some((attempt) => !Number.isSafeInteger(attempt) || attempt < 0) ||
+      !Number.isSafeInteger(record.wakes) || record.wakes < 0 ||
+      !Number.isSafeInteger(record.rounds) || record.rounds < 0) return null;
+  return record;
 }
 
 // The running watcher for a parent, if its recorded pid is alive with the
@@ -188,15 +231,28 @@ function readRecord(file) {
 function runningWatcher(parentRef, env, dependencies = {}) {
   const paths = watcherPaths(parentRef, env);
   const record = readRecord(paths.record);
-  if (!record || !processMatches(record, dependencies)) return null;
+  if (!record || record.parentRef !== parentRef || !processMatches(record, dependencies)) return null;
   return record;
 }
 
 function writeRecord(paths, record) {
   fs.mkdirSync(paths.root, { recursive: true, mode: 0o700 });
-  const temporary = `${paths.record}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, paths.record);
+  const temporary = `${paths.record}.${crypto.randomUUID()}.tmp`;
+  let descriptor;
+  let created = false;
+  try {
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    created = true;
+    fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, paths.record);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    if (created) {
+      try { fs.unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+  }
 }
 
 function appendLog(paths, line) {
@@ -236,11 +292,12 @@ function ensureWatcher(parentContextFile, options = {}, env = process.env, depen
 // recorded process birth still matches, so a recycled pid is never touched.
 async function stopWatcher(parentContextFile, env = process.env, dependencies = {}) {
   const loaded = loadParentContext(parentContextFile, env);
-  const running = runningWatcher(loaded.parent.parentRef, env, dependencies);
   const paths = watcherPaths(loaded.parent.parentRef, env);
-  if (!running) {
-    try { fs.unlinkSync(paths.record); } catch { /* nothing recorded */ }
-    return { running: false, stopped: false, pid: null };
+  const running = readRecord(paths.record);
+  const identity = running?.parentRef === loaded.parent.parentRef
+    ? (dependencies.processIdentity || processIdentity)(running, dependencies) : 'unknown';
+  if (identity !== 'same') {
+    return { running: identity === 'unknown', stopped: false, pid: null, identity };
   }
   const signal = dependencies.kill || process.kill.bind(process);
   try { signal(running.pid, 'SIGTERM'); } catch (error) {
@@ -250,7 +307,11 @@ async function stopWatcher(parentContextFile, env = process.env, dependencies = 
   for (let attempt = 0; attempt < 20 && runningWatcher(loaded.parent.parentRef, env, dependencies); attempt += 1) {
     await wait(100);
   }
-  try { fs.unlinkSync(paths.record); } catch { /* removed by the watcher itself */ }
+  const current = readRecord(paths.record);
+  if (current?.pid === running.pid && current?.processBirth === running.processBirth &&
+      (dependencies.processIdentity || processIdentity)(running, dependencies) === 'gone') {
+    try { fs.unlinkSync(paths.record); } catch { /* removed by the watcher itself */ }
+  }
   return { running: false, stopped: true, pid: running.pid };
 }
 
@@ -270,7 +331,7 @@ async function watchOnce(context, values, env, state, dependencies = {}) {
   const outstanding = outstandingDispatches(context, env)
     .filter((dispatch) => !values['repo-root'] || dispatch.child.repoRoot === values['repo-root']);
   if (dependencies.subscription) {
-    dependencies.subscription.watch(codexThreadIds(outstanding, env));
+    dependencies.subscription.watch(codexEndpoints(outstanding, env));
     dependencies.subscription.consume();
   }
   const round = await observe(context, { ...values, dispatches: outstanding }, env, Date.now() + OBSERVATION_ROUND_MS);
@@ -286,6 +347,7 @@ async function watchOnce(context, values, env, state, dependencies = {}) {
           bridgeId: context.parent.wake.id,
           threadId: context.parent.wake.id,
           cwd: context.parent.wake.cwd,
+          runtime: context.parent.wake.runtime,
         }, wakeMessage(fresh, { parentContextFile: context.file }), {
           claudeBin: values['claude-bin'], url: values.url, clientUserMessageId: fresh[fresh.length - 1].eventId,
         }, env);
@@ -332,6 +394,7 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
   }
   const previous = readRecord(paths.record);
   const state = {
+    version: 1,
     pid: process.pid,
     processBirth: (dependencies.processBirth || processBirth)(process.pid),
     parentRef: context.parent.parentRef,
@@ -348,9 +411,8 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
     url: options.url, 'claude-bin': options.claudeBin, 'repo-root': options.repoRoot,
     surface: cache.surface, clientFactory: cache.clientFactory,
   };
-  const subscriptionUrl = validateUrl(options.url || env.TRANSMOGRIFY_URL || `ws://127.0.0.1:${env.TRANSMOGRIFY_PORT || '8843'}`);
   const subscription = dependencies.subscription === null ? null
-    : dependencies.subscription || createCodexSubscription(subscriptionUrl, dependencies);
+    : dependencies.subscription || createCodexSubscriptions(dependencies);
   const roundDependencies = { ...dependencies, subscription };
   const idleExitMs = options.idleExitMs ?? DEFAULT_IDLE_EXIT_MS;
   const maxRounds = dependencies.maxRounds ?? Infinity;
@@ -378,6 +440,7 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
       appendLog(paths, `observation failed ${error.code || error.message}`);
       pass = { observed: 0, errors: [{ code: error.code || 'OBSERVATION_FAILED' }], wakes: [], working: false, outstanding: 1, acknowledged: 0, codexOutstanding: 0 };
     }
+    state.wakedEventIds = state.wakedEventIds.slice(-500);
     state.rounds += 1;
     state.wakes += pass.wakes.filter((wake) => wake.delivered).length;
     for (const wake of pass.wakes) {
@@ -392,7 +455,6 @@ async function runWatcher(options, env = process.env, dependencies = {}) {
       if (Date.now() - idleSince >= idleExitMs) break;
     } else {
       idleSince = null;
-      if (subscription && !subscription.connected() && pass.codexOutstanding > 0) subscription.start();
     }
     const interval = pass.working ? ACTIVE_POLL_MS : pass.outstanding > 0 ? QUIET_POLL_MS : SETTLED_POLL_MS;
     if (await sleepUntilNudged(interval, paths, dependencies, subscription)) {
@@ -491,6 +553,10 @@ module.exports = {
   CODEX_TRIGGER_NOTIFICATIONS,
   HELP,
   createCodexSubscription,
+  createCodexSubscriptions,
+  codexEndpoints,
+  readRecord,
+  writeRecord,
   QUIET_POLL_MS,
   SETTLED_POLL_MS,
   ensureWatcher,

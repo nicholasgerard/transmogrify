@@ -2,6 +2,12 @@
 
 ## 0.6.1 (in progress)
 
+- Require exact compatibility evidence before Codex mutations, expire failed
+  measurements, and record turns-list capability only after an owned read.
+  Use the shared endpoint selector across runtime consumers, bind wake delivery
+  to its discovery receipt, and subscribe to each outstanding child's runtime.
+  Read watcher records safely and signal only an affirmatively matched process.
+
 - Add GPT-6 Astra to Codex execution guidance for `deep` and `max-quality`,
   with a receipted GPT-5.6 Sol fallback on older live catalogs, explicit model
   upgrade hints, and catalog-gated Ultra effort guidance.

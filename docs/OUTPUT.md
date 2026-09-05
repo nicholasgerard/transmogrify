@@ -251,6 +251,17 @@ operation. Its top level carries `version`, `ok`, `mode`,
 `providerMutationsAttempted`, `registry`, `providers`, `setup`, and
 `nextSafeMaintenanceCommands`.
 
+The private Codex compatibility receipt is `version: 2` and retains `result`
+(`good`, `failed`, or an owned-read-only `unmeasured` record) and `failingMethod`
+for doctor consumers. It adds `probeSetVersion`, `runtimeVersion`, `measuredAt`,
+`patternRuntimeVersion`, and `patternsMeasured`. Each `probes` entry contains
+`method`, `ok`, and `evidence`: `validated-success`, `not-found`, `unmeasured`,
+or `rejected`. The last value records a definitive protocol rejection or a
+violated sentinel safety assumption. `unmeasured` never asserts incompatibility.
+`patternRuntimeVersion` names the measured rules used; `patternsMeasured: false`
+means the reported runtime used the newest available rules as a fallback.
+These private receipt fields are not added to the doctor's public projection.
+
 Each provider reports `requested`, `available`, `reusable`, `reuse`, `probe`,
 the supported or pre-measured compatibility receipt in `pinned`, and a bounded
 `observed` block. Claude's observed block adds `buildMeasurement` (`result`,

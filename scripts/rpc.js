@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
+const { runtimeUrl } = require('./lib/codex-runtime');
+
 // Read-only JSON-RPC diagnostics for a loopback Codex app-server. The method
 // allowlist is default-deny and there is no mutation override. A content-bearing
 // thread read also requires a repository root, a registry-owned thread, and a
@@ -150,8 +152,7 @@ function take(name) {
   return value;
 }
 
-const rawUrl = take('--url') || process.env.TRANSMOGRIFY_URL ||
-  `ws://127.0.0.1:${process.env.TRANSMOGRIFY_PORT || '8843'}`;
+const rawUrl = runtimeUrl({ url: take('--url') });
 const repoRoot = take('--repo-root') || process.env.REPO_ROOT;
 const timeoutRaw = take('--timeout-ms') || '20000';
 let timeoutMs;
