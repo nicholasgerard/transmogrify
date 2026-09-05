@@ -17,9 +17,11 @@ const {
   writePacket,
 } = require('../scripts/lib/exchange');
 const { phaseFields } = require('../scripts/lib/output-schema');
-const { listOperations, registerLane } = require('../scripts/lib/state');
+const { listOperations, registerLane, updateLane } = require('../scripts/lib/state');
 const {
+  captureHarvestReceipt,
   cleanupStatus,
+  removeManagedSeat,
   createManagedSeat,
   plannedProvisionedEntries,
   verifySeat,
@@ -34,6 +36,7 @@ function handback(overrides = {}) {
 ${overrides.title || 'Implement portable lane harvest'}
 
 ${overrides.body || 'Persist the child handback and commit the reviewed work in the operator process.'}
+${overrides.sha ? `\nSHA: ${overrides.sha}\n` : ''}
 
 ## What changed and why
 
@@ -51,6 +54,10 @@ The host-only suite was not run.
 
 No known risks.
 `;
+}
+
+function gitHead(directory) {
+  return execFileSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 }
 
 function managedLane(t, options = {}) {
@@ -82,7 +89,11 @@ test('exchange preamble names the seat, child boundary, handback, and commit con
   const preamble = exchangePreamble(seat);
   assert.match(preamble, /^# Transmogrify lane exchange\n/);
   assert.match(preamble, /Write only inside this directory and \/tmp\./);
-  assert.match(preamble, /Do not commit\. The operator commits your work/);
+  assert.match(preamble, /Commit your work on the current branch/);
+  assert.match(preamble, /Never push\. Never change branches\./);
+  assert.match(preamble, /Co-Authored-By: Codex <noreply@openai\.com>/);
+  assert.match(exchangePreamble(seat, 'claude'), /Co-Authored-By: Claude Code <noreply@anthropic\.com>/);
+  assert.match(preamble, /SHA: <the full commit SHA you made>/);
   assert.match(preamble, /\.transmogrify\/handback\.md/);
   assert.match(preamble, /Start with # Handback: <packet name>\./);
   for (const section of [
@@ -168,7 +179,7 @@ test('harvest commits reviewed changes, excludes provisions, and copies a matchi
   const source = path.join(fixture.seat.path, 'feature.txt');
   fs.writeFileSync(source, 'implemented\n');
   fs.writeFileSync(path.join(fixture.seat.path, ':(exclude)literal.txt'), 'literal pathspec\n');
-  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback({ sha: gitHead(fixture.seat.path) }));
   assert.equal(fs.lstatSync(path.join(fixture.seat.path, 'node_modules')).isSymbolicLink(), true);
 
   const result = await harvestLane({
@@ -183,6 +194,7 @@ test('harvest commits reviewed changes, excludes provisions, and copies a matchi
   assert.equal(result.head, execFileSync('git', ['-C', fixture.seat.path, 'rev-parse', 'HEAD'], {
     encoding: 'utf8',
   }).trim());
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'rev-parse', fixture.seat.branchRef], { encoding: 'utf8' }).trim(), result.head);
   const copied = path.join(fixture.stateDir, 'harvests', fixture.lane.laneId, 'handback.md');
   assert.equal(crypto.createHash('sha256').update(fs.readFileSync(copied)).digest('hex'), result.handbackSha256);
   assert.equal(fs.statSync(copied).mode & 0o077, 0);
@@ -204,7 +216,7 @@ test('harvest commits reviewed changes, excludes provisions, and copies a matchi
 
 test('harvest refuses every phase that is not affirmatively quiescent', async (t) => {
   const fixture = managedLane(t, { state: 'active' });
-  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback({ sha: gitHead(fixture.seat.path) }));
   for (const observation of [
     phaseFields('codex', 'executing'),
     phaseFields('claude', 'waiting'),
@@ -225,7 +237,7 @@ test('harvest refuses every phase that is not affirmatively quiescent', async (t
 
 test('harvest accepts an idle provider observation', async (t) => {
   const fixture = managedLane(t);
-  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback({ sha: gitHead(fixture.seat.path) }));
   const result = await harvestLane({
     repoRoot: fixture.repoRoot,
     laneId: fixture.lane.laneId,
@@ -238,7 +250,7 @@ test('harvest accepts an idle provider observation', async (t) => {
 test('harvest recovers a commit completed before its journal and durable copy', async (t) => {
   const fixture = managedLane(t);
   fs.writeFileSync(path.join(fixture.seat.path, 'recover.txt'), 'recover me\n');
-  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback({ sha: gitHead(fixture.seat.path) }));
   await assert.rejects(() => harvestLane({
     repoRoot: fixture.repoRoot,
     laneId: fixture.lane.laneId,
@@ -268,7 +280,7 @@ test('harvest recovers a commit completed before its journal and durable copy', 
 
 test('durable handback fsyncs before rename and fsyncs the directory', async (t) => {
   const fixture = managedLane(t);
-  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback({ sha: gitHead(fixture.seat.path) }));
   const calls = [];
   const descriptorKinds = new Map();
   const recordingFs = new Proxy(fs, {
@@ -321,7 +333,7 @@ test('durable handback fsyncs before rename and fsyncs the directory', async (t)
 
 test('a copied harvest never advances after its durable copy changes', async (t) => {
   const fixture = managedLane(t);
-  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback({ sha: gitHead(fixture.seat.path) }));
   await assert.rejects(() => harvestLane({
     repoRoot: fixture.repoRoot,
     laneId: fixture.lane.laneId,
@@ -351,7 +363,7 @@ test('a copied harvest never advances after its durable copy changes', async (t)
 test('a second harvest keeps the first immutable handback copy', async (t) => {
   const fixture = managedLane(t);
   const handbackFile = exchangePaths(fixture.seat.path).handback;
-  const firstText = handback({ title: 'Preserve first durable handback' });
+  const firstText = handback({ title: 'Preserve first durable handback', sha: gitHead(fixture.seat.path) });
   fs.writeFileSync(handbackFile, firstText);
   const first = await harvestLane({
     repoRoot: fixture.repoRoot,
@@ -362,7 +374,7 @@ test('a second harvest keeps the first immutable handback copy', async (t) => {
   const firstCopy = immutableHandbackPath(fixture.lane.laneId, first.handbackSha256, fixture.env);
   assert.equal(fs.readFileSync(firstCopy, 'utf8'), firstText);
 
-  const secondText = handback({ title: 'Preserve second durable handback' });
+  const secondText = handback({ title: 'Preserve second durable handback', sha: gitHead(fixture.seat.path) });
   fs.writeFileSync(handbackFile, secondText);
   const second = await harvestLane({
     repoRoot: fixture.repoRoot,
@@ -376,4 +388,105 @@ test('a second harvest keeps the first immutable handback copy', async (t) => {
   assert.equal(fs.readFileSync(firstCopy, 'utf8'), firstText);
   assert.equal(fs.readFileSync(secondCopy, 'utf8'), secondText);
   assert.equal(fs.readFileSync(latest, 'utf8'), secondText);
+});
+
+function childCommit(fixture, content = 'child work\n') {
+  fs.writeFileSync(path.join(fixture.seat.path, 'child.txt'), content);
+  execFileSync('git', ['-C', fixture.seat.path, 'add', 'child.txt']);
+  execFileSync('git', ['-C', fixture.seat.path, 'commit', '-qm',
+    'Implement child-owned commit\n\nComplete the assigned feature.\n\nCo-Authored-By: Codex <noreply@openai.com>']);
+  return gitHead(fixture.seat.path);
+}
+
+function writeChildHandback(fixture, sha) {
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback({ sha }));
+}
+
+function harvestOptions(fixture, extra = {}) {
+  return { repoRoot: fixture.repoRoot, laneId: fixture.lane.laneId, ...extra };
+}
+
+const idleProvider = { observe: async () => phaseFields('codex', 'idle') };
+
+test('child commits in a clone and harvest fetches the exact SHA before clone retirement', async (t) => {
+  const fixture = managedLane(t, { dependencies: true });
+  const head = childCommit(fixture);
+  writeChildHandback(fixture, head);
+  assert.throws(() => execFileSync('git', ['-C', fixture.repoRoot, 'cat-file', '-e', head], { stdio: 'pipe' }));
+  const result = await harvestLane(harvestOptions(fixture), fixture.env, idleProvider);
+  assert.equal(result.head, head);
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'rev-parse', fixture.seat.branchRef], {
+    encoding: 'utf8',
+  }).trim(), head);
+  assert.equal(cleanupStatus(fixture.seat.path).clean, true);
+  assert.equal(execFileSync('git', ['-C', fixture.seat.path, 'show', '-s', '--format=%an <%ae>', head], {
+    encoding: 'utf8',
+  }).trim(), 'Test <test@example.invalid>');
+  const receipt = captureHarvestReceipt(fixture.repoRoot, fixture.seat, result.handbackSha256);
+  updateLane(fixture.repoRoot, fixture.lane.laneId, { state: 'retireRequested' }, fixture.env);
+  updateLane(fixture.repoRoot, fixture.lane.laneId, { state: 'archivedVerified' }, fixture.env);
+  removeManagedSeat(fixture.repoRoot, fixture.lane.laneId, receipt, fixture.env);
+  assert.equal(fs.existsSync(fixture.seat.path), false);
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'show', `${head}:child.txt`], {
+    encoding: 'utf8',
+  }), 'child work\n');
+});
+
+test('harvest refuses a handback SHA that is not the clone HEAD before opening a journal', async (t) => {
+  const fixture = managedLane(t);
+  const oldHead = gitHead(fixture.seat.path);
+  childCommit(fixture);
+  writeChildHandback(fixture, oldHead);
+  await assert.rejects(() => harvestLane(harvestOptions(fixture), fixture.env, idleProvider), /SHA is not the clone HEAD/);
+  assert.equal(listOperations(fixture.repoRoot, fixture.env).filter((operation) => operation.type === 'harvest').length, 0);
+  assert.equal(fs.existsSync(exchangePaths(fixture.seat.path).handback), true);
+});
+
+test('harvest refuses non-fast-forward clone history and preserves the repository branch', async (t) => {
+  const fixture = managedLane(t);
+  const first = childCommit(fixture);
+  writeChildHandback(fixture, first);
+  await harvestLane(harvestOptions(fixture, { cleanupProvisioned: false }), fixture.env, idleProvider);
+  execFileSync('git', ['-C', fixture.seat.path, 'reset', '--hard', fixture.seat.baseCommit], { stdio: 'pipe' });
+  const divergent = childCommit(fixture, 'divergent work\n');
+  writeChildHandback(fixture, divergent);
+  await assert.rejects(() => harvestLane(harvestOptions(fixture, { cleanupProvisioned: false }), fixture.env, idleProvider),
+    /non-fast-forward/);
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'rev-parse', fixture.seat.branchRef], {
+    encoding: 'utf8',
+  }).trim(), first);
+  assert.equal(fs.existsSync(exchangePaths(fixture.seat.path).handback), true);
+});
+
+test('harvest advances an existing clone branch and --commit accepts an already committed child', async (t) => {
+  const fixture = managedLane(t);
+  writeChildHandback(fixture, childCommit(fixture));
+  await harvestLane(harvestOptions(fixture, { cleanupProvisioned: false }), fixture.env, idleProvider);
+  const head = childCommit(fixture, 'next child commit\n');
+  writeChildHandback(fixture, head);
+  const result = await harvestLane(harvestOptions(fixture, { commit: true }), fixture.env, idleProvider);
+  assert.equal(result.head, head);
+  assert.equal(gitHead(fixture.seat.path), head);
+});
+
+test('clone harvest requires a SHA and refuses uncommitted work without the fallback', async (t) => {
+  const fixture = managedLane(t);
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  await assert.rejects(() => harvestLane(harvestOptions(fixture), fixture.env, idleProvider), /requires the child commit SHA/);
+  writeChildHandback(fixture, gitHead(fixture.seat.path));
+  fs.writeFileSync(path.join(fixture.seat.path, 'unfinished.txt'), 'unfinished\n');
+  await assert.rejects(() => harvestLane(harvestOptions(fixture), fixture.env, idleProvider), /uncommitted changes/);
+});
+
+
+test('clone harvest refuses a HEAD change after copy before removing provisions', async (t) => {
+  const fixture = managedLane(t);
+  writeChildHandback(fixture, childCommit(fixture));
+  await assert.rejects(() => harvestLane(harvestOptions(fixture), fixture.env, {
+    ...idleProvider,
+    afterCopy: async () => { childCommit(fixture, 'changed after fetch\n'); },
+  }), /HEAD changed after the handback was fetched/);
+  assert.equal(fs.existsSync(exchangePaths(fixture.seat.path).handback), true);
+  assert.equal(listOperations(fixture.repoRoot, fixture.env)
+    .find((operation) => operation.type === 'harvest').state, 'copied');
 });

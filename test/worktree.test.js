@@ -149,6 +149,7 @@ test('managed seats are created with exact identity and clean seats are removabl
     state: 'archivedVerified',
     seat,
   }, fixture.env);
+  execFileSync('git', ['-C', fixture.repoRoot, 'fetch', '--no-tags', seat.path, `${seat.branchRef}:${seat.branchRef}`]);
   const removed = removeManagedSeat(fixture.repoRoot, lane.laneId, harvestReceipt, fixture.env);
   assert.equal(removed.lane.state, 'worktreeRemoved');
   assert.equal(fs.existsSync(seat.path), false);
@@ -177,10 +178,11 @@ test('managed seats provision exchange and shared dependencies without census di
   assert.equal(cleanupStatus(seat.path, seat.provisioned).clean, true);
   assert.equal(cleanupStatus(seat.path).clean, false, 'older records keep counting ignored files as dirt');
 
-  const exclude = fs.readFileSync(path.join(fixture.repoRoot, '.git', 'info', 'exclude'), 'utf8');
+  const exclude = fs.readFileSync(path.join(seat.gitDir, 'info', 'exclude'), 'utf8');
   assert.equal(exclude.split(/\r?\n/u).filter((line) => line === '.transmogrify/').length, 1);
-  createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
-  const repeated = fs.readFileSync(path.join(fixture.repoRoot, '.git', 'info', 'exclude'), 'utf8');
+  provisionSeat(fixture.repoRoot, seat);
+  const repeated = fs.readFileSync(path.join(seat.gitDir, 'info', 'exclude'), 'utf8');
+  assert.equal(fs.readFileSync(path.join(fixture.repoRoot, '.git', 'info', 'exclude'), 'utf8').includes('.transmogrify/'), false);
   assert.equal(repeated.split(/\r?\n/u).filter((line) => line === '.transmogrify/').length, 1);
   assert.equal(fs.readFileSync(path.join(fixture.repoRoot, '.gitignore'), 'utf8'), publicIgnore);
 });
@@ -408,7 +410,8 @@ test('managed cleanup verifies an already-removed exact seat after a crash bound
     state: 'archivedVerified',
     seat,
   }, fixture.env);
-  execFileSync('git', ['-C', fixture.repoRoot, 'worktree', 'remove', '--', seat.path]);
+  execFileSync('git', ['-C', fixture.repoRoot, 'fetch', '--no-tags', seat.path, `${seat.branchRef}:${seat.branchRef}`]);
+  fs.rmSync(seat.path, { recursive: true });
   const removed = removeManagedSeat(fixture.repoRoot, lane.laneId, harvestReceipt, fixture.env);
   assert.equal(removed.lane.state, 'worktreeRemoved');
   assert.equal(removed.value.alreadyRemoved, true);
@@ -567,4 +570,96 @@ test('ignored files make a managed seat ineligible and remain preserved', (t) =>
     () => verifyHarvestedSeatForCleanup(fixture.repoRoot, seat, dirtyReceipt),
     /not clean when output was harvested/,
   );
+});
+
+test('clone seats keep independent Git metadata and dissociate small measured repositories', (t) => {
+  const fixture = createRepoWithSeat(t);
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
+  assert.equal(seat.kind, 'clone');
+  assert.equal(seat.gitDir, path.join(seat.path, '.git'));
+  assert.equal(fs.lstatSync(seat.gitDir).isDirectory(), true);
+  assert.equal(seat.gitInode, fs.statSync(seat.gitDir).ino);
+  assert.equal(seat.objectStorage.mode, 'dissociate');
+  assert.equal(seat.objectStorage.maxKiB, 32768);
+  assert.ok(seat.objectStorage.sizeKiB <= 32768);
+  assert.match(seat.objectStorage.measurement, /^count: /);
+  assert.equal(seat.alternates.content, null);
+  assert.equal(fs.existsSync(seat.alternates.path), false);
+  assert.equal(execFileSync('git', ['-C', seat.path, 'config', 'user.name'], { encoding: 'utf8' }).trim(), 'Test');
+  assert.equal(execFileSync('git', ['-C', seat.path, 'config', 'user.email'], { encoding: 'utf8' }).trim(), 'test@example.invalid');
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'worktree', 'list'], { encoding: 'utf8' }).includes(seat.path), false);
+});
+
+test('reference clone receipts pin alternates and local objects survive an operator repack', (t) => {
+  const fixture = createRepoWithSeat(t);
+  // A zero duplication budget exercises the large-repository branch using
+  // the producer's real measurement and real clone output.
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID(), { dissociateMaxKiB: 0 });
+  assert.equal(seat.objectStorage.mode, 'reference');
+  assert.ok(seat.objectStorage.sizeKiB > seat.objectStorage.maxKiB);
+  assert.equal(seat.alternates.path, path.join(seat.gitDir, 'objects', 'info', 'alternates'));
+  assert.equal(seat.alternates.content, `${path.join(seat.gitCommonDir, 'objects')}\n`);
+  const object = path.join(seat.gitCommonDir, 'objects', seat.baseCommit.slice(0, 2), seat.baseCommit.slice(2));
+  const copied = path.join(seat.gitDir, 'objects', seat.baseCommit.slice(0, 2), seat.baseCommit.slice(2));
+  assert.notEqual(fs.statSync(object).ino, fs.statSync(copied).ino, 'clone must not hardlink the shared object store');
+  execFileSync('git', ['-C', fixture.repoRoot, 'repack', '-ad']);
+  execFileSync('git', ['-C', fixture.repoRoot, 'prune-packed']);
+  assert.equal(verifyRecordedSeat(fixture.repoRoot, seat).head, seat.head);
+  assert.equal(fs.existsSync(copied), true);
+  fs.writeFileSync(seat.alternates.path, `${seat.gitCommonDir}\n`);
+  assert.throws(() => verifyRecordedSeat(fixture.repoRoot, seat), /alternates entry changed/);
+  fs.unlinkSync(seat.alternates.path);
+  assert.throws(() => verifyRecordedSeat(fixture.repoRoot, seat), /alternates entry changed/);
+  fs.symlinkSync(object, seat.alternates.path);
+  assert.throws(() => verifyRecordedSeat(fixture.repoRoot, seat), /bounded regular file/);
+});
+
+test('clone verification refuses origin, branch, Git directory identity, and added alternates drift', (t) => {
+  const fixture = createRepoWithSeat(t);
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
+  execFileSync('git', ['-C', seat.path, 'remote', 'set-url', 'origin', fixture.root]);
+  assert.throws(() => verifyRecordedSeat(fixture.repoRoot, seat), /clone origin/);
+  execFileSync('git', ['-C', seat.path, 'remote', 'set-url', 'origin', fs.realpathSync(fixture.repoRoot)]);
+  execFileSync('git', ['-C', seat.path, 'checkout', '-qb', 'unexpected-branch']);
+  assert.throws(() => verifyRecordedSeat(fixture.repoRoot, seat), /identity changed/);
+  execFileSync('git', ['-C', seat.path, 'checkout', '-q', seat.branchRef.slice('refs/heads/'.length)]);
+  fs.writeFileSync(seat.alternates.path, `${path.join(seat.gitCommonDir, 'objects')}\n`);
+  assert.throws(() => verifyRecordedSeat(fixture.repoRoot, seat), /alternates entry changed/);
+  fs.unlinkSync(seat.alternates.path);
+  const original = `${seat.gitDir}.original`;
+  fs.renameSync(seat.gitDir, original);
+  fs.cpSync(original, seat.gitDir, { recursive: true });
+  assert.throws(() => verifyRecordedSeat(fixture.repoRoot, seat), /identity changed \(gitInode\)/);
+});
+
+test('clone cleanup preserves the entire seat when HEAD has not been fetched', (t) => {
+  const fixture = createRepoWithSeat(t);
+  const laneId = crypto.randomUUID();
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
+  const receipt = captureHarvestReceipt(fixture.repoRoot, seat, 'a'.repeat(64));
+  registerLane(fixture.repoRoot, {
+    laneId, backend: 'test', providerId: 'unfetched-clone', displayName: '::: unfetched clone',
+    state: 'archivedVerified', seat,
+  }, fixture.env);
+  assert.throws(() => removeManagedSeat(fixture.repoRoot, laneId, receipt, fixture.env), /has not been fetched/);
+  assert.equal(fs.existsSync(path.join(seat.path, '.transmogrify')), true);
+  assert.equal(fs.existsSync(seat.gitDir), true);
+});
+
+test('earlier managed worktree seats retain registration verification and Git removal', (t) => {
+  const fixture = createRepoWithSeat(t);
+  // The fixture creates a real linked worktree, as releases before clone seats did.
+  const legacy = { ...verifySeat(fixture.repoRoot, fixture.seat, fixture.worktreesRoot), managed: true };
+  assert.equal(legacy.kind, undefined);
+  assert.equal(fs.lstatSync(path.join(legacy.path, '.git')).isFile(), true);
+  assert.deepEqual(verifyRecordedSeat(fixture.repoRoot, legacy), legacy);
+  const receipt = captureHarvestReceipt(fixture.repoRoot, legacy, 'f'.repeat(64));
+  const lane = registerLane(fixture.repoRoot, {
+    backend: 'test', providerId: 'legacy-worktree', displayName: '::: legacy worktree',
+    state: 'archivedVerified', seat: legacy,
+  }, fixture.env);
+  removeManagedSeat(fixture.repoRoot, lane.laneId, receipt, fixture.env);
+  assert.equal(fs.existsSync(legacy.path), false);
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'worktree', 'list'], { encoding: 'utf8' }).includes(legacy.path), false);
+  assert.equal(execFileSync('git', ['-C', fixture.repoRoot, 'rev-parse', legacy.branchRef], { encoding: 'utf8' }).trim(), legacy.head);
 });

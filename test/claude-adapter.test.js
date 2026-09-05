@@ -27,7 +27,7 @@ const {
 const { publicRuntime } = require('../scripts/lib/claude-runtime');
 const { removeManagedSeat, verifySeat } = require('../scripts/lib/worktree');
 const { exchangePreamble } = require('../scripts/lib/exchange');
-const { createRepoWithSeat } = require('./helpers/repo-fixture');
+const { createRepoWithSeat, fetchSeatBranch } = require('./helpers/repo-fixture');
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
 const BRIDGE_ID = 'session_testBridge';
@@ -309,7 +309,7 @@ test('Claude spawn journals intent, uses exact argv, binds three identifiers, an
   assert.deepEqual(launch.args.slice(0, 5), [
     '--bg', '--name', '::: native Claude lane', '--remote-control', '::: native Claude lane',
   ]);
-  assert.ok(launch.args[5].startsWith(`${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`));
+  assert.ok(launch.args[5].startsWith(`${exchangePreamble(fs.realpathSync(fixture.seat), 'claude')}\n\n`));
   assert.match(launch.args[5], /Return CLAUDE_READY\.\n\n\[transmogrify spawn [0-9a-f-]{36}\]$/);
   assert.equal(launch.options.cwd, fs.realpathSync(fixture.seat));
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].state, 'complete');
@@ -353,7 +353,7 @@ test('Claude spawn records and forwards an explicit model selection', async (t) 
     '--model', 'claude-opus-5',
   ]);
   // No parent dispatched this lane, so the exchange preamble leads.
-  assert.ok(launch.args[7].startsWith(`${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`));
+  assert.ok(launch.args[7].startsWith(`${exchangePreamble(fs.realpathSync(fixture.seat), 'claude')}\n\n`));
   assert.match(launch.args[7], /Return CLAUDE_READY\./);
   assert.equal(lane.ownership.spawnIntent.modelSelector, 'claude-opus-5');
   assert.equal(listOperations(fixture.repoRoot, fixture.env)[0].details.modelSelector, 'claude-opus-5');
@@ -385,7 +385,7 @@ test('Claude dispatched profiles render provenance and survive exact-session rec
   assert.equal(JSON.parse(fs.readFileSync(childHooksPath(lane.laneId, fixture.env), 'utf8')).fastMode, false, 'the hooks file carries the fast-mode pin');
   // A parent dispatched this lane: provenance first, then the exchange preamble.
   assert.match(launch.args[11], /^╭─ Transmogrify · a task from your user's own session ─+\n/);
-  assert.ok(launch.args[11].includes(`\n\n${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`));
+  assert.ok(launch.args[11].includes(`\n\n${exchangePreamble(fs.realpathSync(fixture.seat), 'claude')}\n\n`));
   assert.match(launch.args[11], /╭─ Transmogrify · a task from your user's own session ─+\n/);
   assert.match(launch.args[11], /^│ From {6}Codex Desktop$/m);
   assert.match(launch.args[11], /^│ Task {6}"Release operator"$/m);
@@ -870,6 +870,7 @@ test('Claude managed retirement removes the guarded worktree before its exact lo
   const spawned = await spawn(options, fixture.env);
   const lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   const order = [];
   const privateApi = {
     preflight() { order.push('private-preflight'); },
@@ -1244,6 +1245,7 @@ test('Claude short-job collisions block stop and local removal before either des
   const secondSpawn = await spawn(secondOptions, secondFixture.env);
   const secondLane = listLanes(secondFixture.repoRoot, secondFixture.env)
     .find((candidate) => candidate.laneId === secondSpawn.laneId);
+  fetchSeatBranch(secondFixture.repoRoot, secondLane.seat);
   secondSurface.setRows(secondSurface.getRows().map((row) => ({
     ...row, pid: null, status: 'stopped',
   })));
@@ -1286,6 +1288,7 @@ test('Claude local removal rechecks short-job uniqueness immediately before rm d
   const spawned = await spawn(options, fixture.env);
   const lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   surface.setRows(surface.getRows().map((row) => ({ ...row, pid: null, status: 'stopped' })));
   let collisionAdded = false;
   let postCleanupCensuses = 0;
@@ -1666,6 +1669,7 @@ test('Claude retirement never runs rm for a managed seat that was dirty at harve
   const spawned = await spawn(options, fixture.env);
   const lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   fs.writeFileSync(path.join(lane.seat.path, 'dirty-at-harvest.txt'), 'unharvested\n');
   const privateApi = {
     preflight() {},
@@ -1692,6 +1696,7 @@ test('Claude deferred managed cleanup retains its harvest and later cleans witho
   const spawned = await spawn(options, fixture.env);
   let lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   assert.equal(lane.seat.managed, true);
   surface.setRows(surface.getRows().map((row) => ({ ...row, pid: null, status: 'stopped' })));
   let archiveCalls = 0;
@@ -1742,9 +1747,11 @@ test('Claude cleanup block remains permanent after the managed worktree is resto
   const spawned = await spawn(options, fixture.env);
   const lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   fs.writeFileSync(path.join(lane.seat.path, '.gitignore'), 'ignored/\n');
   execFileSync('git', ['-C', lane.seat.path, 'add', '.gitignore']);
   execFileSync('git', ['-C', lane.seat.path, 'commit', '-qm', 'ignore cleanup fixture']);
+  fetchSeatBranch(fixture.repoRoot, lane.seat);
   surface.setRows(surface.getRows().map((row) => ({ ...row, pid: null, status: 'stopped' })));
   const changedAfterHarvest = path.join(lane.seat.path, 'ignored', 'changed-after-harvest.txt');
   let archiveCalls = 0;
@@ -1784,9 +1791,7 @@ test('Claude cleanup block remains permanent after the managed worktree is resto
   assert.equal(archiveCalls, 1);
   assert.equal(surface.calls.some((call) => call.method === 'run' && call.args[0] === 'rm'), false);
 
-  execFileSync('git', [
-    '-C', fixture.repoRoot, 'worktree', 'remove', '--force', '--', lane.seat.path,
-  ]);
+  fs.rmSync(lane.seat.path, { recursive: true });
   fs.symlinkSync(path.join(fixture.root, 'missing-seat-target'), lane.seat.path);
   await assert.rejects(() => retire({
     repoRoot: fixture.repoRoot,
@@ -1824,15 +1829,18 @@ test('Claude retire leaves a transient local cleanup failure retryable without r
   const spawned = await spawn(options, fixture.env);
   const lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   surface.setRows(surface.getRows().map((row) => ({ ...row, pid: null, status: 'stopped' })));
   let archiveCalls = 0;
   const privateApi = {
     preflight() {},
     async ensureArchived() {
       archiveCalls += 1;
-      execFileSync('git', [
-        '-C', fixture.repoRoot, 'worktree', 'lock', '--reason', 'transient test lock', '--', lane.seat.path,
-      ]);
+      const remove = fs.rmSync;
+      t.mock.method(fs, 'rmSync', (target, options) => {
+        if (target === lane.seat.path) throw Object.assign(new Error('transient fixture removal failure'), { code: 'EBUSY' });
+        return remove(target, options);
+      });
       return { archived: true, alreadyArchived: false };
     },
   };
@@ -1865,7 +1873,7 @@ test('Claude retire leaves a transient local cleanup failure retryable without r
   assert.equal(reconciled.results[0].cleanup, 'retryable');
   assert.equal(archiveCalls, 1);
   const providerCalls = surface.calls.length;
-  execFileSync('git', ['-C', fixture.repoRoot, 'worktree', 'unlock', '--', lane.seat.path]);
+  t.mock.restoreAll();
 
   const retried = await retire({
     repoRoot: fixture.repoRoot,
@@ -1891,6 +1899,7 @@ test('Claude retirement recovers after worktree removal and only then removes it
   const spawned = await spawn(options, fixture.env);
   let lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   surface.setRows(surface.getRows().map((row) => ({ ...row, pid: null, status: 'stopped' })));
   const privateApi = {
     preflight() {},
@@ -1910,6 +1919,7 @@ test('Claude retirement recovers after worktree removal and only then removes it
   }, fixture.env);
   lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   assert.equal(lane.state, 'archivedVerified');
   const harvestReceipt = pendingOperationForLane(
     fixture.repoRoot, lane.laneId, fixture.env,
@@ -1946,6 +1956,7 @@ test('Claude retirement never replays an uncertain rm while the exact local reco
   const spawned = await spawn(options, fixture.env);
   const lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   const privateApi = {
     preflight() {},
     async ensureArchived() { return { archived: true, alreadyArchived: false }; },
@@ -1989,6 +2000,7 @@ test('Claude retirement completes an uncertain rm only after observing the local
   const spawned = await spawn(options, fixture.env);
   const lane = listLanes(fixture.repoRoot, fixture.env)
     .find((candidate) => candidate.laneId === spawned.laneId);
+  if (lane?.seat && fs.existsSync(lane.seat.path)) fetchSeatBranch(fixture.repoRoot, lane.seat);
   const privateApi = {
     preflight() {},
     async ensureArchived() { return { archived: true, alreadyArchived: false }; },
@@ -2229,6 +2241,7 @@ test('Claude retire cleans the managed seat of a failed unbound lane without pro
   await assert.rejects(() => spawn(options, fixture.env), /simulated crash boundary/);
   const [uncertain] = listLanes(fixture.repoRoot, fixture.env);
   assert.equal(uncertain.seat.managed, true);
+  fetchSeatBranch(fixture.repoRoot, uncertain.seat);
   assert.equal(fs.existsSync(uncertain.seat.path), true);
   await assert.rejects(
     () => retire({

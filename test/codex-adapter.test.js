@@ -38,7 +38,7 @@ const {
 const { createParentContext, listEvents, readDispatch } = require('../scripts/lib/dispatch');
 const { exchangePreamble } = require('../scripts/lib/exchange');
 const { NO_RESPONSE, startMockAppServer } = require('./helpers/mock-app-server');
-const { createRepoWithSeat } = require('./helpers/repo-fixture');
+const { createRepoWithSeat, fetchSeatBranch } = require('./helpers/repo-fixture');
 
 function baseOptions(fixture, url) {
   return {
@@ -1907,6 +1907,7 @@ test('Codex archive uncertainty preserves its managed worktree and branch withou
   const fixture = createRepoWithSeat(t);
   const laneId = '79797979-7979-4979-8979-797979797979';
   const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
+  fetchSeatBranch(fixture.repoRoot, seat);
   let archiveCalls = 0;
   const server = await startMockAppServer((request) => {
     if (request.method === 'thread/read') {
@@ -1990,6 +1991,7 @@ test('Codex retire automatically removes only its clean operator-managed worktre
   const fixture = createRepoWithSeat(t);
   const laneId = '99999999-9999-4999-8999-999999999999';
   const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
+  fetchSeatBranch(fixture.repoRoot, seat);
   const server = await startMockAppServer((request) => {
     if (request.method === 'thread/read') {
       return threadReadAt(seat.path, {
@@ -2036,9 +2038,11 @@ test('Codex retire keeps a post-harvest cleanup block permanent without replayin
   const fixture = createRepoWithSeat(t);
   const laneId = '88888888-8888-4888-8888-888888888888';
   const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
+  fetchSeatBranch(fixture.repoRoot, seat);
   fs.writeFileSync(`${seat.path}/.gitignore`, 'ignored/\n');
   execFileSync('git', ['-C', seat.path, 'add', '.gitignore']);
   execFileSync('git', ['-C', seat.path, 'commit', '-qm', 'ignore cleanup fixture']);
+  fetchSeatBranch(fixture.repoRoot, seat);
   let archiveCalls = 0;
   const changed = `${seat.path}/ignored/changed-after-harvest.txt`;
   const server = await startMockAppServer((request) => {
@@ -2118,6 +2122,7 @@ test('Codex retire leaves a transient local cleanup failure retryable without re
   const fixture = createRepoWithSeat(t);
   const laneId = '89898989-8989-4898-8989-898989898989';
   const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
+  fetchSeatBranch(fixture.repoRoot, seat);
   let archiveCalls = 0;
   const server = await startMockAppServer((request) => {
     if (request.method === 'thread/read') {
@@ -2129,9 +2134,11 @@ test('Codex retire leaves a transient local cleanup failure retryable without re
     if (request.method === 'thread/turns/list') return { result: { data: [] } };
     if (request.method === 'thread/archive') {
       archiveCalls += 1;
-      execFileSync('git', [
-        '-C', fixture.repoRoot, 'worktree', 'lock', '--reason', 'transient test lock', '--', seat.path,
-      ]);
+      const remove = fs.rmSync;
+      t.mock.method(fs, 'rmSync', (target, options) => {
+        if (target === seat.path) throw Object.assign(new Error('transient fixture removal failure'), { code: 'EBUSY' });
+        return remove(target, options);
+      });
       return { result: {} };
     }
     if (request.method === 'thread/list') {
@@ -2179,7 +2186,7 @@ test('Codex retire leaves a transient local cleanup failure retryable without re
   assert.equal(reconciled.results[0].cleanup, 'retryable');
   assert.equal(archiveCalls, 1);
   const requestsBeforeRetry = server.requests.length;
-  execFileSync('git', ['-C', fixture.repoRoot, 'worktree', 'unlock', '--', seat.path]);
+  t.mock.restoreAll();
 
   const retried = await retire({
     repoRoot: fixture.repoRoot,
@@ -2196,6 +2203,7 @@ test('Codex deferred managed cleanup retains its harvest receipt and later remov
   const fixture = createRepoWithSeat(t);
   const laneId = '89898989-8989-4898-8989-898989898989';
   const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
+  fetchSeatBranch(fixture.repoRoot, seat);
   const server = await startMockAppServer((request) => {
     if (request.method === 'thread/read') {
       return threadReadAt(seat.path, {
@@ -2257,6 +2265,7 @@ test('Codex retirement completes its journal after a crash immediately following
   const fixture = createRepoWithSeat(t);
   const laneId = '90919191-9091-4909-8909-919191919191';
   const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
+  fetchSeatBranch(fixture.repoRoot, seat);
   const lane = registerLane(fixture.repoRoot, {
     laneId,
     backend: 'codex-app-server',

@@ -205,7 +205,7 @@ async function spawn(options, env = process.env) {
   // the exchange preamble, then the packet. The seat is planned first because
   // the preamble names it; the plan is reused when the lane is reserved.
   const seatPlan = planSeat(options, env, laneId);
-  const exchangeInput = prependExchangePreamble(seatPlan.path, options.input);
+  const exchangeInput = prependExchangePreamble(seatPlan.path, options.input, 'codex');
   const dispatchEnvelope = options.parentContext ? reserveDispatch({
     parentContext: options.parentContext,
     repoRoot: options.repoRoot,

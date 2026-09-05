@@ -126,10 +126,29 @@ surface disables archival until reverified.
   emit that owned content. Treat their output as sensitive and do not use those
   methods for routine census or logs.
 
+## Child Git boundary
+
+New managed seats are clones whose Git metadata lives inside the seat. Children
+can commit their assigned work with the operator's configured Git identity.
+The injected provider trailer supplies attribution. Children must stay on the
+assigned branch and never push. The sandbox remains `workspace-write` with
+approval policy `never`; the shared object store, operator refs, and operator
+state are outside its write boundary. The dependency symlink grants no write
+access to its target outside the seat.
+
+Clone creation uses `--no-hardlinks --reference`, optionally `--dissociate`
+when the measured repository is small. References grant object reads only.
+The seat receipt pins the Git directory device and inode, exact origin and
+branch, and alternates file path and content. An added, removed, or changed
+alternate refuses verification. Harvest verifies the handback SHA against the
+seat HEAD, fetches under the repository lock, and refuses non-fast-forward
+updates. Earlier linked worktree seats retain their original verification;
+children in those seats may still need the operator's `--commit` fallback.
+
 ## Cleanup
 
 Retirement requires a durable output-harvest digest before provider mutation.
-Remove only an operator-managed worktree that was clean at harvest, whose
+Remove only an operator-managed seat that was clean at harvest, whose
 current HEAD matches its harvest receipt, and whose current status remains
 clean. The status census includes tracked, untracked, and ignored files; ignored
 output is preserved as data, not treated as disposable. The only exception is
@@ -140,7 +159,10 @@ and remain on manual provision removal. External, dirty, changed, ambiguous,
 or unverified seats remain in place for review. Once a harvest or cleanup check
 observes dirt or changed HEAD, the seat permanently blocks automatic cleanup
 even if it later appears clean.
-The final census and `git worktree remove` are separate operations. Stop the
+Clone removal additionally requires the exact harvested HEAD at the preserved
+branch in the operator repository. An unfetched clone is never removed.
+The final census and directory removal (or legacy `git worktree remove`) are
+separate operations. Stop the
 exact owned lane first and prevent other same-user processes from writing into
 the managed seat during retirement; a new ignored file created in that interval
 cannot be protected by the preceding census.

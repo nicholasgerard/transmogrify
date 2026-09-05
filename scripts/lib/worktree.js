@@ -1,7 +1,7 @@
 'use strict';
 
-// Managed Git worktree seats: planning an immutable seat intent, materializing
-// it, verifying a recorded seat's identity, capturing the pre-retirement harvest
+// Managed Git clone and legacy worktree seats: planning and materializing an
+// immutable seat intent, verifying a recorded seat's identity, capturing the pre-retirement harvest
 // receipt, and removing a seat only after provider retirement is verified. A
 // seat must be a real, owner-controlled, symlink-free worktree of this exact
 // repository. Cleanup never removes a seat that is dirty, whose HEAD moved, or
@@ -201,7 +201,7 @@ function canonicalFuturePath(repoRoot, candidate) {
 // is ignored where it is in-repository, a Git-recognized worktree of this exact
 // repository checked out on a local branch, and never the operator checkout.
 // Returns the seat identity including its device and inode receipt.
-function verifySeat(repoRoot, seatPath, worktreesRoot) {
+function verifySeat(repoRoot, seatPath, worktreesRoot, recorded) {
   if (!seatPath || !path.isAbsolute(seatPath)) {
     throw seatIdentity(`lane seat must be an absolute path: ${seatPath || '(missing)'}`);
   }
@@ -241,6 +241,11 @@ function verifySeat(repoRoot, seatPath, worktreesRoot) {
     throw seatIdentity('the operator checkout cannot be used as a lane seat');
   }
 
+  requireOwnerControlledDirectory(canonicalSeat, 'lane seat');
+  const localGitDir = path.join(canonicalSeat, '.git');
+  if (recorded?.kind === 'clone' || fs.lstatSync(localGitDir).isDirectory()) {
+    return verifyCloneSeat(project, canonicalSeat, canonicalWorktrees, recorded);
+  }
   const seatProject = resolveProject(canonicalSeat);
   if (seatProject.commonDir !== project.commonDir) {
     throw seatIdentity(`lane seat belongs to a different Git repository: ${canonicalSeat}`);
@@ -267,11 +272,102 @@ function verifySeat(repoRoot, seatPath, worktreesRoot) {
   };
 }
 
+// Small repositories can afford independent objects. Referenced repositories
+// keep local copies (--no-hardlinks), so an operator repack cannot remove those
+// copies. Existing alternates make the local size incomplete; retain a reference.
+function planObjectStorage(repoRoot, maxKiB = 32 * 1024) {
+  if (!Number.isSafeInteger(maxKiB) || maxKiB < 0) throw new Error('invalid dissociation size limit');
+  const measurement = git(repoRoot, ['count-objects', '-v']);
+  const values = Object.fromEntries(measurement.trim().split('\n').map((line) => {
+    const separator = line.indexOf(': ');
+    return [line.slice(0, separator), line.slice(separator + 2)];
+  }));
+  const sizeKiB = Number(values.size) + Number(values['size-pack']);
+  if (!Number.isSafeInteger(sizeKiB) || sizeKiB < 0) throw new Error('invalid Git object size measurement');
+  return {
+    mode: sizeKiB <= maxKiB && !values.alternate ? 'dissociate' : 'reference',
+    sizeKiB, maxKiB, measurement,
+  };
+}
+
+function readOperatorIdentity(repoRoot) {
+  // Identity alone may come from global config. Never forward Git redirection,
+  // credentials, signing or hooks into the commands that create the seat.
+  const env = Object.fromEntries(['HOME', 'PATH', 'USER', 'LOGNAME', 'XDG_CONFIG_HOME']
+    .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  const read = (key) => {
+    try {
+      return execFileSync('git', ['-C', repoRoot, 'config', '--get', key], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env,
+      }).trim();
+    } catch { return ''; }
+  };
+  const name = read('user.name');
+  const email = read('user.email');
+  if (!name || !email || /[\u0000-\u001f\u007f]/u.test(`${name}${email}`)) {
+    throw seatIdentity('operator Git identity is not configured safely');
+  }
+  return { name, email };
+}
+
+function verifyCloneSeat(project, seatPath, worktreesRoot, recorded) {
+  const gitDir = path.join(seatPath, '.git');
+  for (const directory of [gitDir, path.join(gitDir, 'objects'), path.join(gitDir, 'objects', 'info')]) {
+    requireOwnerControlledDirectory(directory, 'clone Git directory');
+  }
+  const seatProject = resolveProject(seatPath);
+  if (seatProject.root !== seatPath || seatProject.commonDir !== gitDir ||
+      git(seatPath, ['rev-parse', '--absolute-git-dir']).trim() !== gitDir) {
+    throw seatIdentity('clone Git metadata must stay inside its seat');
+  }
+  if (git(seatPath, ['remote', 'get-url', '--all', 'origin']).trim() !== project.root) {
+    throw seatIdentity('clone origin no longer matches the operator repository');
+  }
+  const branchRef = git(seatPath, ['rev-parse', '--symbolic-full-name', 'HEAD']).trim();
+  if (!branchRef.startsWith('refs/heads/')) throw seatIdentity('clone seat must be on a local branch');
+  const alternatesPath = path.join(gitDir, 'objects', 'info', 'alternates');
+  let content = null;
+  if (pathEntryExists(alternatesPath)) {
+    const stat = fs.lstatSync(alternatesPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16384) {
+      throw seatIdentity('clone alternates must be a bounded regular file');
+    }
+    content = fs.readFileSync(alternatesPath, 'utf8');
+    if (content !== `${path.join(project.commonDir, 'objects')}\n`) {
+      throw seatIdentity('clone alternates entry changed');
+    }
+  }
+  const alternates = { path: alternatesPath, content };
+  if (recorded?.alternates && JSON.stringify(alternates) !== JSON.stringify(recorded.alternates)) {
+    throw seatIdentity('clone alternates entry changed');
+  }
+  if (recorded?.objectStorage &&
+      (recorded.objectStorage.mode === 'reference') !== (content !== null)) {
+    throw seatIdentity('clone alternates disagree with the recorded storage choice');
+  }
+  const stat = fs.statSync(seatPath);
+  const gitStat = fs.statSync(gitDir);
+  for (const [key, actual] of Object.entries({ gitDir, gitDevice: gitStat.dev, gitInode: gitStat.ino })) {
+    if (recorded?.[key] !== undefined && recorded[key] !== actual) {
+      throw seatIdentity(`clone seat identity changed (${key})`);
+    }
+  }
+  return {
+    path: seatPath, worktreesRoot, gitCommonDir: project.commonDir,
+    kind: 'clone', gitDir, gitDevice: gitStat.dev, gitInode: gitStat.ino,
+    branchRef, head: git(seatPath, ['rev-parse', '--verify', 'HEAD']).trim(),
+    device: stat.dev, inode: stat.ino, managed: false, alternates,
+    ...(recorded?.baseCommit ? { baseCommit: recorded.baseCommit } : {}),
+    ...(recorded?.objectStorage ? { objectStorage: recorded.objectStorage } : {}),
+  };
+}
+
 // Plan and materialize a managed seat in one step. Spawn paths split the two so
 // the intent becomes durable before anything is created.
 function createManagedSeat(repoRoot, worktreesRoot, laneId, options = {}) {
   const intent = planManagedSeat(repoRoot, worktreesRoot, laneId, options);
-  return materializeManagedSeat(repoRoot, intent);
+  return materializeManagedSeat(repoRoot, intent, options);
 }
 
 // Reserve the immutable seat intent before anything is created: seat path,
@@ -351,11 +447,11 @@ function verifyManagedSeatIntent(repoRoot, intent) {
   return { project, intent };
 }
 
-// Create the worktree the intent reserved, or adopt an existing seat that
+// Create the clone the intent reserved, or adopt an existing seat that
 // matches it exactly. A path or branch collision is refused, as is a branch
 // whose commit no longer equals the reserved base, so recovery can re-run this
 // without silently binding a different tree.
-function materializeManagedSeat(repoRoot, intent) {
+function materializeManagedSeat(repoRoot, intent, options = {}) {
   const verified = verifyManagedSeatIntent(repoRoot, intent);
   const { project } = verified;
   fs.mkdirSync(intent.worktreesRoot, { recursive: true, mode: 0o700 });
@@ -365,8 +461,9 @@ function materializeManagedSeat(repoRoot, intent) {
     throw new Error(`refusing unsafe WORKTREES directory: ${intent.worktreesRoot}`);
   }
 
+  const objectStorage = planObjectStorage(project.root, options.dissociateMaxKiB);
   if (fs.existsSync(intent.path)) {
-    const existing = verifySeat(repoRoot, intent.path, intent.worktreesRoot);
+    const existing = verifySeat(repoRoot, intent.path, intent.worktreesRoot, { ...intent, objectStorage });
     if (existing.branchRef !== intent.branchRef || existing.head?.toLowerCase() !== intent.baseCommit) {
       throw new Error(`managed seat does not match its durable intent: ${intent.path}`);
     }
@@ -387,12 +484,20 @@ function materializeManagedSeat(repoRoot, intent) {
   if (branchCommit !== null && branchCommit !== intent.baseCommit) {
     throw new Error('managed seat branch no longer matches its reserved base commit');
   }
-  if (branchCommit === null) {
-    git(project.root, ['worktree', 'add', '-b', branchName, '--', intent.path, intent.baseCommit]);
-  } else {
-    git(project.root, ['worktree', 'add', '--', intent.path, branchName]);
-  }
-  const seat = verifySeat(project.root, intent.path, intent.worktreesRoot);
+  const identity = readOperatorIdentity(project.root);
+  const cloneArgs = ['clone', '--no-hardlinks', '--reference', project.commonDir];
+  if (objectStorage.mode === 'dissociate') cloneArgs.push('--dissociate');
+  const baseBranch = git(project.root, [
+    'for-each-ref', '--format=%(refname:short)', '--points-at', intent.baseCommit, 'refs/heads/',
+  ]).trim().split('\n')[0];
+  if (baseBranch) cloneArgs.push('--branch', baseBranch);
+  git(project.root, [...cloneArgs, '--', project.root, intent.path]);
+  git(intent.path, ['checkout', '-b', branchName, intent.baseCommit]);
+  git(intent.path, ['config', 'user.name', identity.name]);
+  git(intent.path, ['config', 'user.email', identity.email]);
+  const seat = verifySeat(project.root, intent.path, intent.worktreesRoot, {
+    ...intent, kind: 'clone', objectStorage,
+  });
   if (seat.branchRef !== intent.branchRef || seat.head?.toLowerCase() !== intent.baseCommit) {
     throw new Error('materialized managed seat does not match its durable intent');
   }
@@ -520,7 +625,7 @@ function matchingProvisionedNames(seatPath, provisioned) {
 // are accepted only when they are exactly the directory or symlink we create.
 function provisionSeat(repoRoot, recorded) {
   const project = resolveProject(repoRoot);
-  const seat = verifySeat(project.root, recorded.path, recorded.worktreesRoot);
+  const seat = verifySeat(project.root, recorded.path, recorded.worktreesRoot, recorded);
   const planned = plannedProvisionedEntries(project.root);
   for (const entry of planned) {
     if (git(seat.path, ['ls-files', '--', entry]).trim()) {
@@ -539,7 +644,7 @@ function provisionSeat(repoRoot, recorded) {
         throw seatIdentity(`lane provision no longer matches its creation receipt: ${receipt.name}`);
       }
     }
-    ensureExchangeExclude(project);
+    ensureExchangeExclude(recorded.kind === 'clone' ? resolveProject(seat.path) : project);
     return { ...recorded, provisioned: validated.entries };
   }
 
@@ -552,7 +657,7 @@ function provisionSeat(repoRoot, recorded) {
     }
   }
 
-  ensureExchangeExclude(project);
+  ensureExchangeExclude(recorded.kind === 'clone' ? resolveProject(seat.path) : project);
   const provisioned = [];
   const exchangeDirectory = path.join(seat.path, '.transmogrify');
   fs.mkdirSync(exchangeDirectory, { mode: 0o700 });
@@ -572,9 +677,9 @@ function verifyRecordedSeat(repoRoot, recorded) {
   if (!recorded || recorded.managed !== true) {
     throw seatIdentity('lane seat is not operator-managed');
   }
-  const current = verifySeat(repoRoot, recorded.path, recorded.worktreesRoot);
-  for (const key of ['path', 'worktreesRoot', 'gitCommonDir', 'branchRef', 'device', 'inode']) {
-    if (current[key] !== recorded[key]) {
+  const current = verifySeat(repoRoot, recorded.path, recorded.worktreesRoot, recorded);
+  for (const key of ['path', 'worktreesRoot', 'gitCommonDir', 'branchRef', 'device', 'inode', ...(recorded.kind === 'clone' ? ['kind', 'gitDir', 'gitDevice', 'gitInode'] : [])]) {
+    if (current[key] !== recorded[key] || (current.kind === 'clone' && recorded.kind !== 'clone')) {
       throw seatIdentity(`managed lane seat identity changed (${key}): ${recorded.path}`);
     }
   }
@@ -593,9 +698,9 @@ function verifyRecordedSeat(repoRoot, recorded) {
 function verifyLaneSeat(repoRoot, recorded) {
   if (!recorded) throw seatIdentity('lane has no recorded seat');
   if (recorded.managed === true) return verifyRecordedSeat(repoRoot, recorded);
-  const current = verifySeat(repoRoot, recorded.path, recorded.worktreesRoot);
-  for (const key of ['path', 'worktreesRoot', 'gitCommonDir', 'branchRef', 'device', 'inode']) {
-    if (current[key] !== recorded[key]) {
+  const current = verifySeat(repoRoot, recorded.path, recorded.worktreesRoot, recorded);
+  for (const key of ['path', 'worktreesRoot', 'gitCommonDir', 'branchRef', 'device', 'inode', ...(recorded.kind === 'clone' ? ['kind', 'gitDir', 'gitDevice', 'gitInode'] : [])]) {
+    if (current[key] !== recorded[key] || (current.kind === 'clone' && recorded.kind !== 'clone')) {
       throw seatIdentity(`lane seat identity changed (${key}): ${recorded.path}`);
     }
   }
@@ -777,12 +882,25 @@ function removeManagedSeat(repoRoot, laneId, harvestReceipt, env = process.env) 
       };
     }
     const seat = verifyHarvestedSeatForCleanup(repoRoot, lane.seat, harvestReceipt);
+    const project = resolveProject(repoRoot);
+    if (seat.kind === 'clone') {
+      let branchHead;
+      try { branchHead = git(project.root, ['rev-parse', '--verify', seat.branchRef]).trim().toLowerCase(); }
+      catch { throw unsafeCleanup('clone HEAD has not been fetched into the operator repository'); }
+      if (branchHead !== harvestReceipt.seat.head) {
+        throw unsafeCleanup('clone HEAD has not been fetched into the operator repository');
+      }
+      git(project.root, ['cat-file', '-e', `${branchHead}^{commit}`]);
+    }
     removeProvisionedEntries(seat);
     if (!cleanupStatus(seat.path).clean) {
       throw unsafeCleanup(`refusing to remove dirty managed worktree: ${seat.path}`);
     }
-    const project = resolveProject(repoRoot);
-    git(project.root, ['worktree', 'remove', '--', seat.path]);
+    if (seat.kind === 'clone') {
+      fs.rmSync(seat.path, { recursive: true });
+    } else {
+      git(project.root, ['worktree', 'remove', '--', seat.path]);
+    }
     if (pathEntryExists(seat.path)) {
       throw unsafeCleanup(`Git reported success but managed worktree still exists: ${seat.path}`);
     }
@@ -792,9 +910,9 @@ function removeManagedSeat(repoRoot, laneId, harvestReceipt, env = process.env) 
     }
     const branchHead = git(project.root, ['rev-parse', '--verify', seat.branchRef]).trim().toLowerCase();
     if (branchHead !== harvestReceipt.seat.head) {
-      try {
-        git(project.root, ['worktree', 'add', '-q', '--', seat.path, seat.branchRef]);
-      } catch {}
+      if (seat.kind !== 'clone') {
+        try { git(project.root, ['worktree', 'add', '-q', '--', seat.path, seat.branchRef]); } catch {}
+      }
       throw unsafeCleanup('managed worktree branch HEAD changed during removal; its branch was preserved');
     }
     return {
@@ -817,6 +935,7 @@ module.exports = {
   parseWorktreeList,
   planManagedSeat,
   plannedProvisionedEntries,
+  readOperatorIdentity,
   provisionSeat,
   requireIgnoredManagedRoot,
   removeProvisionedEntries,

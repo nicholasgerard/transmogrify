@@ -218,7 +218,7 @@ async function spawnLane(options, env = process.env) {
       ...verifySeat(options.repoRoot, options.cwd, worktreesRoot(options, env)),
       provisioned: plannedProvisionedEntries(options.repoRoot),
     } : null;
-  const exchangeInput = prependExchangePreamble((externalSeat || seatIntent).path, options.input);
+  const exchangeInput = prependExchangePreamble((externalSeat || seatIntent).path, options.input, 'claude');
   const dispatchEnvelope = options.parentContext ? reserveDispatch({
     parentContext: options.parentContext,
     repoRoot: options.repoRoot,
