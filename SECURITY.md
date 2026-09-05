@@ -2,12 +2,15 @@
 
 ## Supported versions
 
-Security fixes target the current `0.2.x` release line. Unpinned provider
-combinations are unsupported.
+Security fixes target the current `0.6.x` release line. Public Claude lifecycle
+operations require CLI `2.1.258` or newer with successful compatibility evidence.
+Codex requires app-server `0.151.0` or newer with the required method evidence.
+Private Claude archive separately requires its exact pinned CLI/Desktop tuple.
 
 ## Trust boundaries
 
-Transmogrify accepts only a root-path loopback Codex app-server WebSocket and
+Transmogrify accepts canonical loopback Codex WebSockets and local Unix-socket
+endpoints. It
 does not configure WebSocket authentication for that local mode. Treat this
 accepted configuration as an unauthenticated local control plane. Codex also
 documents authenticated non-loopback WebSockets; Transmogrify rejects them in
@@ -20,9 +23,9 @@ execution; `v2/FsRemoveParams.json` accepts absolute recursive deletion; and
 
 Binding to a literal `127.0.0.1` or `::1` address reduces network exposure but
 does not authenticate local clients. Never bind the runtime to `0.0.0.0`, a LAN
-address, or a public interface. Transmogrify accepts only a root WebSocket endpoint without URL
-credentials, query parameters, or fragments so endpoint secrets cannot enter
-its durable registry. The client rejects binary frames and caps each inbound
+address, or a public interface. Loopback WebSockets accept only the root path,
+without URL credentials, query parameters, or fragments. Unix endpoints must be
+canonical absolute socket paths. Endpoint credentials cannot enter the registry. The client rejects binary frames and caps each inbound
 text message at 8 MiB. An owned runtime log must be an absolute, non-symlinked,
 owner-controlled `0600` file under an owner-controlled directory. Inspect the
 listener and established clients before sensitive work:
@@ -43,8 +46,9 @@ operations. Repository attributes and filters remain part of the authorized
 target repository's trust boundary, but they do not inherit ambient tokens,
 proxy credentials, or SSH agent sockets from the operator process.
 
-The Claude adapter uses public CLI commands plus version-pinned local process,
-socket, transcript, Remote Control, and private archive surfaces. Directed
+The Claude adapter uses measured public CLI commands plus exact local process,
+socket, transcript, and Remote Control identity receipts. Private archive
+retains a separate exact version and hash pin. Directed
 input travels through the public `--cloud` follow-up command; the local socket
 is measured execution-identity evidence, not the normal steering transport. A
 compromised same-user process remains in the trust boundary.
@@ -185,7 +189,7 @@ Transient local Git or filesystem failures after provider retirement remain
 `CLEANUP_RETRYABLE`; they preserve the exact pending harvest and retirement
 record and never replay the provider mutation.
 
-Pinned Claude CLI `2.1.258` documents `claude rm` as deleting a background
+The pre-measured Claude CLI `2.1.258` documents `claude rm` as deleting a background
 session and its worktree. The adapter therefore runs it only after a guarded
 operator-managed seat has already been removed and its path is absent. External,
 dirty, changed, and explicitly deferred seats are never passed to `claude rm`.

@@ -201,11 +201,13 @@ Sources: [Codex model guidance](https://learn.chatgpt.com/docs/models),
 ## Claude Code
 
 Claude model compatibility combines official model documentation with the
-locally pinned Claude Code CLI `2.1.258` interface, whose SHA-256 is verified
-during preflight and immediately before provider mutation. That CLI exposes
+measured Claude Code CLI interface at minimum `2.1.258`, with no maximum.
+Known hashes use pre-measured evidence; other builds require vendor observations
+and option checks. The executable digest is rechecked before provider mutation.
+Private archive retains a separate exact CLI/Desktop pin. The baseline CLI exposes
 `--model`, `--effort low|medium|high|xhigh|max`, and `--settings`, and no
 separate `--speed` flag. Its help text omits `ultracode` from the effort-value
-list, but the pinned parser accepts `claude --effort ultracode`, and Anthropic
+list, but the pre-measured parser accepts `claude --effort ultracode`, and Anthropic
 documents that route for CLI v2.1.203 and later.
 
 | Selector | Alias | Model | Effort | Fast | Ultracode | Best fit |
@@ -221,7 +223,7 @@ documents that route for CLI v2.1.203 and later.
 | `claude-haiku-4-5-20251001` | `haiku` | Claude Haiku 4.5 | No effort selector | No | No | Simple, high-volume, latency-sensitive work with clear checks. |
 
 Unknown selectors, special selectors such as `[1m]`, and provider-dependent
-aliases such as `best`, `default`, or `opusplan` are outside this pinned
+aliases such as `best`, `default`, or `opusplan` are outside this measured
 adapter until their exact native-app behavior is receipted. They fail before
 mutation. Account or organization policy may still reject a documented model
 at launch.
@@ -242,7 +244,7 @@ Anthropic defines Ultracode as a Claude Code execution setting, not a sixth
 reasoning-effort level: it combines `xhigh` model effort with automatic dynamic
 workflow planning for each substantive task. Transmogrify requires an explicit
 catalog-resolved model that supports `xhigh` and compiles the setting back to
-the pinned CLI as:
+the measured CLI as:
 
 ```text
 --model <versioned-xhigh-capable-selector> --effort ultracode
@@ -250,9 +252,11 @@ the pinned CLI as:
 
 The profile records resolved effort `xhigh` separately from the native
 `claude-effort-flag: ultracode` control. Haiku 4.5, Opus 4.6, Sonnet 4.6,
-unknown selectors, and unverified CLI versions fail before provider mutation.
-The version gate reflects Anthropic's documented minimum of `2.1.203` by
-refusing every unpinned version until it is re-verified.
+unknown selectors, below-minimum CLIs, and failed build measurements fail before
+provider mutation. Anthropic's documented Ultracode minimum is `2.1.203`;
+Transmogrify's public lifecycle minimum is the stricter `2.1.258` plus
+compatibility evidence. Newer builds are measured rather than refused for
+being unpinned. Help-based checks do not prove that dynamic workflows ran.
 
 Ultracode can run several workflows in sequence and therefore typically costs
 more time and tokens than ordinary `xhigh`. Prefer a normal effort for routine
@@ -323,8 +327,8 @@ required.
 - There is no generic price or token-budget policy in the profile schema. The
   host operator owns budget authorization; Fast remains explicit.
 - Context-window selectors and provider-specific planning aliases stay
-  rejected until the pinned adapter has exercised them. Claude Ultracode is
-  accepted only through its typed setting path, on a pinned CLI, with an
+  rejected until the adapter has exercised them. Claude Ultracode is
+  accepted only through its typed setting path, on a measured compatible CLI, with an
   explicit xhigh-capable catalog model.
 - Model descriptions guide dispatch. Live capabilities and exact provider
   receipts decide what is supported.

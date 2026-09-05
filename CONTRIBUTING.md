@@ -42,9 +42,11 @@ For Claude Code changes:
 
 1. Prefer Anthropic's public CLI, Desktop, Remote Control, or Agent SDK contract.
 2. Record the exact CLI/Desktop/platform tuple for any measured local surface.
-3. Fail closed when an executable, worker, socket, transcript, account, or
-   private-response shape changes.
-4. Never log credentials or add an automatic trust-enrollment flow.
+3. Test public CLI compatibility at the measured minimum and on newer builds.
+   Keep the private archive tuple separate from public lifecycle support.
+4. Fail closed on a changed lane executable, worker, socket, transcript,
+   account, or private-response identity.
+5. Never log credentials or add an automatic trust-enrollment flow.
 
 ## Code
 
@@ -56,8 +58,8 @@ For Claude Code changes:
 - Never replay an unknown mutation; add an observational reconciliation path.
 - Never select a mutation target by name, cwd, age, or short ID alone.
 - Require a durable harvest receipt before retirement.
-- Remove only clean, unchanged operator-managed worktrees; preserve external or
-  ambiguous seats.
+- Remove only clean, unchanged operator-managed seats after harvest; preserve
+  external or ambiguous seats.
 - Keep routine CLI errors free of credentials, private paths, raw provider rows,
   and unrelated IDs.
 
@@ -76,13 +78,18 @@ cd site
 npm ci
 npm run check
 npm test
-npm run build
+TRANSMOGRIFY_RELEASE_COMMIT=1111111111111111111111111111111111111111 npm run build
 npm run verify
 ```
 
 The package is private and Git checkout is the supported distribution path.
 Treat `npm pack --dry-run` as an unintended-file audit, not as verification of a
 self-installing npm artifact.
+
+The synthetic release commit exercises the generated handoff without installing
+it or claiming a published release. Run these checks on the host: socket and
+process-inspection tests cannot complete in a restricted lane. Report each
+unavailable check; a partial sandbox pass does not replace host acceptance.
 
 Provider integration probes require authorization from the owner of the machine
 and runtime being tested. Never start, stop,
@@ -97,7 +104,12 @@ create.
 parameterized. Put wire-level claims in `docs/PROTOCOL.md`, Claude-specific
 surface facts in `docs/CLAUDE-CODE.md`, and forward work in `ROADMAP.md`.
 Repository-specific merge, deployment, review, and budget policy belongs in the
-host repository's skill.
+host repository's skill. `test/public-docs.test.js` budgets skill bytes and words
+so operational context stays bounded. The example handback uses the real harvest
+parser. Output documentation tests check keys inside their operation sections,
+and site workflow tests follow the start generator's root source inputs.
+Tests of consumers must call the real producer with fakes at the process or
+provider boundary; do not hand-write the producer's result.
 
 ## Pull requests and releases
 
@@ -108,8 +120,9 @@ state in an issue or pull request.
 
 Transmogrify follows semantic versioning. Breaking changes to the installed skill,
 host-parameter table, durable state, provider identity, or CLI contract require
-a versioned migration. Releases are cut only after the acceptance gate in
-[ROADMAP.md](ROADMAP.md) is green.
+a versioned migration. The 0.6.1 release requires the acceptance gate in
+[ROADMAP.md](ROADMAP.md), including the fresh-machine pass. That page records
+the dated 0.6.0 exception and the cases still awaiting live verification.
 
 Before publishing a release, a maintainer also confirms that the public GitHub
 repository retains its description, homepage, topics, Discussions, private

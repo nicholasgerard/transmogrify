@@ -77,15 +77,18 @@ The guided setup runner reports `dryRun`, `ready`, `outcome`, per-provider
 `providers` statuses, the doctor's current `plan`, `completed` step receipts,
 and an `apps` summary for Claude Desktop and the ChatGPT app. `outcome` is
 `ready`, `ready-with-limitations`, `needs-action`, or `unsupported`.
+Both `providers` and `apps` name `claude` and `codex`. The `apps` summary also
+contains `nextSession`. A `refusal` contains `what`, `consent`, and `reason`.
 Provider status is `ready`, `ready-with-limitations`, `needs-action`,
 `unsupported`, or `not-requested`. Each completed receipt contains only
 `what`, `consent`, and `outcome`. When setup stops safely, `code`, `message`, and `refusal`
 identify the pending step and one plain reason such as `consent-required`,
 `hosting-cli-protected`, `manual-action-required`, or `step-not-verified`.
 
-The `plan` remains measured rather than inferred: setup reruns the doctor after
+The `plan` fields are defined in [Doctor explanation](#doctor-explanation).
+The plan remains measured rather than inferred: setup reruns the doctor after
 every action. A non-interactive invocation executes exactly the first plan
-step, and only when its matching flag is present; a later step requires a new
+step, with its matching flag when consent is required; a later step requires a new
 invocation. An interactive terminal can continue, asking separately before
 each consented step. `apps.nextSession` explains that a new session in the other app
 picks up the machine-wide installation. `--dry-run` returns this shape without
@@ -225,8 +228,17 @@ when a reconcile threw), `counts`
 (`ownedActive`, `ownedStopped`, `pendingOperations`, `pendingRetirements`,
 `cleanupBlocked`, `unattendedChildren`), `setup` (the doctor's own setup
 block: `ready`, `outcome`, per-provider `providers`, `ownerActions`, and
-optional `plan`). No provider id, lane id,
-name, or path ever appears in this output.
+optional `plan`, defined in [Doctor explanation](#doctor-explanation)).
+`ownerActions` entries carry `provider`, `reason`, `blocking`, and `ownerAction`.
+Provider handles and transcripts are omitted. The setup plan may include
+command and selected executable paths; retention reports its `trashDir`.
+
+With `--retention`, the result carries `retention` instead of
+`providers`/`counts`/`setup`: `dryRun`, `keepDays`, `keepBackups`,
+`operations`, `events`, `backups` (each `candidates`, `moved`), and
+`trashDir`. Retention only moves matter into a recoverable trash directory;
+it never unlinks anything. Backup counts include only entries with a valid
+owner-only installer receipt.
 
 ## Doctor explanation
 
@@ -246,13 +258,6 @@ printed, including with `--explain`.
 The doctor adds `persist-attach` only after Codex Desktop attachment is
 verified and `nativeVisibility.persisted` explicitly reports `false`. Older or
 partial receipts with no `persisted` field do not imply that action.
-
-With `--retention`, the result carries `retention` instead of
-`providers`/`counts`/`setup`: `dryRun`, `keepDays`, `keepBackups`,
-`operations`, `events`, `backups` (each `candidates`, `moved`), and
-`trashDir`. Retention only moves matter into a recoverable trash directory;
-it never unlinks anything. Backup counts include only entries with a valid
-owner-only installer receipt.
 
 ### `doctor`
 

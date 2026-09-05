@@ -27,16 +27,17 @@ support.
 ## Current state
 
 The canonical support matrix is in [README.md](README.md#support-matrix). The
-standalone adapters implement both target providers on the pinned
-compatibility tuple. Claude Desktop/mobile visibility, mobile-originated
+standalone adapters implement both target providers with measured minimum
+versions and compatibility probes. Exact pins still gate private Claude archive. Claude Desktop/mobile visibility, mobile-originated
 input, and native archive behavior are live-verified on the recorded build
 tuple. Codex Desktop and mobile visibility are live-verified with the app
 attached to the shared runtime: `desktop-attach.js` measures that attachment
 on every check and every dispatch, launches or (with owner authorization)
 relaunches the app attached, and a lane without the receipt is recorded
-protocol-only only with `--allow-protocol-only`. A Desktop restart or update
-drops the attachment; run `desktop-attach.js ensure` before new cross-host
-Codex dispatches.
+protocol-only only with `--allow-protocol-only`. A Desktop restart or update requires a fresh attachment measurement before new
+Codex dispatches. The managed daemon and loopback relay are implemented;
+receipt-backed persistence can restore the attachment setting for Dock launches.
+Persistence across login and mobile reattachment remain live acceptance gaps.
 
 Managed dispatch now has two provider-neutral contracts. Execution profiles
 resolve a task intent or explicit override to an immutable model, effort, and
@@ -54,6 +55,11 @@ per operation ([Output contract](docs/OUTPUT.md)); operation journals hold
 only enumerated per-type states behind a schema version, an owner may
 `abandon` a stranded non-retirement journal, and both provider adapters sit
 behind one descriptor-driven seam with a contract test.
+
+New managed seats are clones with writable local Git metadata. Children commit
+and report the SHA in their seat-local handback. The operator's `harvest`
+verifies and fetches that commit, preserves the handback, and prints retirement.
+`harvest --commit` remains the fallback for a child unable to commit.
 
 ## Acceptance program: turnkey bidirectional operation
 
@@ -94,7 +100,10 @@ No GUI automation is part of the control plane. Native deep links may present an
 already-owned session, but session identity and lifecycle control come from
 provider or measured local interfaces.
 
-### Run record
+### Historical run records (2026-09-03 through 2026-09-04)
+
+These dated observations describe the releases tested, not additional current
+support. Fake-based coverage does not substitute for a live acceptance pass.
 
 2026-09-03, releases 0.2.2 through 0.2.5, the owner at Codex Desktop, Claude
 Desktop, and iPhone. Exercised and green: skill loaded in both hosts; doctor
@@ -158,9 +167,8 @@ produced no wake and no pending event; the child hook settings file was
 removed with the lane; the watcher exited on request. Found and fixed
 during the pass: wake discovery ignored `CLAUDE_CONFIG_DIR`, a re-adopted
 parent context kept an earlier session's bridge, the maintenance tests
-still used the pre-unification reconcile shape, and a scratch `pkill`
-during the test-runner investigation stopped a test run from another
-project on the same machine (reported to the owner).
+still used the pre-unification reconcile shape, and an unrelated test run was interrupted during process-cleanup testing
+(reported to the owner). Future probes must signal only their own exact processes.
 
 2026-09-04, Dock-launch attachment, owner present. With
 `launchctl setenv CODEX_APP_SERVER_WS_URL ws://127.0.0.1:8843` in the GUI
@@ -212,14 +220,13 @@ the CLI on `PATH`.
 daemon. Three Codex lanes (runtime daemon, compatibility by range, host
 context) ran in parallel on the daemon through the relay, each in its own
 managed worktree, with the parent watcher delivering completion wakes into
-this session; all three were reviewed, merged into `wave/0.6` (suite 523
+the parent session; all three were reviewed, merged into `wave/0.6` (suite 523
 green), and retired. Measured in the process: a lane under the default
 `workspace-write` sandbox can write only its worktree and `/tmp`; the
 shared git directory, the state root, `ps`, loopback and unix sockets, and
 the keychain are denied, so two lanes could not write the handback the packet
 asked for and did not commit, and the third lane's commit succeeded only
-because the owner's personal Codex rules run `git add` and `git commit`
-outside the sandbox. Every lane copied `ws` into its seat to run tests, which
+because that host executed Git staging and commit outside the sandbox. Every lane copied `ws` into its seat to run tests, which
 the retirement census counts as dirt, so cleanup was finished through the
 manual-removal acknowledgement. The exchange contract moves into the
 worktree (packet 7 below). Also verified live after the merge: the runtime
@@ -241,11 +248,11 @@ retirement command, and `retire` verified the archive and removed the seat
 without a blocked cleanup or any manual step. Also verified live after the
 merges: the attachment check selects the relay from its record and reports
 the attached Desktop with `persisted: false`, the doctor's plan is empty on
-this machine, `persist --dry-run` prints the exact login-session change and
+the test host, `persist --dry-run` prints the exact login-session change and
 LaunchAgent, and `setup --dry-run` performs nothing.
 
 2026-09-04, release 0.6.0, unattended maintainer run with two disposable
-probe lanes. Live on this machine with the merged tree: `runtime-up.sh`
+probe lanes. Live on the test host with the merged tree: `runtime-up.sh`
 reused the managed daemon and the relay; the explaining doctor reported both
 providers ready with no plan steps (and, on a terminal, the Ready, Needed,
 and Next lines); the attachment check selected the relay from its record and
@@ -269,7 +276,20 @@ Desktop host, terminal, IDE, and unsupported platforms. Not exercised live:
 `persist --authorize` (an owner decision), a machine that has never seen
 Transmogrify, and mobile reattachment after a Desktop restart.
 
-## The 0.6.0 wave
+## Release gate and recorded exception
+
+2026-09-04 exception: 0.6.0 shipped without the fresh-machine acceptance pass.
+The 0.6.1 release gate still requires the onboarding acceptance matrix on the
+maintainer host and a machine that has never seen Transmogrify. Record exact
+builds and outcomes before release. Persistence across login, mobile
+reattachment after a Desktop restart, and seeded same-name foreign sessions
+remain unverified live unless a later dated receipt closes them.
+
+## Historical 0.6.0 plan (2026-09-04)
+
+This plan records the intended release gate and the original operator-commit
+exchange. The current clone exchange is described above. The exception above
+records the gate that the 0.6.0 release did not meet.
 
 Goal: a runtime that survives relaunches, app updates, and logins, and an
 onboarding that works from any first entry point. Seven lane packets, each
@@ -299,17 +319,15 @@ reviewed before merge into `wave/0.6`:
 Already on the branch: the Codex runtime is accepted by version (0.151.0
 or newer) whatever product name it reports, and the client's handshake
 offers no per-message deflate, both required by the daemon. Release when
-the live acceptance matrix in docs/ONBOARDING.md passes on this machine
+the live acceptance matrix in docs/ONBOARDING.md passes on the test host
 and one machine that has never seen Transmogrify.
 
 ## Priority 1: compatibility and acceptance hardening
 
-- Onboarding that works wherever the start prompt lands: compatibility by
-  range and measurement instead of exact pins, host context detection, a
-  doctor that explains its plan in plain words, guided installs with
-  consent, one install for both hosts, and a rewritten start handoff. The
-  brief, specification, and implementation plan are in
-  [docs/ONBOARDING.md](docs/ONBOARDING.md); queued for a Codex worker.
+- Complete the live onboarding acceptance for the implemented compatibility
+  measurements, host detection, explaining doctor, guided setup, and start
+  handoff in [docs/ONBOARDING.md](docs/ONBOARDING.md). Fresh-machine behavior is
+  covered with fakes; the fresh-machine live pass is still required for 0.6.1.
 
 - Claude resume lineage. On CLI `2.1.258` a background resume of a stopped
   job forks a new session; the adapter stops that fork and leaves the lane
@@ -323,7 +341,7 @@ and one machine that has never seen Transmogrify.
   the newest session for status and steer, and stopping and archiving every
   session in the lineage at retirement; an unproven fork stays
   `forkedCopyStopped`. Acceptance: stop, recover, steer lands in the newest
-  transcript, retire clears every row. About 400 lines with tests.
+  transcript, retire clears every row. The acceptance must prove the full lineage before widening recovery support.
 - Two acceptance rows still need the owner present: mobile reattachment after a
   Desktop restart (spawn a narrating Codex probe, quit and relaunch Desktop
   attached, confirm the lane is listed and streams on the iPhone, steer from
@@ -332,32 +350,11 @@ and one machine that has never seen Transmogrify.
   (the owner starts a hand-run `claude --bg --remote-control` and a hand-run Codex
   thread with a lane's exact title; spawn, steer, and retire the lane; verify
   by hand that the foreign sessions never receive anything and survive).
-- Replace the environment-variable attach with Codex's managed daemon
-  (researched 2026-09-03, plan in docs/NOTIFICATIONS.md's sibling notes and
-  the maintainer's plan). Findings: Desktop's SSH projects run a plain
-  `app-server --listen unix://` on the remote with `app-server proxy` over
-  SSH, not the daemon subsystem; Desktop's local host has an Electron-side
-  switch `CODEX_APP_SERVER_USE_LOCAL_DAEMON=1` that attaches it to the
-  managed daemon's control socket (`~/.codex/app-server-control/
-  app-server-control.sock`) with reconnect support instead of spawning a
-  private stdio child; `codex app-server daemon enable-remote-control`
-  claims to apply to a running managed daemon; Desktop bundles
-  `0.153.0-alpha.5` against the pinned `0.151.0`. Target: the managed daemon
-  becomes the shared runtime (our client speaks `ws+unix://`), Desktop
-  attaches on every Dock launch through a persisted `launchctl setenv`, and
-  the visibility receipt becomes the unix-socket connection. Experiments in
-  order, on a scratch `CODEX_HOME` and never on 8843: (1) `daemon start`,
-  `enable-remote-control`, same pid, second client through `proxy --sock`;
-  (2) `daemon bootstrap --remote-control`, our client over the socket,
-  cross-client `thread/status/changed` and `turn/completed` for a thread
-  another client created, steer, interrupt, archive, plus a schema diff
-  between 0.151.0 and 0.153.0-alpha.5; (3) with the owner, one deliberate Desktop
-  launch with the switch on a disposable profile, lsof receipt of the socket
-  connection, a thread from our client rendering on Desktop and iPhone;
-  (4) persistence across a Dock relaunch and a login. Kill criteria: pid
-  changes on enable, no cross-client fan-out, Desktop still spawns the stdio
-  child, or the thread does not render. Until it passes, the measured attach
-  receipt stays the supported native path.
+- Verify persistence across login using the implemented daemon and loopback
+  relay. The 2026-09-04 experiments above found that direct Desktop Unix-socket
+  attachment and the local-daemon switch did not work on the tested app build.
+  The supported measured route remains the loopback relay and
+  `CODEX_APP_SERVER_WS_URL`; a direct daemon client is future research.
 - Re-test the `mcp_servers.codex_app` launcher override counterfactual on a
   disposable runtime: confirm whether an attached Desktop still opens threads
   when the override is absent, so the launcher rule rests on a current receipt.

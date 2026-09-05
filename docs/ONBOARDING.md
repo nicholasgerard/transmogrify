@@ -1,10 +1,12 @@
 # Onboarding: one paste, everywhere it lands
 
-A brief, specification, and implementation plan for the next wave. It is
-written to be executed by a coding agent with the repository open; every
-section names the files it touches and the tests that prove it.
+The onboarding flow shipped in 0.6.0 and was hardened for 0.6.1. The current
+contract below describes the merged code. The original problem and plan are
+retained as dated history; they do not claim current support. The fresh-machine
+live acceptance pass is still outstanding; see the recorded 0.6.0 exception
+and the 0.6.1 release gate in [ROADMAP.md](../ROADMAP.md#release-gate-and-recorded-exception).
 
-## The problem, from a first-time user
+## Historical problem report (2026-09-03)
 
 On 2026-09-03 a first-time user pasted the start prompt into Claude Code
 and, before anything ran, was asked four things in maintainer vocabulary:
@@ -25,7 +27,7 @@ and, before anything ran, was asked four things in maintainer vocabulary:
 4. The words `runtime-up.sh`, `pin`, `app-server`, `8843`, and a process
    id, none of which mean anything to someone who pasted one line.
 
-Root causes, all in this tree:
+Root causes in the 2026-09-03 tree, superseded by the implementation below:
 
 - **Exact pins instead of compatibility ranges.** The Claude adapter
   accepts one CLI build, by version and SHA-256
@@ -78,7 +80,7 @@ Cursor as a supported host in this wave.
 | --- | --- | --- |
 | Claude Code inside Claude Desktop | `CLAUDECODE` in the environment and a `Claude.app` native executable or helper ancestor whose bundle identifier is `com.anthropic.claudefordesktop` | Full setup for both hosts; Codex Desktop attach offered with the reason; Claude lanes and Codex lanes both available. |
 | Claude Code in a terminal (TUI) | `CLAUDECODE`, terminal ancestor (`Terminal.app`, iTerm, tmux, ssh) | Same setup; one sentence up front: this is built for the desktop apps, live streaming shows there, everything else works here. |
-| Codex Desktop (ChatGPT.app) | `CODEX_THREAD_ID` plus the app's private runtime (`hostedByDesktop` in `lib/desktop-attach.js`) | Full setup for both hosts; never relaunch the app from inside it; Claude lanes available; Codex children through the app's own collaboration or a runtime the owner attaches from outside. |
+| Codex Desktop (ChatGPT.app) | Codex session markers and verified Desktop bundle ancestry; attachment is measured separately | Full setup for both hosts; never relaunch the app from inside it; Claude lanes available; managed Codex children when the app is already attached, otherwise native collaboration or attachment from outside. |
 | Codex TUI in a terminal | `CODEX_THREAD_ID` without the Desktop ancestry | Same as the Claude TUI row. |
 | Cursor, VS Code, other IDE agents | `TERM_PROGRAM=cursor` / `vscode`, `CURSOR_*`, a `Cursor.app` or `Code.app` ancestor | Install both hosts, verify the CLIs, then say: open Claude Desktop or the ChatGPT app and run the skill there; Cursor support is not available yet. No lane work from this context. |
 | A plain shell (the user ran a command) | none of the above | Install, doctor, and the same summary; point to the desktop apps. |
@@ -89,7 +91,7 @@ this language: what was found, what is ready, what is needed and why, and
 what will happen next. Ids, ports, script names, and error codes stay out
 of the conversation unless the user asks.
 
-## Specification
+## Current contract (0.6.1)
 
 ### 1. Compatibility by range and measurement, not by pin
 
@@ -106,37 +108,53 @@ Claude Code CLI:
   acknowledgment and transcript receipt. The result is recorded under the
   state root keyed by the binary's path and SHA-256
   (`measured-builds/<sha>.json`).
-  A measured build behaves exactly like today's verified build; a build
-  that fails a probe is `cli-unsupported` with the failing probe named.
-  `VERIFIED_CLI_BUILDS` stays as the pre-measured fast path.
+  Passing measurement admits public lifecycle operations, which still require
+  exact account, config, and execution identity receipts. A failed newer build
+  is `cli-unmeasured-failed` with the failing probe named. The private archive
+  path separately requires the exact pinned CLI hash and Desktop tuple.
+  `VERIFIED_CLI_BUILDS` is the pre-measured fast path.
 - The CLI a session runs on is never downgraded. If it is below the
   minimum, the owner action is to upgrade (through the CLI's own
   installer), never to install an older build.
-- `cli-unpinned` disappears from the doctor's vocabulary.
+- The doctor reports below-minimum versions as `cli-unsupported`.
 
 Codex app-server:
 
-- A minimum line replaces the exact line: user agents at `0.151` or newer
-  are accepted after the initialize handshake, and the methods this tree
-  relies on (`thread/list` with `sourceKinds`, `thread/turns/list` with
-  `sortDirection`, `turn/steer` with `clientUserMessageId`,
-  `thread/name/set`, `thread/archive`) are probed once per runtime
-  version and cached the same way. A runtime below the minimum, or one
-  that fails a probe, is `runtime-unsupported` with the reason.
-- The doctor knows every Codex binary on the machine: `PATH`, Codex
-  Desktop's bundled CLI (the app ships its own `codex`, at `0.153` today
-  when `PATH` had `0.148`), and `TRANSMOGRIFY_BIN`. `runtime-up.sh`
-  launches the newest supported one and says which it used.
+- The minimum is `0.151.0`. After initialization the doctor reads `thread/list`
+  with `sourceKinds` and validates its shape. It probes `turn/steer`,
+  `thread/name/set`, and `thread/archive` against the nil thread ID only,
+  requiring exact measured not-found responses. `thread/turns/list` remains
+  unmeasured until a successful exact-owned read. No probe steers or archives a
+  real session. Compatibility receipts are cached by probe set and runtime
+  version; failed results expire after 24 hours.
+- The doctor inventories Codex executables on `PATH`, the bundled CLI at
+  `/Applications/ChatGPT.app/Contents/Resources/codex`, and `TRANSMOGRIFY_BIN`
+  by reading `--version`. Other bundle locations require an explicit binary
+  selection until the doctor consumes the broader app inventory. When the runtime is unavailable,
+  it reads `login status` on the selected supported binary. The plan names the
+  newest supported measured binary for runtime startup.
+- Runtime startup prefers the managed daemon and a loopback relay for Desktop,
+  with an explicit standalone fallback. A reusable runtime is not replaced.
+  Desktop persistence uses an owner-only transaction receipt, preserves foreign
+  settings, and rolls back partial writes. Across-login and mobile-restart
+  behavior still requires the live acceptance pass.
+
+The doctor may initialize the local registry and write local compatibility
+receipts. Its provider reads, nil-ID probes, process inspection, and Desktop
+attachment checks are not an initialize-only handshake.
 
 ### 2. Host context detection
 
-New `scripts/lib/host-context.js`: `detectHostContext(env, dependencies)`
+`scripts/lib/host-context.js`: `detectHostContext(env, dependencies)`
 returns `{ app, surface, platform, tools, cliBinaries }` where `app` is one
 of `claude-desktop`, `claude-code-terminal`, `codex-desktop`, `codex-tui`,
 `cursor`, `vscode`, `shell`, and `surface` is `desktop`, `terminal`, or
-`ide`. Detection reads only environment variables and the process
-ancestry (the same `ps` walk `lib/wake.js` uses), never window titles or
-GUI state. Every branch has a test with a fake ancestry and environment.
+`ide`. Detection reads environment variables, process ancestry, and verified app
+bundle identifiers, never window titles or GUI state. Relocated and per-user
+app bundles are recognized for host context. The module exports their bundled
+CLI paths, but the doctor's default CLI candidates do not yet consume that
+inventory. `test/host-context.test.js` covers these cases with fake ancestry,
+environment, and bundle metadata.
 
 ### 3. The doctor explains
 
@@ -153,13 +171,13 @@ test covers it.
 
 ### 4. Guided setup
 
-**Implemented for 0.6.** `scripts/setup.js` and `transmogrify.js setup` now
+**Implemented in 0.6.0; hardened in 0.6.1.** `scripts/setup.js` and `transmogrify.js setup` now
 execute the measured plan through fixed injected runners, print each reason
 before consent, and rerun the doctor after every completed step. Dry runs and
 the refusal paths are covered without invoking a live installer, sign-in,
 runtime, or Desktop action.
 
-New `scripts/setup.js` (also `transmogrify.js setup`): runs the doctor's
+`scripts/setup.js` (also `transmogrify.js setup`): runs the doctor's
 plan step by step. A non-interactive invocation runs exactly the first step
 and returns the newly measured plan. Each step that needs consent is executed
 only with its explicit flag (`--install-claude-cli`, `--install-codex-cli`,
@@ -179,11 +197,10 @@ assumed.
 
 ### 5. One install for the whole machine
 
-**Implemented for 0.6.** The default installer still targets both skill roots
+**Implemented in 0.6.0; hardened in 0.6.1.** The default installer still targets both skill roots
 and now ends with the readiness and next-session handoff in plain words.
 
-`install.sh` installs both hosts by default already; the start handoff
-must stop selecting one. The state root, the runtime, the parent contexts,
+`install.sh` and the start handoff install both hosts by default. The state root, the runtime, the parent contexts,
 and the child hooks are shared. After setup, the summary says what is
 ready in each app and that a new session in the other app picks it up.
 The structured result reports `ready`, `ready-with-limitations`,
@@ -194,7 +211,7 @@ each host without more work.
 
 ### 6. The start handoff
 
-**Implemented for 0.6.**
+**Implemented in 0.6.0; hardened in 0.6.1.**
 
 `site/scripts/build-start.mjs` is rewritten around the flow above:
 fetch and verify the release (unchanged), install both hosts, run
@@ -204,7 +221,7 @@ machine notice) verbatim so every agent says the same thing.
 
 ### 7. Narration rules
 
-**Implemented for 0.6.** These rules now appear in both `SKILL.md` section 1
+**Implemented in 0.6.0; hardened in 0.6.1.** These rules now appear in both `SKILL.md` section 1
 and the generated start handoff:
 
 - Run the checks before saying anything. Then one short block: found,
@@ -217,7 +234,10 @@ and the generated start handoff:
 - Explain on request. Ids, paths, ports, and codes are available when the
   user asks, and in the JSON.
 
-## Implementation plan
+## Historical implementation plan (2026-09-04)
+
+The table records the original work breakdown. Current regression coverage is
+in the named test files; it does not prove the live acceptance rows below.
 
 | Step | Files | Tests |
 | --- | --- | --- |
@@ -225,20 +245,26 @@ and the generated start handoff:
 | 2. Host context | `scripts/lib/host-context.js` | one test per row of the context table with fake env and ancestry |
 | 3. Doctor plan | `scripts/doctor.js` (`--explain`, `setup.plan`), `scripts/lib/output-schema.js`, `docs/OUTPUT.md` | golden plans for the states in the acceptance matrix |
 | 4. Guided setup | `scripts/setup.js`, `scripts/transmogrify.js`, `scripts/runtime-up.sh` (binary selection), `scripts/lib/desktop-attach.js` (reasons in plain words) | setup tests with injected installers and a fake TTY; refusal tests (foreign runtime, session's own CLI) |
-| 5. Start handoff and docs (**implemented for 0.6**) | `site/scripts/build-start.mjs`, `site/src/lib/start-prompt.ts`, `SKILL.md` section 1, `README.md` install and quick start, `docs/TROUBLESHOOTING.md` | `site/test/build-start.test.ts` for each context sentence; the SKILL token budget check |
+| 5. Start handoff and docs (**implemented for 0.6**) | `site/scripts/build-start.mjs`, `site/src/lib/start-prompt.ts`, `SKILL.md` section 1, `README.md` install and quick start, `docs/TROUBLESHOOTING.md` | `site/test/build-start.test.ts` for each context sentence; `test/public-docs.test.js` byte and word budget check (added in 0.6.1) |
 | 6. Acceptance | `ROADMAP.md` run record | the matrix below, run with fakes in CI and once for real with the owner on a machine that has never seen Transmogrify |
 
 Order matters: 1 removes the false blockers, 2 and 3 make the doctor able
 to say what to do, 4 makes it able to do it, 5 makes every landing context
 say the same thing.
 
-Acceptance matrix (each row is a golden test of the plan and the words):
+## Acceptance matrix
+
+Expected behavior is covered by `test/setup-plan.test.js`, `test/setup.test.js`,
+`test/doctor.test.js`, `test/host-context.test.js`, and
+`site/test/build-start.test.ts` with process and provider fakes. The dated
+[run records](../ROADMAP.md#historical-run-records-2026-09-03-through-2026-09-04)
+identify the few rows exercised live. This table is not a fresh-machine receipt.
 
 | Machine state | Expected |
 | --- | --- |
 | Fresh Apple Silicon Mac, no CLIs | plan: install Claude Code, sign in, install Codex CLI, sign in, start runtime; summary names both apps |
 | Claude CLI newer than the minimum | measured, no action, no mention of versions |
-| Claude CLI older than the minimum, hosting the session | one action: upgrade through the CLI installer; never a downgrade |
+| Claude CLI older than the minimum, hosting the session | manual upgrade guidance; guided setup protects the hosting executable and never downgrades it |
 | Codex CLI on PATH below the minimum, Desktop bundles a supported one | runtime starts from the bundled CLI; summary says which |
 | Runtime absent | one consent question with the reason; started detached |
 | Codex Desktop running, unattached, from a Claude host | one consent question that explains streaming and the restart; on no, protocol-only with that said |
@@ -247,10 +273,9 @@ Acceptance matrix (each row is a golden test of the plan and the words):
 | Cursor or VS Code | install both, verify, the IDE notice, no lane work |
 | Not Apple Silicon macOS | the unsupported notice; Codex protocol-only offered |
 
-## Effort and risks
+## Historical estimate and continuing risks (2026-09-04)
 
-About a week of agent time across the six steps, most of it in steps 1 and
-4. Risks: vendor installers and version strings change (mitigated by
+The original estimate was about a week across the six steps. Continuing risks: vendor installers and version strings change (mitigated by
 measuring instead of pinning, and by reading the official install
 commands at implementation time); a newer CLI could change the follow-up
 acknowledgement or hook behavior (the measurement checks option acceptance,
@@ -262,7 +287,7 @@ version (probe before use).
 
 - Missing CLIs use the vendors' documented standalone installers, and guided
   setup runs one only after consent for that step.
-- The minimums are `2.1.258` for Claude Code and `0.151` for the Codex
+- The minimums are `2.1.258` for Claude Code and `0.151.0` for the Codex
   app-server; newer builds are measured.
 - An IDE agent installs and verifies both hosts, then tells the user to open
   Claude Desktop or the ChatGPT app. It does not start lane work or open the

@@ -1,29 +1,30 @@
-# Lane handback: example
+# Handback: example
 
-Status: ready for operator review
+## Commit
 
-## Result
+Describe the authorized change in one imperative line
 
-Summarize the completed work and its observable behavior.
+Replace this body with the concrete change, its purpose, and relevant checks.
+Replace the illustrative SHA below with the full commit SHA made in the seat.
+If no commit was made, omit the SHA line and explain why in Not verified.
 
-## Repository receipt
+SHA: 1111111111111111111111111111111111111111
 
-- Commit: `<full-commit-sha>`
-- Branch: `<branch-name>`
-- Worktree was clean at handback: `<yes-or-no>`
+## What changed and why
 
-## Checks
+Name the changed files and the observable result. Report the assigned branch.
 
-- `<command>` — `<pass-or-fail plus concise result>`
+## Verified
 
-## Output locations
+List each exact command, its result, and the named test proving each claim.
 
-- `<absolute-or-repository-relative-path>`
+## Not verified
 
-## Risks and follow-up
+Name every check that could not run and why, or state that none remain.
 
-- `<remaining risk, explicit follow-up, or none>`
+## Risks and decisions for the operator
 
-This file is the operator's durable copy of reviewed lane output. The operator
-host writes it outside the repository; a workspace-sandboxed lane is not
-expected to modify that external file directly.
+Name remaining risks and decisions, or state that none remain. This is a format
+example, not evidence of a real commit or a completed acceptance run. The child
+writes its actual report inside its seat; the operator reviews it and runs
+harvest to preserve a durable copy outside the repository.
