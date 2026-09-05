@@ -152,13 +152,13 @@ read back carries a derived `kind` and `terminal` flag so the parent can tell
 | Event | Kind | Meaning |
 | --- | --- | --- |
 | `child.spawned` | progress | The exact spawn operation completed and its provider identity is bound. |
-| `child.turn-completed` | complete | The input the parent sent has been fully processed: a Codex turn completed or was interrupted, or a Claude lane went from working to idle. Harvest now, steer again, or retire. |
+| `child.turn-completed` | complete | The input the parent sent has been fully processed: a Codex turn completed or was interrupted, or a Claude lane went from working to idle. Inspect its result before deciding whether to harvest, steer, or retire. |
 | `child.idle-observed` | complete | The lane was first observed idle with no preceding working phase. |
 | `child.needs-attention` | attention | The child is waiting for user input/approval or a safe reconciliation decision. |
 | `child.delivery-unknown` | attention | A provider mutation may have landed and must be reconciled without replay. |
 | `child.cleanup-blocked` | attention | Retirement is verified but automatic worktree cleanup is permanently unsafe. |
 | `child.failed` | terminal | The exact child reached a provider or local failed state. |
-| `child.stopped` | terminal | The exact child is stopped. |
+| `child.stopped` | terminal | The stop or interrupt command completed. `data.state: interrupted` means turn cancellation was acknowledged; it does not mean the session ended. |
 | `child.retired` | terminal | Provider retirement and every enabled cleanup step are complete. |
 
 A child that completes and is then steered returns to progress; its next
@@ -170,6 +170,28 @@ fingerprint, so repeating an observation recreates the same ID. A transition
 back to a prior phase receives a new monotonic sequence and may produce a new
 attention event. Payloads carry safe state and receipt metadata only: never
 child output, prompts, provider IDs, paths, transcripts, or credentials.
+
+## Completion and the durable outbox
+
+Turn completion is not retirement. A completed turn leaves the lane available
+for more work. Retirement separately verifies provider archival and every
+required cleanup step. Interrupt acknowledges cancellation of one Codex turn;
+it does not retire the lane or stop the whole session.
+
+Lifecycle completion writes the terminal event first, then completes the
+journal, then clears the pending lane pointer. The project lock is acquired
+before the installation event lock. The operation identifier determines the
+event fingerprint, so a retry after either write reuses the event. A completed
+journal is a durable publication obligation: observation repairs a missing
+terminal event, and the watcher keeps that dispatch outstanding until the
+event exists. No command result or observation implies acknowledgement.
+
+Operation journals enforce an explicit transition graph per operation type.
+Updates require the current integer `revision` as `expectedRevision`. Older
+journals without a revision are read as revision zero and acquire a revision
+on their next validated write. Stale revisions and undeclared edges fail with
+coded errors. Terminal journals are immutable. An exact completion retry can
+repair publication and the pending pointer without rewriting the journal.
 
 ## Status phases
 
@@ -237,10 +259,10 @@ Wait semantics:
 - `--timeout-ms` accepts `0` through `1800000` and defaults to `60000`.
   Expiry without an event raises `NO_EVENT`; it is a heartbeat boundary, not
   completion. Repeat the bounded wait while children remain outstanding.
-- An observation that only confirms the parent's own completed `retire`,
-  `stop`, or `interrupt` (the lane's newest journal, finished within the
-  last two minutes) is recorded already acknowledged: the command's result
-  was the receipt, and it neither wakes the parent nor waits for an `ack`.
+- Every command event requires explicit acknowledgement. A matching
+  `--parent-context-file` on retire, stop, or interrupt suppresses only its
+  redundant wake. The result names the event sequence and exact `ack --through`
+  command. Commands without that context leave wakes enabled.
 - `--timeout-ms 0` is an immediate durable-queue snapshot and contacts no
   provider. A positive timeout observes exact children using each lane's
   persisted runtime identity.

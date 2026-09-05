@@ -2,6 +2,12 @@
 
 ## 0.6.1 (in progress)
 
+- Enforce journal transition graphs, immutable terminal receipts, and revision
+  checks. Read private state through bounded owner-only descriptors. Publish
+  lifecycle command events before journal completion and repair missing events
+  after crashes. Verified parent context suppresses only redundant wakes;
+  acknowledgement remains explicit.
+
 - Add GPT-6 Astra to Codex execution guidance for `deep` and `max-quality`,
   with a receipted GPT-5.6 Sol fallback on older live catalogs, explicit model
   upgrade hints, and catalog-gated Ultra effort guidance.

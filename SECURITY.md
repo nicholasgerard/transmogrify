@@ -66,6 +66,11 @@ seat identity, runtime/account identity, and pending-operation journal.
 - Keep the registry outside the repository and Git common directory.
 - Keep state directories current-user-owned mode `0700`, JSON records mode
   `0600`, and managed `WORKTREES` roots current-user-owned mode `0700`.
+- Read private registry, journal, and Claude spawn receipts through bounded
+  `O_NOFOLLOW` descriptors. Check ownership, regular-file type, owner-only
+  permissions (`0o077` mask), and record shape before use. Nonblocking opens
+  reject FIFOs without waiting for a writer. Limits also apply while reading,
+  so a file that grows after inspection cannot bypass the bound.
 
 Desktop persistence records its previous and applied login values in an
 owner-only receipt before writing the LaunchAgent or changing the environment.

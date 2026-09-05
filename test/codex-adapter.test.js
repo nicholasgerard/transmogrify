@@ -1,5 +1,10 @@
 'use strict';
 
+function currentRevision(repoRoot, operationId, env) {
+  return require('../scripts/lib/state').listOperations(repoRoot, env)
+    .find((operation) => operation.operationId === operationId)?.revision ?? 0;
+}
+
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -1467,9 +1472,13 @@ test('Codex recovery clears a terminal operation pointer without provider replay
     type: 'steer',
     details: { messageSha256: 'e'.repeat(64), expectedTurnId: 'turn-complete' },
   }, fixture.env);
-  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, {
-    state: 'complete',
-  }, fixture.env);
+  // A steer journal reaches complete only through dispatching, as the adapter does.
+  for (const state of ['dispatching', 'complete']) {
+    updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, {
+      expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
+      state,
+    }, fixture.env);
+  }
 
   const result = await recover({
     repoRoot: fixture.repoRoot,
@@ -1509,7 +1518,7 @@ test('Codex recovery normalizes a providerless spawn whose failure became termin
       capabilities: {},
     },
   }, fixture.env);
-  updatePendingLaneOperation(fixture.repoRoot, laneId, operationId, { state: 'failed' }, fixture.env);
+  updatePendingLaneOperation(fixture.repoRoot, laneId, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),  state: 'failed' }, fixture.env);
 
   const result = await recover({
     repoRoot: fixture.repoRoot,
@@ -1569,7 +1578,13 @@ test('Codex recovery preserves the complete cwd receipt when binding a provider-
       capabilities: {},
     },
   }, fixture.env);
+  // A spawn journal reaches providerCreated only through providerRequestDispatched.
   updatePendingLaneOperation(fixture.repoRoot, laneId, operationId, {
+    expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),
+    state: 'providerRequestDispatched',
+  }, fixture.env);
+  updatePendingLaneOperation(fixture.repoRoot, laneId, operationId, {
+    expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),
     state: 'providerCreated',
     providerId,
   }, fixture.env);
@@ -1616,7 +1631,7 @@ test('Codex recovery normalizes a failed spawn after its terminal pointer was al
       capabilities: {},
     },
   }, fixture.env);
-  completeLaneOperation(fixture.repoRoot, laneId, operationId, { state: 'failed' }, fixture.env);
+  completeLaneOperation(fixture.repoRoot, laneId, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),  state: 'failed' }, fixture.env);
 
   const result = await recover({
     repoRoot: fixture.repoRoot,

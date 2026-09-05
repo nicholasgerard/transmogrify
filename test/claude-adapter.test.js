@@ -1,5 +1,10 @@
 'use strict';
 
+function currentRevision(repoRoot, operationId, env) {
+  return require('../scripts/lib/state').listOperations(repoRoot, env)
+    .find((operation) => operation.operationId === operationId)?.revision ?? 0;
+}
+
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -925,10 +930,10 @@ test('Claude retirement private preflight failure performs no provider mutation'
 test('Claude reconcile clears a terminal operation pointer without provider replay', async (t) => {
   const { fixture, surface, lane } = await spawnedLane(t);
   const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
-    type: 'steer',
+    type: 'steer', state: 'dispatching',
     details: { messageSha256: '9'.repeat(64) },
   }, fixture.env);
-  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, {
+  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
     state: 'complete',
   }, fixture.env);
   surface.calls.length = 0;
@@ -999,7 +1004,7 @@ function reserveUnstartedClaudeLane(fixture, operationState = 'planned') {
     },
   }, fixture.env);
   if (operationState !== 'planned') {
-    updatePendingLaneOperation(fixture.repoRoot, laneId, operationId, {
+    updatePendingLaneOperation(fixture.repoRoot, laneId, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),
       state: operationState,
     }, fixture.env);
   }
@@ -1026,7 +1031,7 @@ test('Claude reconcile repairs a providerless spawn after its terminal pointer w
   const fixture = createRepoWithSeat(t);
   const surface = createFakeSurface();
   const { laneId, operationId } = reserveUnstartedClaudeLane(fixture);
-  completeLaneOperation(fixture.repoRoot, laneId, operationId, {
+  completeLaneOperation(fixture.repoRoot, laneId, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),
     state: 'notDelivered',
   }, fixture.env);
   surface.calls.length = 0;
@@ -2454,4 +2459,36 @@ test('a Claude child without a parent, or with child hooks disabled, is launched
   const settingsValues = launch.args.filter((arg, index) => index > 0 && launch.args[index - 1] === '--settings');
   assert.ok(settingsValues.every((value) => value.startsWith('{')), 'only the inline fast-mode pin, never a hooks file');
   assert.equal(fs.existsSync(childHooksPath(listLanes(fixture.repoRoot, fixture.env)[0].laneId, fixture.env)), false);
+});
+
+test('Claude spawn receipt reader consumes producer output and refuses a readable-by-others receipt', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  surface.failDiscoveryOnce = true;
+  await assert.rejects(() => spawn(spawnOptions(fixture, surface), fixture.env), /simulated crash boundary/);
+  const lane = listLanes(fixture.repoRoot, fixture.env)[0];
+  const { readDurableSpawnReceipt } = require('../scripts/lib/claude-runtime');
+  const receipt = readDurableSpawnReceipt(fixture.repoRoot, lane, fixture.env);
+  assert.equal(receipt.stdout, `Started background agent ${SESSION_ID.slice(0, 8)}\n`);
+  const file = lane.ownership.spawnIntent.stdoutPath;
+  fs.chmodSync(file, 0o644);
+  assert.throws(() => readDurableSpawnReceipt(fixture.repoRoot, lane, fixture.env), { code: 'SPAWN_UNCERTAIN' });
+  fs.chmodSync(file, 0o600);
+  assert.deepEqual(readDurableSpawnReceipt(fixture.repoRoot, lane, fixture.env), receipt);
+});
+
+test('Claude whole-session stop publishes the pending command event with verified parent suppression', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const surface = createFakeSurface();
+  const context = createParentContext({ hostProvider: 'claude', hostApp: 'claude-code', displayName: 'Stop parent' }, fixture.env);
+  const launched = await spawn({ ...spawnOptions(fixture, surface), parentContext: context }, fixture.env);
+  const { listEvents, acknowledgeEvent } = require('../scripts/lib/dispatch');
+  for (const event of listEvents(context, {}, fixture.env)) acknowledgeEvent(context, event.eventId, fixture.env);
+  const result = await stop({ repoRoot: fixture.repoRoot, laneId: launched.laneId, surface, parentContext: context }, fixture.env);
+  const [event] = listEvents(context, {}, fixture.env);
+  assert.equal(event.type, 'child.stopped');
+  assert.equal(event.data.state, 'stopped');
+  assert.equal(event.wakeSuppressed.parentRef, context.parent.parentRef);
+  assert.equal(result.receipt.eventSequence, event.sequence);
+  assert.match(result.receipt.ackCommand, /ack .* --through [1-9][0-9]*$/);
 });

@@ -1,5 +1,7 @@
 'use strict';
 
+const { commandEventResult, verifyCommandParent } = require('./state');
+
 // Claude Code lane stop and retirement: the verified whole-session stop, the
 // private archive, local record removal, managed seat cleanup, and the
 // settlement of a pending stop by observation.
@@ -82,7 +84,7 @@ async function stopOwnedLane(options, env, surface, runtime, lane, operation, al
     throw new ClaudeTransmogrifyError('STOP_UNCERTAIN', 'Claude stop was not verified');
   }
   lane = observedStop(options.repoRoot, lane, operation, env, { stopVerified: true });
-  return { lane, alreadyStopped: false };
+  return { lane, operation, alreadyStopped: false };
 }
 
 // The one unresolved emergency stop journal for a lane, if any. More than one is
@@ -106,6 +108,11 @@ function unresolvedEmergencyStop(repoRoot, laneId, env) {
 // separate emergency stop journal beside the preserved pointer, so stopping a
 // lane never destroys the record of what was in flight.
 async function stop(options, env = process.env) {
+  verifyCommandParent(options, env);
+  return commandEventResult(options, await stopOperation(options, env), env);
+}
+
+async function stopOperation(options, env = process.env) {
   let lane = ownedLane(options, env, false);
   if (RETIRED_STATES.has(lane.state)) {
     throw new ClaudeTransmogrifyError('LANE_RETIRED', `lane ${lane.laneId} is retired`);
@@ -137,7 +144,7 @@ async function stop(options, env = process.env) {
       options, env, surface, runtime, lane, selected.operation, true,
     );
     completeOperationJournal(
-      options.repoRoot, lane.laneId, selected.operation, { state: 'complete' }, env,
+      options.repoRoot, lane.laneId, result.operation || selected.operation, { parentContext: options.parentContext, state: 'complete' }, env,
     );
     return laneResult('stop', result.lane, {
       operationId: selected.operation.operationId,
@@ -309,7 +316,7 @@ async function retireUnboundLane(options, env, initial) {
     }
     const harvestReceipt = pending.details.harvestReceipt;
     const finish = (cleanup) => {
-      completePending(options.repoRoot, lane.laneId, pending, {
+      completePending(options.repoRoot, lane.laneId, pending, { parentContext: options.parentContext,
         state: 'complete', details: { ...pending.details, cleanup },
       }, env);
       lane = requireOwnedLane(options.repoRoot, lane.laneId, env);
@@ -382,6 +389,11 @@ async function retireUnboundLane(options, env, initial) {
 // every provider mutation is journaled before dispatch so a crash at any
 // point resumes from the journal instead of replaying.
 async function retire(options, env = process.env) {
+  verifyCommandParent(options, env);
+  return commandEventResult(options, await retireOperation(options, env), env);
+}
+
+async function retireOperation(options, env = process.env) {
   const unbound = unboundFailedLane(options, env);
   if (unbound) return retireUnboundLane(options, env, unbound);
   const admitted = admitRetirement(options, env);
@@ -413,7 +425,7 @@ async function retire(options, env = process.env) {
       );
     }
     await removeLocalRecord(ctx);
-    completePending(options.repoRoot, ctx.lane.laneId, ctx.pending, {
+    completePending(options.repoRoot, ctx.lane.laneId, ctx.pending, { parentContext: options.parentContext,
       state: 'complete',
       details: { ...ctx.pending.details, remoteArchived: true, localRemoved: true, cleanup },
     }, env);
@@ -591,7 +603,7 @@ function deferredRetirement(ctx) {
   const { options, env, lane, harvestReceipt } = ctx;
   if (lane.seat.managed !== true) {
     const cleanup = { attempted: false, removed: false, external: true };
-    completePending(options.repoRoot, lane.laneId, ctx.pending, {
+    completePending(options.repoRoot, lane.laneId, ctx.pending, { parentContext: options.parentContext,
       state: 'complete',
       details: { ...ctx.pending.details, remoteArchived: true, localRemovalDeferred: true, cleanup },
     }, env);
@@ -758,7 +770,7 @@ async function reconcilePendingStop(options, env, surface, runtime, lane, operat
     commandTimeoutMs: remainingCommandMs(deadline, 100),
   }, env, surface, runtime, lane, operation, false);
   if (result.pending) return { lane, outcome: 'stopPending' };
-  completePending(options.repoRoot, lane.laneId, operation, { state: 'complete' }, env);
+  completePending(options.repoRoot, lane.laneId, result.operation || operation, { parentContext: options.parentContext, state: 'complete' }, env);
   return { lane: result.lane, outcome: 'stoppedObserved' };
 }
 

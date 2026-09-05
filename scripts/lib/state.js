@@ -80,6 +80,78 @@ const OPERATION_STATES = new Map([
 // paths (reconcile, --finish-retirements, --accept-manual-seat-removal) and
 // records provider effects that must never be declared away.
 const ABANDONABLE_OPERATION_TYPES = new Set(['spawn', 'steer', 'stop', 'recover', 'resume', 'interrupt']);
+
+// Explicit provider and recovery edges. Same-phase receipt enrichment is legal
+// only while open. Abandonable journals may fail in any open phase. Absence
+// settlement is limited to the phases whose callers can prove non-delivery.
+const OPERATION_EDGES = {
+  spawn: {
+    planned: ['seatReady', 'dispatching', 'providerRequestDispatched', 'providerObserved'],
+    seatReady: ['dispatching', 'providerRequestDispatched'],
+    dispatching: ['dispatched', 'spawnUnknown', 'notDeliveredCaptureCleanup', 'providerObserved', 'unknown'],
+    dispatched: ['providerObserved', 'spawnUnknown', 'complete'],
+    providerRequestDispatched: ['providerCreated', 'unknown'],
+    providerCreated: ['turnRequestDispatched', 'partial', 'unknown'],
+    providerObserved: ['complete'],
+    turnRequestDispatched: ['materialized', 'partial', 'unknown', 'complete'],
+    materialized: ['partial', 'unknown', 'complete'],
+    partial: ['complete', 'unknown'],
+    spawnUnknown: ['providerObserved', 'complete'],
+    unknown: ['providerObserved', 'complete'],
+    notDeliveredCaptureCleanup: [],
+  },
+  steer: { planned: ['dispatching'], dispatching: ['queued', 'unknown', 'complete'], queued: ['unknown', 'complete'], unknown: ['complete'] },
+  stop: { planned: ['dispatching', 'complete'], dispatching: ['dispatched', 'unknown', 'complete'], dispatched: ['unknown', 'complete'], unknown: ['complete'] },
+  recover: { planned: ['dispatching'], dispatching: ['dispatched', 'unknown', 'complete'], dispatched: ['unknown', 'complete'], unknown: ['complete'] },
+  resume: { planned: ['resumeDispatching'], resumeDispatching: ['resumeAcknowledged', 'unknownResume', 'complete'], resumeAcknowledged: ['turnDispatching', 'complete'], unknownResume: ['complete'], turnDispatching: ['unknownTurn', 'complete'], unknownTurn: ['complete'] },
+  interrupt: { planned: ['dispatching'], dispatching: ['unknown', 'complete'], unknown: ['complete'] },
+  harvest: { planned: ['staged', 'copying'], staged: ['commitDispatching', 'committed'], commitDispatching: ['committed'], committed: ['copying'], copying: ['copied'], copied: ['cleanupDispatching', 'complete'], cleanupDispatching: ['cleanupComplete'], cleanupComplete: ['complete'] },
+  retire: {
+    planned: ['dispatching', 'providerRequestDispatched', 'providerRetired', 'remoteArchived', 'archiveNotDispatched', 'unknown', 'cleanupDeferred', 'providerRetiredCleanupDeferred', 'providerRetiredCleanupBlocked', 'worktreeRemoved', 'complete'],
+    dispatching: ['dispatched', 'unknown'],
+    dispatched: ['remoteArchived', 'archiveNotDispatched', 'unknown'],
+    providerRequestDispatched: ['providerAcknowledged', 'providerRetired', 'unknown'],
+    providerAcknowledged: ['providerRetired', 'unknown'],
+    unknown: ['providerRetired', 'remoteArchived', 'archiveNotDispatched'],
+    archiveNotDispatched: ['remoteArchived', 'unknown'],
+    providerRetired: ['providerRetiredCleanupDeferred', 'providerRetiredCleanupBlocked', 'complete'],
+    remoteArchived: ['cleanupDeferred', 'providerRetiredCleanupDeferred', 'providerRetiredCleanupBlocked', 'worktreeRemoved', 'localRemovalDispatching', 'localRemoved', 'complete'],
+    cleanupDeferred: ['providerRetiredCleanupDeferred', 'providerRetiredCleanupBlocked', 'worktreeRemoved', 'localRemovalDispatching', 'localRemoved', 'complete'],
+    providerRetiredCleanupDeferred: ['providerRetiredCleanupBlocked', 'worktreeRemoved', 'complete'],
+    providerRetiredCleanupBlocked: ['worktreeRemoved', 'complete'],
+    worktreeRemoved: ['localRemovalDispatching', 'localRemoved', 'complete'],
+    localRemovalDispatching: ['localRemovalDispatched', 'localRemovalUnknown', 'localRemoved'],
+    localRemovalDispatched: ['localRemovalUnknown', 'localRemoved'],
+    localRemovalUnknown: ['localRemoved'], localRemoved: ['complete'],
+  },
+};
+const OPERATION_NOT_DELIVERED = {
+  spawn: new Set(['planned', 'seatReady', 'notDeliveredCaptureCleanup', 'turnRequestDispatched', 'partial', 'unknown']),
+  steer: new Set(['planned', 'dispatching', 'unknown']),
+  stop: new Set(), recover: new Set(),
+  resume: new Set(['planned', 'resumeDispatching', 'resumeAcknowledged', 'unknownResume']),
+  interrupt: new Set(['planned']), harvest: new Set(), retire: new Set(['planned']),
+};
+const OPERATION_TRANSITIONS = new Map(Object.entries(OPERATION_EDGES).map(([type, edges]) => [
+  type, new Map([...OPERATION_STATES.get(type)].map((state) => [state, new Set(
+    TERMINAL_OPERATION_STATES.has(state) ? [] : [
+      state, ...(edges[state] || []),
+      ...(ABANDONABLE_OPERATION_TYPES.has(type) ? ['failed'] : []),
+      ...(OPERATION_NOT_DELIVERED[type].has(state) ? ['notDelivered'] : []),
+    ],
+  )])),
+]));
+
+function operationFailure(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+function assertOperationRevision(current, expectedRevision) {
+  if (expectedRevision !== (current.revision ?? 0)) {
+    throw operationFailure('STALE_OPERATION_REVISION', 'operation changed; reload its journal before updating it');
+  }
+}
+
 function assertOperationState(type, state) {
   if (!OPERATION_TYPES.has(type)) throw new Error(`unknown operation type: ${type}`);
   if (!OPERATION_STATES.get(type).has(state)) {
@@ -264,7 +336,7 @@ function sameJson(left, right) {
   return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
 }
 
-const { SHA256_PATTERN, UUID_PATTERN, assertExactKeys, assertTimestamp } = require('./record-guards');
+const { SHA256_PATTERN, UUID_PATTERN, assertExactKeys, assertTimestamp, readOwnedJson } = require('./record-guards');
 const {
   CLAUDE_BACKEND, CLAUDE_BRIDGE_PATTERN, CLAUDE_JOB_PATTERN, sameClaudeRuntimeIdentity,
   validateClaudeRuntime, validateExecutionEpoch, validateLaneIdentity: validateClaudeLaneIdentity,
@@ -488,28 +560,28 @@ function validateRegistry(registry, project) {
 // and group- or world-accessible modes. Returns null for ENOENT; corrupt JSON
 // throws instead of being read as an empty record.
 function readJson(file) {
-  let raw;
-  try {
-    const stat = fs.lstatSync(file);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error(`refusing unsafe JSON state file: ${file}`);
-    }
-    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
-      throw new Error(`refusing JSON state file owned by another user: ${file}`);
-    }
-    if ((stat.mode & 0o077) !== 0) {
-      throw new Error(`refusing non-private JSON state file: ${file}`);
-    }
-    raw = fs.readFileSync(file, 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
+  const read = readOwnedJson(file, { maxBytes: 8 * 1024 * 1024, modeMask: 0o077 });
+  if (read.status === 'missing') return null;
+  if (read.status === 'invalid' && read.cause?.includes('JSON')) {
+    throw operationFailure('INVALID_LOCAL_STATE', 'refusing corrupt JSON state');
   }
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`refusing corrupt JSON state at ${file}: ${error.message}`);
+  if (read.status !== 'ok') {
+    throw operationFailure('UNSAFE_LOCAL_STATE', 'refusing unsafe JSON state file or non-private JSON state file');
   }
+  if (!read.value || typeof read.value !== 'object' || Array.isArray(read.value)) {
+    throw operationFailure('INVALID_LOCAL_STATE', 'JSON state must be an object');
+  }
+  if (path.basename(file) === 'owner.json') {
+    const owner = read.value;
+    if (typeof owner.token !== 'string' || !owner.token || owner.token.length > 512 ||
+        !Number.isSafeInteger(owner.pid) || owner.pid < 1 ||
+        (owner.processBirth !== null && typeof owner.processBirth !== 'string') ||
+        (owner.hostname !== undefined && typeof owner.hostname !== 'string') ||
+        typeof owner.createdAt !== 'string' || !Number.isFinite(Date.parse(owner.createdAt))) {
+      throw operationFailure('INVALID_LOCAL_STATE', 'ownership lock receipt has an invalid shape');
+    }
+  }
+  return read.value;
 }
 
 function fsyncDirectory(directory) {
@@ -981,6 +1053,9 @@ function validateOperationRecord(record, expectedOperationId) {
     throw new Error(`operation record schema ${version} is not supported by this version; upgrade Transmogrify or migrate the state directory`);
   }
   assertOperationState(record.type, record.state);
+  if (record.revision !== undefined && (!Number.isSafeInteger(record.revision) || record.revision < 0)) {
+    throw new Error('operation revision must be a non-negative integer');
+  }
   if (record.laneId !== null && (typeof record.laneId !== 'string' || !record.laneId)) {
     throw new Error('operation laneId must be a non-empty string or null');
   }
@@ -999,6 +1074,7 @@ function newOperationRecord(operation, operationId = operation.operationId || cr
   const now = new Date().toISOString();
   return validateOperationRecord({
     schemaVersion: OPERATION_SCHEMA_VERSION,
+    revision: 0,
     operationId,
     type: operation.type,
     state: operation.state || 'planned',
@@ -1014,6 +1090,16 @@ function newOperationRecord(operation, operationId = operation.operationId || cr
 // change, providerId binds once, and every existing detail key must be
 // resubmitted unchanged. A later phase may only add new receipt keys.
 function patchedOperationRecord(current, patch) {
+  if (TERMINAL_OPERATION_STATES.has(current.state)) {
+    throw operationFailure('TERMINAL_OPERATION_IMMUTABLE', 'a settled operation cannot be changed');
+  }
+  assertOperationRevision(current, patch.expectedRevision);
+  const nextState = patch.state ?? current.state;
+  assertOperationState(current.type, nextState);
+  if (!OPERATION_TRANSITIONS.get(current.type).get(current.state).has(nextState)) {
+    throw operationFailure('INVALID_OPERATION_TRANSITION', `operation cannot move from ${current.state} to ${nextState}`);
+  }
+  const { expectedRevision, parentContext, revision: _revision, ...fields } = patch;
   for (const protectedKey of ['operationId', 'type', 'laneId', 'createdAt']) {
     if (patch[protectedKey] !== undefined && patch[protectedKey] !== current[protectedKey]) {
       throw new Error(`cannot change immutable operation field ${protectedKey}`);
@@ -1039,7 +1125,8 @@ function patchedOperationRecord(current, patch) {
   }
   return validateOperationRecord({
     ...current,
-    ...patch,
+    ...fields,
+    revision: (current.revision ?? 0) + 1,
     // Records written before schema versioning are stamped on their next write.
     schemaVersion: current.schemaVersion ?? OPERATION_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
@@ -1073,6 +1160,10 @@ function updateOperation(repoRoot, operationId, patch, env = process.env) {
     if (!persisted) throw new Error(`operation does not exist: ${operationId}`);
     const current = validateOperationRecord(persisted, operationId);
     const updated = patchedOperationRecord(current, patch);
+    if (updated.laneId && updated.state === 'complete') {
+      const lane = validateRegistry(readJson(paths.registry), paths.project).lanes[updated.laneId];
+      if (lane) publishOperationEvent(lane, updated, env, patch.parentContext);
+    }
     atomicWriteJson(file, updated);
     return updated;
   });
@@ -1264,6 +1355,7 @@ function bindLaneSeat(repoRoot, laneId, operationId, seat, env = process.env) {
       throw new Error('operation journal contains a different lane seat');
     }
     const updatedOperation = patchedOperationRecord(operation, {
+      expectedRevision: operation.revision ?? 0,
       state: operation.state === 'planned' ? 'seatReady' : operation.state,
       details: { ...operation.details, seat },
     });
@@ -1339,15 +1431,76 @@ function updatePendingLaneOperation(repoRoot, laneId, operationId, patch, env = 
     const current = validateOperationRecord(readJson(file), operationId);
     if (current.laneId !== laneId) throw new Error(`operation ${operationId} belongs to another lane`);
     const updated = patchedOperationRecord(current, patch);
+    publishOperationEvent(lane, updated, env, patch.parentContext);
     atomicWriteJson(file, updated);
     return updated;
   });
 }
 
-// Move the operation to a terminal state and clear the lane pointer in one
-// registry write. A repeat whose patch already matches the persisted record
-// returns it unchanged, so a crash between the two writes is repairable
-// locally without a second provider effect.
+// A completed lifecycle journal is the durable outbox obligation. The event
+// precedes journal completion under project -> installation lock order. Its
+// fingerprint is independent of mutable lane timestamps and observation age.
+function publishOperationEvent(lane, operation, env, parentContext = null) {
+  if (operation.state !== 'complete' || !lane.lineage ||
+      !['retire', 'stop', 'interrupt'].includes(operation.type)) return null;
+  const { recordEvent } = require('./dispatch');
+  const phase = operation.type === 'retire' ? 'retired'
+    : operation.type === 'interrupt' ? 'interrupted' : 'stopped';
+  return recordEvent({
+    dispatchId: lane.lineage.dispatchId,
+    type: operation.type === 'retire' ? 'child.retired' : 'child.stopped',
+    fingerprint: `operation-complete:${operation.operationId}`,
+    data: { state: phase },
+    ...(parentContext ? {
+      parentContext,
+      wakeSuppressed: { reason: 'own-command', parentRef: lane.lineage.parentRef },
+    } : {}),
+  }, env);
+}
+
+function repairLaneOperationEvents(repoRoot, laneId, env = process.env) {
+  const paths = projectPaths(repoRoot, env);
+  return withProjectLock(paths, () => {
+    const lane = validateRegistry(readJson(paths.registry), paths.project).lanes[laneId];
+    if (!lane) throw new Error('lane is not owned');
+    return listOperations(repoRoot, env).filter((operation) => operation.laneId === laneId)
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+      .map((operation) => publishOperationEvent(lane, operation, env)).filter(Boolean);
+  });
+}
+
+function verifyCommandParent(options, env = process.env) {
+  if (!options.parentContext) return;
+  const { loadParentContext } = require('./dispatch');
+  const context = loadParentContext(options.parentContext.file, env);
+  const lane = requireOwnedLane(options.repoRoot, options.laneId, env);
+  if (!lane.lineage || context.parent.parentRef !== lane.lineage.parentRef ||
+      context.parent.installationId !== lane.lineage.installationId) {
+    throw operationFailure('NOT_OWNED', 'command parent does not match the lane parent');
+  }
+}
+
+function commandEventResult(options, result, env = process.env) {
+  if (!result?.laneId || !['retire', 'stop', 'interrupt'].includes(result.operation)) return result;
+  const lane = requireOwnedLane(options.repoRoot, result.laneId, env);
+  if (!lane.lineage) return result;
+  const operations = listOperations(options.repoRoot, env).filter((operation) =>
+    operation.laneId === lane.laneId && operation.type === result.operation && operation.state === 'complete')
+    .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+  const operation = operations.find((item) => item.operationId === result.operationId) || operations.at(-1);
+  if (!operation) return result;
+  const events = repairLaneOperationEvents(options.repoRoot, lane.laneId, env);
+  const { digest, pathsFor } = require('./dispatch');
+  const event = events.find((item) => item.observationFingerprint === digest(`operation-complete:${operation.operationId}`));
+  if (!event) return result;
+  const contextFile = path.join(pathsFor(env).parents, `${lane.lineage.parentRef}.json`);
+  const shellQuote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
+  const ackCommand = `node ${shellQuote(path.resolve(__dirname, '../lane.js'))} ack --parent-context-file ${shellQuote(contextFile)} --through ${event.sequence}`;
+  return { ...result, receipt: { ...result.receipt, eventSequence: event.sequence, ackCommand } };
+}
+
+// A terminal retry is a read, never a journal write. It can repair the outbox
+// and a dangling lane pointer, but cannot change even one settled detail.
 function completeLaneOperation(repoRoot, laneId, operationId, patch = {}, env = process.env) {
   const paths = projectPaths(repoRoot, env);
   return withProjectLock(paths, () => {
@@ -1357,21 +1510,29 @@ function completeLaneOperation(repoRoot, laneId, operationId, patch = {}, env = 
     const file = operationFile(paths, operationId);
     const current = validateOperationRecord(readJson(file), operationId);
     if (current.laneId !== laneId) throw new Error(`operation ${operationId} belongs to another lane`);
-    if (lane.pendingOperationId !== operationId) {
-      const expectedState = patch.state || 'complete';
-      const exactRetry = !lane.pendingOperationId && current.state === expectedState &&
-        Object.entries(patch).every(([key, value]) => sameJson(current[key], value));
-      if (!exactRetry) throw new Error(`operation ${operationId} is not pending for lane ${laneId}`);
-      return current;
+    const { expectedRevision, parentContext, ...fields } = patch;
+    const state = fields.state || 'complete';
+    if (!TERMINAL_OPERATION_STATES.has(state)) {
+      throw operationFailure('INVALID_OPERATION_TRANSITION', 'completion requires a settled operation state');
     }
-    const updated = patchedOperationRecord(current, { ...patch, state: patch.state || 'complete' });
-    atomicWriteJson(file, updated);
-    registry.lanes[laneId] = {
-      ...lane,
-      pendingOperationId: null,
-      updatedAt: new Date().toISOString(),
-    };
-    writeRegistry(paths, registry);
+    let updated;
+    if (TERMINAL_OPERATION_STATES.has(current.state)) {
+      assertOperationRevision(current, expectedRevision);
+      if (current.state !== state || !Object.entries(fields).every(([key, value]) => sameJson(current[key], value))) {
+        throw operationFailure('TERMINAL_OPERATION_IMMUTABLE', 'a settled operation cannot be changed');
+      }
+      updated = current;
+    } else {
+      if (lane.pendingOperationId !== operationId) throw new Error(`operation ${operationId} is not pending for lane ${laneId}`);
+      updated = patchedOperationRecord(current, { ...patch, state });
+    }
+    // Never acquire a lane lease from inside this project lock.
+    publishOperationEvent(lane, updated, env, parentContext);
+    if (updated !== current) atomicWriteJson(file, updated);
+    if (lane.pendingOperationId === operationId) {
+      registry.lanes[laneId] = { ...lane, pendingOperationId: null, updatedAt: new Date().toISOString() };
+      writeRegistry(paths, registry);
+    }
     return updated;
   });
 }
@@ -1402,6 +1563,7 @@ function repairUnstartedSpawn(repoRoot, laneId, recordedOperation, env = process
       repaired.push('unstartedSpawnState');
     }
     completeLaneOperation(repoRoot, lane.laneId, pending.operationId, {
+      expectedRevision: pending.revision ?? 0,
       state: 'notDelivered',
       details: { ...pending.details, notDeliveredObservedAt: new Date().toISOString() },
     }, env);
@@ -1445,6 +1607,7 @@ function abandonPendingLaneOperation(repoRoot, laneId, options = {}, env = proce
   }
   const abandonedAt = new Date().toISOString();
   const operation = completeLaneOperation(repoRoot, laneId, pending.operationId, {
+    expectedRevision: pending.revision ?? 0,
     state: 'failed',
     details: {
       ...pending.details,
@@ -1477,7 +1640,7 @@ function settleTerminalLaneOperationPointer(repoRoot, laneId, env = process.env)
     repoRoot,
     laneId,
     pending.operationId,
-    { state: pending.state },
+    { state: pending.state, expectedRevision: pending.revision ?? 0 },
     env,
   );
 }
@@ -1685,6 +1848,7 @@ function bindClaudeSpawnObservation(repoRoot, laneId, binding, env = process.env
       throw new Error(`operation ${operationId} is not the spawn journal for lane ${laneId}`);
     }
     const updatedOperation = patchedOperationRecord(operation, {
+      expectedRevision: operation.revision ?? 0,
       providerId: sessionId,
       state: ['planned', 'dispatching', 'spawnUnknown'].includes(operation.state)
         ? 'providerObserved'
@@ -2063,6 +2227,7 @@ module.exports = {
   ABANDONABLE_OPERATION_TYPES,
   OPERATION_SCHEMA_VERSION,
   OPERATION_STATES,
+  OPERATION_TRANSITIONS,
   OPERATION_TYPES,
   abandonPendingLaneOperation,
   repairUnstartedSpawn,
@@ -2083,6 +2248,8 @@ module.exports = {
   bindLaneSeat,
   bindLaneProvider,
   completeLaneOperation,
+  commandEventResult,
+  verifyCommandParent,
   ensureRegistry,
   listLanes,
   listOperations,
@@ -2090,6 +2257,7 @@ module.exports = {
   observeLaneStopped,
   ownedProviderLane,
   pendingOperationForLane,
+  repairLaneOperationEvents,
   lockHolderMayBeAlive,
   processBirth,
   processIdentity,

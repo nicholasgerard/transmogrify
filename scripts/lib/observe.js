@@ -7,12 +7,12 @@
 // with the same fingerprints.
 
 const {
-  EVENT_KINDS, acknowledgeEvent, failDispatch, kindForEvent, kindSatisfies, listDispatches, listEvents,
+  EVENT_KINDS, failDispatch, kindForEvent, kindSatisfies, listDispatches, listEvents,
   recordEvent, recordObservation,
 } = require('./dispatch');
 const {
   TERMINAL_OPERATION_STATES, listOperations, pendingOperationForLane, processMatches, requireOwnedLane,
-  settleTerminalLaneOperationPointer, withLaneLease,
+  repairLaneOperationEvents, settleTerminalLaneOperationPointer, withLaneLease,
 } = require('./state');
 
 // Spawn journal states before the provider request has gone out. Only these
@@ -39,29 +39,16 @@ const RETIRE_IN_FLIGHT_GRACE_MS = 2 * 60 * 1000;
 const UNREGISTERED_SPAWN_GRACE_MS = SPAWN_IN_FLIGHT_GRACE_MS;
 // Lane states after which a child produces no further observation of its own.
 const SETTLED_LANE_STATES = new Set(['archivedVerified', 'cleanupEligible', 'worktreeRemoved', 'failed', 'stopped']);
-// An observation that only confirms what the parent's own completed command
-// did (a retire, stop, or interrupt finished this recently) is recorded
-// already acknowledged: the command's own result was the parent's receipt,
-// and waking it again for the same fact costs a model turn for nothing.
+// Interrupt-induced idle/turn observations retain their short correlation
+// window. Correlation never acknowledges an event or grants wake suppression.
 const OWN_COMMAND_WINDOW_MS = 2 * 60 * 1000;
-const OWN_COMMAND_TYPES = new Set(['retire', 'stop', 'interrupt']);
-const OWN_COMMAND_EVENTS = new Set(['child.retired', 'child.stopped', 'child.turn-completed', 'child.idle-observed']);
-// A retirement or a whole-session stop happens only through the parent's own
-// command, so its terminal event confirms that command however late the
-// observation lands: a settled lane leaves the outstanding set before the
-// watcher reads it again, and the read that finally records the event may
-// come minutes later. Every other own-command event keeps the window.
-const ALWAYS_OWN_EVENTS = new Map([['child.retired', 'retire'], ['child.stopped', 'stop']]);
-
-// The lane's newest journal when it is a completed retire, stop, or interrupt
-// younger than the own-command window, or a completed retire or stop that the
-// event type can only confirm; null otherwise.
+const OWN_COMMAND_EVENTS = new Set(['child.turn-completed', 'child.idle-observed']);
 function recentOwnCommand(repoRoot, laneId, env, now = Date.now(), eventType = null) {
+  if (!OWN_COMMAND_EVENTS.has(eventType)) return null;
   const newest = listOperations(repoRoot, env)
     .filter((operation) => operation.laneId === laneId)
     .sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0))[0];
-  if (!newest || !OWN_COMMAND_TYPES.has(newest.type) || newest.state !== 'complete') return null;
-  if (ALWAYS_OWN_EVENTS.get(eventType) === newest.type) return newest;
+  if (!newest || newest.type !== 'interrupt' || newest.state !== 'complete') return null;
   const ageMs = now - Date.parse(newest.updatedAt || 0);
   return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= OWN_COMMAND_WINDOW_MS ? newest : null;
 }
@@ -72,12 +59,23 @@ function recentOwnCommand(repoRoot, laneId, env, now = Date.now(), eventType = n
 // dispatch, or a settled lane whose events are acknowledged, no longer counts.
 function outstandingDispatches(context, env, dispatches = listDispatches(context, env)) {
   const pending = listEvents(context, {}, env);
+  const recorded = listEvents(context, { includeAcknowledged: true }, env);
   return dispatches.filter((dispatch) => {
     if (pending.some((event) => event.dispatchId === dispatch.dispatchId)) return true;
     let lane = null;
     try { lane = resolveDispatchLane(dispatch, env).lane; } catch { return true; }
     if (!lane) return dispatch.state !== 'failed';
-    return !SETTLED_LANE_STATES.has(lane.state);
+    if (!SETTLED_LANE_STATES.has(lane.state)) return true;
+    const operations = listOperations(dispatch.child.repoRoot, env).filter((operation) =>
+      operation.laneId === lane.laneId && operation.state === 'complete' &&
+      ['retire', 'stop', 'interrupt'].includes(operation.type));
+    const { digest } = require('./dispatch');
+    if (operations.some((operation) => !recorded.some((event) =>
+      event.dispatchId === dispatch.dispatchId &&
+      event.observationFingerprint === digest(`operation-complete:${operation.operationId}`)))) return true;
+    const expectedType = lane.state === 'failed' ? 'child.failed'
+      : lane.state === 'stopped' ? 'child.stopped' : 'child.retired';
+    return !recorded.some((event) => event.dispatchId === dispatch.dispatchId && event.type === expectedType);
   });
 }
 
@@ -179,6 +177,8 @@ function terminalUnstartedSpawnOperation(dispatch, lane, env) {
 // an open spawn journal.
 function localEventForLane(dispatch, lane, env) {
   if (!lane) return null;
+  const operationEvents = repairLaneOperationEvents(dispatch.child.repoRoot, lane.laneId, env);
+  const latestTerminal = operationEvents.at(-1);
   const spawnOperation = completedSpawnOperation(dispatch, lane, env);
   if (spawnOperation) {
     recordEvent({
@@ -223,6 +223,7 @@ function localEventForLane(dispatch, lane, env) {
       }, env).event;
     }
   }
+  if (latestTerminal && SETTLED_LANE_STATES.has(lane.state)) return latestTerminal;
   const terminal = new Map([
     ['deliveryUnknown', ['delivery-unknown', 'child.delivery-unknown']],
     ['archiveUnknown', ['delivery-unknown', 'child.delivery-unknown']],
@@ -427,7 +428,7 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
 }
 
 // Tag an observation result with the parent's own completed command when the
-// event only confirms it; observeParentChildren acknowledges such events.
+// event only confirms it. The parent still must acknowledge the event.
 function ownCommandResult(dispatch, lane, event, phase, env) {
   const result = { lane, event, phase };
   if (!event || !OWN_COMMAND_EVENTS.has(event.type)) return result;
@@ -449,17 +450,12 @@ async function observeParentChildren(context, values, env, deadline) {
     const dispatch = dispatches[index];
     try {
       const result = await observeDispatch(dispatch, values, env, deadline, dispatches.length - index);
-      let acknowledged = false;
-      if (result.event && result.ownCommand) {
-        acknowledgeEvent(context, result.event.eventId, env);
-        acknowledged = true;
-      }
       observed.push({
         dispatchId: dispatch.dispatchId,
         laneId: dispatch.child.laneId,
         phase: result.phase,
         eventType: result.event?.type ?? null,
-        ...(acknowledged ? { acknowledged: true, ownCommand: result.ownCommand.type } : {}),
+        ...(result.ownCommand ? { ownCommand: result.ownCommand.type } : {}),
       });
     } catch (error) {
       errors.push({ dispatchId: dispatch.dispatchId, code: error.code || 'OBSERVATION_FAILED' });

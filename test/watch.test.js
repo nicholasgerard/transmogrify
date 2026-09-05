@@ -121,7 +121,7 @@ test('a parent without a wake channel is observed but never messaged', async (t)
 
 test('outstanding children are those with pending events or lanes still running', (t) => {
   const { fixture, context, dispatch, laneId } = parentWithChild(t, { laneState: 'worktreeRemoved' });
-  assert.equal(outstandingChildren(context, fixture.env).length, 0, 'a retired child with nothing pending is settled');
+  assert.equal(outstandingChildren(context, fixture.env).length, 1, 'a retired child stays outstanding until its terminal event is recorded');
   const event = recordEvent({ dispatchId: dispatch.dispatchId, type: 'child.retired', fingerprint: 'retired:1', data: { state: 'retired' } }, fixture.env);
   assert.equal(outstandingChildren(context, fixture.env).length, 1, 'an unacknowledged event keeps it outstanding');
   acknowledgeEvent(context, event.eventId, fixture.env);

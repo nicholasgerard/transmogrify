@@ -202,7 +202,7 @@ async function settleRetirementState(options, env, client, initialLane, initialO
       lane = finishRetiredCleanup(options, lane, operation, retirementHarvestReceipt(operation), env);
       repaired.push('worktreeRemoved');
     } else if (operation?.type === 'retire') {
-      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { state: 'complete' }, env);
+      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { expectedRevision: operation.revision ?? 0, state: 'complete' }, env);
     }
     return laneEntry(lane, { outcome: 'retirementFinished', delivery: 'confirmed', repaired, pendingOperation: null });
   }
@@ -218,13 +218,13 @@ async function settleRetirementState(options, env, client, initialLane, initialO
       state: 'archivedVerified',
       lastVerifiedAt: new Date().toISOString(),
     }, env);
-    operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { state: 'providerRetired' }, env);
+    operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { expectedRevision: operation.revision ?? 0, state: 'providerRetired' }, env);
     const repaired = ['archiveVerified'];
     if (cleanupWanted()) {
       lane = finishRetiredCleanup(options, lane, operation, retirementHarvestReceipt(operation), env);
       repaired.push('worktreeRemoved');
     } else {
-      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { state: 'complete' }, env);
+      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { expectedRevision: operation.revision ?? 0, state: 'complete' }, env);
     }
     return laneEntry(lane, { outcome: 'archiveVerified', delivery: 'confirmed', repaired, pendingOperation: null });
   }
@@ -247,6 +247,7 @@ async function settlePendingMutation(options, env, client, initialLane, pending)
     : pending.state === 'planned';
   if (undispatched) {
     completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+      expectedRevision: pending.revision ?? 0,
       state: 'notDelivered',
       details: { ...pending.details, recoveredBeforeDispatchAt: new Date().toISOString() },
     }, env);
@@ -258,6 +259,7 @@ async function settlePendingMutation(options, env, client, initialLane, pending)
   }
   const inspection = await inspectThread(client, lane);
   const settle = (state, details) => completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+    expectedRevision: pending.revision ?? 0,
     state, details: { ...pending.details, ...details },
   }, env);
   if (pending.type === 'steer') {
@@ -333,6 +335,7 @@ async function observeBoundLane(options, env, client, initialLane, operation) {
     if (Number.isFinite(dispatchedAtMs) && nowMs(options) - dispatchedAtMs >= spawnAbsenceGraceMs(options)) {
       const observedAbsentAt = new Date(nowMs(options)).toISOString();
       completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+        expectedRevision: operation.revision ?? 0,
         state: 'notDelivered',
         details: { ...operation.details, outcome: 'spawnInputAbsent', observedAbsentAt },
       }, env);
@@ -375,9 +378,9 @@ async function observeBoundLane(options, env, client, initialLane, operation) {
     };
     const currentLane = requireOwnedLane(options.repoRoot, lane.laneId, env);
     if (currentLane.pendingOperationId === operation.operationId) {
-      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, patch, env);
+      completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, { ...patch, expectedRevision: operation.revision ?? 0, }, env);
     } else {
-      updateOperation(options.repoRoot, operation.operationId, patch, env);
+      updateOperation(options.repoRoot, operation.operationId, { ...patch, expectedRevision: operation.revision ?? 0, }, env);
     }
   }
   // A turn found for a still-pending spawn is that spawn's own input receipt;

@@ -1,5 +1,10 @@
 'use strict';
 
+function currentRevision(repoRoot, operationId, env) {
+  return require('../scripts/lib/state').listOperations(repoRoot, env)
+    .find((operation) => operation.operationId === operationId)?.revision ?? 0;
+}
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -284,21 +289,24 @@ test('operation journal records intent before provider identity is known', (t) =
   }, fixture.env);
   assert.equal(operation.state, 'planned');
   assert.equal(operation.providerId, null);
-  const updated = updateOperation(fixture.repoRoot, operation.operationId, {
+  updateOperation(fixture.repoRoot, operation.operationId, {
+    state: 'providerRequestDispatched', expectedRevision: operation.revision,
+  }, fixture.env);
+  const updated = updateOperation(fixture.repoRoot, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
     state: 'providerCreated',
     providerId: 'thread-created',
   }, fixture.env);
   assert.equal(updated.providerId, 'thread-created');
-  assert.equal(updateOperation(fixture.repoRoot, operation.operationId, {
+  assert.equal(updateOperation(fixture.repoRoot, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
     providerId: 'thread-created',
   }, fixture.env).providerId, 'thread-created');
-  assert.throws(() => updateOperation(fixture.repoRoot, operation.operationId, {
+  assert.throws(() => updateOperation(fixture.repoRoot, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
     providerId: 'thread-replacement',
   }, fixture.env), /immutable operation field providerId/);
-  assert.throws(() => updateOperation(fixture.repoRoot, operation.operationId, {
+  assert.throws(() => updateOperation(fixture.repoRoot, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
     details: { name: '[test] rewritten lane' },
   }, fixture.env), /immutable operation detail name/);
-  assert.equal(updateOperation(fixture.repoRoot, operation.operationId, {
+  assert.equal(updateOperation(fixture.repoRoot, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
     details: { ...operation.details, providerReceiptSha256: 'd'.repeat(64) },
   }, fixture.env).details.providerReceiptSha256, 'd'.repeat(64));
   assert.equal(listOperations(fixture.repoRoot, fixture.env).length, 1);
@@ -399,22 +407,25 @@ test('pending lane operation pointers reject stale writers and clear only after 
   assert.throws(() => beginLaneOperation(fixture.repoRoot, lane.laneId, {
     type: 'steer',
   }, fixture.env), /already has pending operation/);
-  assert.throws(() => updateOperation(fixture.repoRoot, operationId, {
+  assert.throws(() => updateOperation(fixture.repoRoot, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),
     laneId: 'another-lane',
   }, fixture.env), /immutable operation field laneId/);
   assert.throws(() => updatePendingLaneOperation(
-    fixture.repoRoot, lane.laneId, 'abababab-abab-4aba-8aba-abababababab', { state: 'queued' }, fixture.env,
+    fixture.repoRoot, lane.laneId, 'abababab-abab-4aba-8aba-abababababab', { expectedRevision: currentRevision(fixture.repoRoot, 'abababab-abab-4aba-8aba-abababababab', fixture.env),  state: 'queued' }, fixture.env,
   ), /not pending/);
+  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operationId, {
+    state: 'dispatching', expectedRevision: operation.revision,
+  }, fixture.env);
   assert.equal(updatePendingLaneOperation(
-    fixture.repoRoot, lane.laneId, operationId, { state: 'queued' }, fixture.env,
+    fixture.repoRoot, lane.laneId, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),  state: 'queued' }, fixture.env,
   ).state, 'queued');
   const completed = completeLaneOperation(
-    fixture.repoRoot, lane.laneId, operationId, { state: 'complete' }, fixture.env,
+    fixture.repoRoot, lane.laneId, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),  state: 'complete' }, fixture.env,
   );
   assert.equal(completed.state, 'complete');
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
   assert.equal(completeLaneOperation(
-    fixture.repoRoot, lane.laneId, operationId, { state: 'complete' }, fixture.env,
+    fixture.repoRoot, lane.laneId, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),  state: 'complete' }, fixture.env,
   ).state, 'complete');
 });
 
@@ -427,10 +438,10 @@ test('terminal operation pointer reconciliation closes the durable write-order c
     state: 'idle',
   }, fixture.env);
   const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
-    type: 'steer',
+    type: 'steer', state: 'dispatching',
     details: { inputSha256: 'd'.repeat(64) },
   }, fixture.env);
-  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, {
+  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
     state: 'complete',
     details: { ...operation.details, responseVerified: true },
   }, fixture.env);
@@ -1204,11 +1215,11 @@ test('operation journals accept only the states enumerated for their type', (t) 
   assert.equal(operation.schemaVersion, OPERATION_SCHEMA_VERSION);
   assert.equal(operation.state, 'planned');
   assert.throws(() => updatePendingLaneOperation(
-    fixture.repoRoot, lane.laneId, operation.operationId, { state: 'materialized' }, fixture.env,
+    fixture.repoRoot, lane.laneId, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),  state: 'materialized' }, fixture.env,
   ), /materialized is not valid for a steer operation/);
   assert.throws(() => completeLaneOperation(
-    fixture.repoRoot, lane.laneId, operation.operationId, { state: 'done' }, fixture.env,
-  ), /done is not valid for a steer operation/);
+    fixture.repoRoot, lane.laneId, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),  state: 'done' }, fixture.env,
+  ), /completion requires a settled operation state/);
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).state, 'planned');
   for (const type of OPERATION_TYPES) {
     const states = OPERATION_STATES.get(type);
@@ -1236,7 +1247,7 @@ test('operation records tolerate an absent schema version and refuse a newer one
   fs.writeFileSync(file, JSON.stringify(stored));
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env).operationId, operation.operationId);
   const rewritten = updatePendingLaneOperation(
-    fixture.repoRoot, lane.laneId, operation.operationId, { state: 'dispatching' }, fixture.env,
+    fixture.repoRoot, lane.laneId, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),  state: 'dispatching' }, fixture.env,
   );
   assert.equal(rewritten.schemaVersion, 1);
   fs.writeFileSync(file, JSON.stringify({ ...stored, schemaVersion: 2 }));
@@ -1274,7 +1285,10 @@ test('abandon closes a stranded operation as failed without touching a bound lan
   const operation = beginLaneOperation(fixture.repoRoot, lane.laneId, {
     type: 'steer', details: { inputSha256: 'd'.repeat(64) },
   }, fixture.env);
-  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, { state: 'unknown' }, fixture.env);
+  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, { expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),  state: 'dispatching' }, fixture.env);
+  updatePendingLaneOperation(fixture.repoRoot, lane.laneId, operation.operationId, {
+    state: 'unknown', expectedRevision: currentRevision(fixture.repoRoot, operation.operationId, fixture.env),
+  }, fixture.env);
   assert.throws(() => abandonPendingLaneOperation(
     fixture.repoRoot, lane.laneId, { reason: '' }, fixture.env,
   ), /single-line reason/);

@@ -1,5 +1,7 @@
 'use strict';
 
+const { commandEventResult, verifyCommandParent } = require('./state');
+
 // Codex app-server lane adapter: spawn, status, steer, interrupt, boundary
 // resume, retire, and recovery for exact-owned Codex threads. Every provider
 // mutation is journaled before dispatch and confirmed by an exact receipt: the
@@ -372,6 +374,7 @@ function resolvedExecutionControls(ctx) {
 
 function journalSpawnPhase(ctx, state, details = {}, extra = {}) {
   ctx.operation = updatePendingLaneOperation(ctx.options.repoRoot, ctx.laneId, ctx.operationId, {
+    expectedRevision: ctx.operation.revision ?? 0,
     state, ...extra, details: { ...ctx.operation.details, ...details },
   }, ctx.env);
 }
@@ -419,6 +422,7 @@ async function startThread(ctx, client, initialized, controls) {
     }
   } catch (error) {
     updatePendingLaneOperation(options.repoRoot, laneId, ctx.operationId, {
+      expectedRevision: ctx.operation.revision ?? 0,
       state: 'partial',
       details: {
         ...ctx.operation.details,
@@ -516,6 +520,7 @@ async function verifyThreadName(ctx, client, threadId, turn) {
     }
   } catch (error) {
     updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
+      expectedRevision: ctx.operation.revision ?? 0,
       state: 'partial',
       details: {
         ...ctx.operation.details,
@@ -545,7 +550,7 @@ function completeSpawn(ctx, observedStatus, threadId) {
     providerState: observedStatus,
     lastVerifiedAt: new Date().toISOString(),
   }, env);
-  completeLaneOperation(options.repoRoot, laneId, operationId, { state: 'complete' }, env);
+  completeLaneOperation(options.repoRoot, laneId, operationId, { expectedRevision: ctx.operation.revision ?? 0, parentContext: options.parentContext, state: 'complete' }, env);
   ctx.spawnVerified = true;
   if (!options.dispatch) return;
   try {
@@ -629,12 +634,14 @@ function settleFailedSpawn(ctx, error) {
       if (current) {
         if (ctx.providerRequestDispatched) {
           updatePendingLaneOperation(options.repoRoot, laneId, operationId, {
+            expectedRevision: current.revision ?? 0,
             state: 'unknown',
             ...(ctx.providerId ? { providerId: ctx.providerId } : {}),
             details: { ...current.details, deliveryBecameUnknownAt: new Date().toISOString() },
           }, env);
         } else {
           completeLaneOperation(options.repoRoot, laneId, operationId, {
+            expectedRevision: current.revision ?? 0, parentContext: options.parentContext,
             state: 'failed',
             details: { ...current.details, failedBeforeProviderDispatchAt: new Date().toISOString() },
           }, env);
@@ -712,6 +719,7 @@ async function steer(options, env = process.env) {
           (operation && operation.details.expectedTurnId !== turn.id)) {
         if (operation) {
           completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
+            expectedRevision: operation.revision ?? 0, parentContext: options.parentContext,
             state: 'notDelivered',
             details: {
               ...operation.details,
@@ -733,6 +741,7 @@ async function steer(options, env = process.env) {
         }, env);
       }
       operation = updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
+        expectedRevision: operation.revision ?? 0,
         state: 'dispatching',
         details: { ...operation.details, dispatchStartedAt: new Date().toISOString() },
       }, env);
@@ -754,12 +763,14 @@ async function steer(options, env = process.env) {
         if (error.method === 'turn/steer' && error.rpc?.code === -32600 &&
             error.rpc?.message === 'no active turn to steer') {
           completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
+            expectedRevision: operation.revision ?? 0, parentContext: options.parentContext,
             state: 'notDelivered',
             details: { ...operation.details, notDeliveredObservedAt: new Date().toISOString() },
           }, env);
           throw new TransmogrifyError('NO_ACTIVE_TURN', error.rpc.message);
         }
         updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
+          expectedRevision: operation.revision ?? 0,
           state: 'unknown',
           details: { ...operation.details, deliveryBecameUnknownAt: new Date().toISOString() },
         }, env);
@@ -771,7 +782,7 @@ async function steer(options, env = process.env) {
           { laneId, operationId: operation.operationId },
         );
       }
-      completeLaneOperation(options.repoRoot, laneId, operation.operationId, { state: 'complete' }, env);
+      completeLaneOperation(options.repoRoot, laneId, operation.operationId, { expectedRevision: operation.revision ?? 0, parentContext: options.parentContext, state: 'complete' }, env);
       return laneResult('steer', lane, {
         operationId: operation.operationId,
         receipt: { expectedTurnId: turn.id, turnId: result.turnId },
@@ -785,6 +796,11 @@ async function steer(options, env = process.env) {
 // while the target is still active the outcome stays DELIVERY_UNCERTAIN. A
 // dispatch failure is journaled unknown and never replayed.
 async function interrupt(options, env = process.env) {
+  verifyCommandParent(options, env);
+  return commandEventResult(options, await interruptOperation(options, env), env);
+}
+
+async function interruptOperation(options, env = process.env) {
   let lane = ownedLane(options, env, 'mutate');
   assertSeatIdentity(options, lane, env);
   const laneId = lane.laneId;
@@ -812,6 +828,7 @@ async function interrupt(options, env = process.env) {
         }
         lane = updateLaneFromInspection(options, lane, inspected, env);
         completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
+          expectedRevision: operation.revision ?? 0, parentContext: options.parentContext,
           state: 'complete',
           details: {
             ...operation.details,
@@ -835,6 +852,7 @@ async function interrupt(options, env = process.env) {
       if (!targetIsActive) {
         if (operation) {
           completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
+            expectedRevision: operation.revision ?? 0, parentContext: options.parentContext,
             state: 'notDelivered',
             details: { ...operation.details, notDeliveredObservedAt: new Date().toISOString() },
           }, env);
@@ -849,6 +867,7 @@ async function interrupt(options, env = process.env) {
         }, env);
       }
       operation = updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
+        expectedRevision: operation.revision ?? 0,
         state: 'dispatching',
         details: { ...operation.details, dispatchStartedAt: new Date().toISOString() },
       }, env);
@@ -856,6 +875,7 @@ async function interrupt(options, env = process.env) {
         await client.call('turn/interrupt', { threadId: lane.providerId, turnId: targetTurnId });
       } catch (error) {
         updatePendingLaneOperation(options.repoRoot, laneId, operation.operationId, {
+          expectedRevision: operation.revision ?? 0,
           state: 'unknown',
           details: { ...operation.details, deliveryBecameUnknownAt: new Date().toISOString() },
         }, env);
@@ -867,7 +887,7 @@ async function interrupt(options, env = process.env) {
         );
       }
       lane = updateLane(options.repoRoot, laneId, { state: 'interruptRequested' }, env);
-      completeLaneOperation(options.repoRoot, laneId, operation.operationId, { state: 'complete' }, env);
+      completeLaneOperation(options.repoRoot, laneId, operation.operationId, { expectedRevision: operation.revision ?? 0, parentContext: options.parentContext, state: 'complete' }, env);
       return laneResult('interrupt', lane, {
         operationId: operation.operationId,
         receipt: { turnId: targetTurnId },
@@ -932,6 +952,7 @@ function resumeControls(lane) {
 
 function journalResumePhase(ctx, state, details = {}) {
   ctx.operation = updatePendingLaneOperation(ctx.options.repoRoot, ctx.laneId, ctx.operation.operationId, {
+    expectedRevision: ctx.operation.revision ?? 0,
     state, details: { ...ctx.operation.details, ...details },
   }, ctx.env);
 }
@@ -952,6 +973,7 @@ async function settlePriorResume(ctx, client, current) {
     const inspected = await inspectThread(client, ctx.lane);
     ctx.lane = updateLaneFromInspection(options, ctx.lane, inspected, env);
     completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
+      expectedRevision: operation.revision ?? 0, parentContext: options.parentContext,
       state: 'complete',
       details: { ...operation.details, recoveredTurnId, postconditionObservedAt: new Date().toISOString() },
     }, env);
@@ -962,6 +984,7 @@ async function settlePriorResume(ctx, client, current) {
   }
   if (operation.state === 'planned' && (current?.id || null) !== baselineTurnId) {
     completeLaneOperation(options.repoRoot, laneId, operation.operationId, {
+      expectedRevision: operation.revision ?? 0, parentContext: options.parentContext,
       state: 'notDelivered',
       details: { ...operation.details, notDeliveredObservedAt: new Date().toISOString() },
     }, env);
@@ -982,6 +1005,7 @@ function refuseActiveTurn(ctx, current) {
   if (current?.status !== 'inProgress') return;
   if (ctx.operation?.state === 'planned') {
     completeLaneOperation(ctx.options.repoRoot, ctx.laneId, ctx.operation.operationId, {
+      expectedRevision: ctx.operation.revision ?? 0, parentContext: ctx.options.parentContext,
       state: 'notDelivered',
       details: { ...ctx.operation.details, notDeliveredObservedAt: new Date().toISOString() },
     }, ctx.env);
@@ -1016,6 +1040,7 @@ async function dispatchThreadResume(ctx, client, controls) {
     }
   } catch (error) {
     updatePendingLaneOperation(options.repoRoot, laneId, ctx.operation.operationId, {
+      expectedRevision: ctx.operation.revision ?? 0,
       state: 'unknownResume',
       details: {
         ...ctx.operation.details,
@@ -1062,6 +1087,7 @@ async function dispatchResumedTurn(ctx, client, controls) {
       lastVerifiedAt: new Date().toISOString(),
     }, env);
     completeLaneOperation(options.repoRoot, laneId, ctx.operation.operationId, {
+      expectedRevision: ctx.operation.revision ?? 0, parentContext: options.parentContext,
       state: 'complete',
       details: { ...ctx.operation.details, turnId: turn.id },
     }, env);
@@ -1071,6 +1097,7 @@ async function dispatchResumedTurn(ctx, client, controls) {
     });
   } catch (error) {
     updatePendingLaneOperation(options.repoRoot, laneId, ctx.operation.operationId, {
+      expectedRevision: ctx.operation.revision ?? 0,
       state: 'unknownTurn',
       details: { ...ctx.operation.details, turnDeliveryBecameUnknownAt: new Date().toISOString() },
     }, env);
