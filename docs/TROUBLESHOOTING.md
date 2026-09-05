@@ -33,6 +33,7 @@ endpoint. Add `--url` only to override that selection.
 | `consent-required`, `hosting-cli-protected`, `manual-action-required`, `step-not-verified` | [Guided setup stops](#guided-setup-stops) |
 | Refused `WORKTREES` root inside the repository | [Managed worktree is not ignored](#managed-worktree-is-not-ignored) |
 | Ownership or mode refusal on state and seat paths | [Private state or worktree permissions](#private-state-or-worktree-permissions) |
+| `git add` reports "Operation not permitted" on `index.lock` | [Missing clone Git write grant](#lane-sandbox-denials) |
 | `EPERM` on operator state, sockets, `ps`, or the Keychain inside a child lane | [Lane sandbox denials](#lane-sandbox-denials) |
 | `boundary:sandbox-loopback-denied`, `runtime-unsupported`, occupied or incompatible endpoint | [Codex runtime is unavailable or occupied](#codex-runtime-is-unavailable-or-occupied) |
 | `NATIVE_VISIBILITY_REQUIRED`, `DESKTOP_RELAUNCH_REQUIRED`, `DESKTOP_HOST_SESSION`, `ATTACHED_ELSEWHERE`, `RUNTIME_UNAVAILABLE`, `ATTACH_TIMEOUT`, `DESKTOP_QUIT_TIMEOUT` | [Codex Desktop is not attached](#codex-desktop-is-not-attached) |
@@ -213,11 +214,22 @@ The child writes its packet response only to
 branch and records the full SHA in the Commit section. The operator runs
 `lane.js harvest` on the host to fetch and verify it. Older linked worktree
 seats may still require `--commit`, which commits in the seat before harvest.
+
+Codex protects the current repository's resolved Git directory even when it is
+nested behind a `.git` pointer. Managed clone turns now grant write access to
+exactly their own top-level `.git`, including on recovery turns. Ordinary Git
+commands then work. An `index.lock` denial means that grant is missing, such as
+in an earlier seat or turn. Do not move the metadata or add other write roots.
+Omit the SHA line if no commit was made and explain the denial under
+`Not verified`. The operator can use `harvest --commit`. A non-40-hex SHA report
+also counts as absent, and harvest records `childReportedCommit: false`.
+A valid SHA that mismatches HEAD still refuses harvest.
+
 Private state and provider observation remain available on the host. Tests that
 require socket binding,
 process inspection, Keychain access, or writes to the shared Git directory
-must likewise run on the host. Do not widen a child's writable roots or infer a
-provider outage from its sandbox denial.
+must likewise run on the host. Never grant the shared Git directory or add
+other writable roots. Do not infer a provider outage from a sandbox denial.
 
 ## Codex runtime is unavailable or occupied
 

@@ -134,6 +134,10 @@ exchange directory), `head`, `handbackSha256`, and `retireCommand`. A missing
 handback has a null digest and retire command. A present handback is copied to
 the private harvest store before the journal completes.
 
+`childReportedCommit` is true when the handback supplies a full 40-hex commit SHA,
+false when the child supplied no valid SHA, and null when no report was recorded.
+The operator fallback preserves this value even when it creates a commit.
+
 ### `retire`
 
 Lane envelope. `receipt`: `archived`, `alreadyRetired`, `worktreeRemoved`,

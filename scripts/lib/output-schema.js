@@ -121,7 +121,7 @@ const SCHEMAS = Object.freeze({
   }),
   harvest: {
     version: true, ok: true, operation: true, operationId: true, laneId: true, adapter: true,
-    handback: true, changedFiles: true, head: true, handbackSha256: true, retireCommand: true,
+    handback: true, childReportedCommit: true, changedFiles: true, head: true, handbackSha256: true, retireCommand: true,
   },
   retire: laneShape({
     archived: true, alreadyRetired: true, worktreeRemoved: true, reconciled: true, retired: true,

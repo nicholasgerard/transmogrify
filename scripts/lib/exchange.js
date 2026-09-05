@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { TextDecoder } = require('node:util');
-const { sanitizedGitEnv } = require('./git-env');
+const { sanitizedGitEnv, safeGitConfigArgs } = require('./git-env');
 const {
   beginLaneOperation,
   completeLaneOperation,
@@ -61,6 +61,11 @@ Write only inside this directory and /tmp.
 Commit your work on the current branch with a clear title and body.
 Add this commit trailer: Co-Authored-By: ${providerAttribution({ target: provider, backend: provider })}
 Never push. Never change branches.
+In a managed clone seat, your own .git directory is writable.
+Ordinary git add, git commit, git log, and git status work in this seat.
+If git add reports "Operation not permitted", this seat lacks the clone Git-directory grant.
+Explain that in the Not verified section instead of working around it.
+The operator can use harvest --commit as a fallback.
 Before finishing, write ${JSON.stringify(paths.handback)} with exactly these sections:
 Start with # Handback: <packet name>.
 
@@ -68,6 +73,7 @@ Start with # Handback: <packet name>.
 
 A one-line imperative title between 10 and 72 characters, then a blank line and the commit body.
 End this section with a separate line: SHA: <the full commit SHA you made>.
+If you made no commit, omit the SHA line entirely and explain why in the Not verified section.
 
 ## What changed and why
 
@@ -198,14 +204,15 @@ function parseHandback(text) {
   const match = /^([^\n]+)\n[ \t]*\n([\s\S]+)$/u.exec(commit);
   if (!match) throw coded('HARVEST_MISMATCH', 'handback commit requires a title, blank line, and body');
   const title = match[1];
-  const shaLines = [...match[2].matchAll(/^SHA: (.*)$/gmu)];
-  if (shaLines.length > 1 || (shaLines.length === 1 &&
-      (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/iu.test(shaLines[0][1]) ||
-       !match[2].trimEnd().endsWith(shaLines[0][0])))) {
+  const shaLines = [...match[2].matchAll(/^SHA:[ \t]*(.*)$/gmu)];
+  const validShaLines = shaLines.filter((line) => /^[0-9a-f]{40}$/iu.test(line[1]));
+  if (validShaLines.length > 1 || (validShaLines.length === 1 &&
+      !match[2].trimEnd().endsWith(validShaLines[0][0]))) {
     throw coded('HARVEST_MISMATCH', 'handback commit SHA must be one full SHA at the end of the Commit section');
   }
-  const commitSha = shaLines[0]?.[1].toLowerCase() || null;
-  const body = (commitSha ? match[2].slice(0, shaLines[0].index) : match[2]).trim();
+  // A child's explanation of a failed commit must not block the host fallback.
+  const commitSha = validShaLines[0]?.[1].toLowerCase() || null;
+  const body = match[2].replace(/^SHA:[ \t]*.*$/gmu, '').trim();
   const titleLength = [...title].length;
   if (title !== title.trim() || titleLength < 10 || titleLength > 72 ||
       /[\u0000-\u001f\u007f-\u009f]/u.test(title)) {
@@ -224,7 +231,7 @@ function readHandback(seatPath) {
 
 function gitBuffer(seatPath, args, options = {}) {
   try {
-    return execFileSync('git', ['-C', seatPath, ...args], {
+    return execFileSync('git', [...safeGitConfigArgs(), '-C', seatPath, ...args], {
       encoding: null,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: sanitizedGitEnv(options.env || process.env),
@@ -428,6 +435,7 @@ function resultFor(lane, operation, details) {
     laneId: lane.laneId,
     adapter: lane.backend,
     handback: details.handbackSha256 ? 'present' : 'missing',
+    childReportedCommit: details.childReportedCommit ?? null,
     changedFiles: details.changedFiles || [],
     head: details.head || details.baseHead,
     handbackSha256: details.handbackSha256 || null,
@@ -457,7 +465,7 @@ function fetchCloneHead(repoRoot, seat, expectedHead, env) {
       try { gitText(seat.path, ['merge-base', '--is-ancestor', existing, expectedHead]); }
       catch { throw coded('HARVEST_MISMATCH', 'harvest refuses a non-fast-forward repository branch update'); }
     }
-    gitText(repoRoot, ['fetch', '--no-tags', '--no-write-fetch-head', '--', seat.path,
+    gitText(repoRoot, ['fetch', '--no-recurse-submodules', '--no-tags', '--no-write-fetch-head', '--', seat.path,
       `+${seat.branchRef}:${seat.branchRef}`]);
     const fetched = gitText(repoRoot, ['rev-parse', '--verify', seat.branchRef]).toLowerCase();
     if (fetched !== expectedHead ||
@@ -528,6 +536,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
         details: {
           repoRoot: options.repoRoot,
           commit: options.commit === true,
+          childReportedCommit: handback.commitSha !== null,
           fallbackCommit,
           cleanupProvisioned: options.cleanupProvisioned !== false,
           baseHead,

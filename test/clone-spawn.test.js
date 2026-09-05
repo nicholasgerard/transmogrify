@@ -46,6 +46,10 @@ test('Codex clone spawn keeps provenance, attributed preamble, and packet order 
             return { cwd, thread: { id: 'clone-thread', cwd }, model: params.model, serviceTier: 'default' };
           }
           if (method === 'turn/start') {
+            assert.deepEqual(params.sandboxPolicy, {
+              type: 'workspaceWrite', writableRoots: [`${cwd}/.git`], networkAccess: false,
+              excludeTmpdirEnvVar: false, excludeSlashTmp: false,
+            });
             input = params.input[0].text;
             return { turn: {
               id: 'clone-turn', status: 'inProgress',
@@ -69,4 +73,50 @@ test('Codex clone spawn keeps provenance, attributed preamble, and packet order 
   assert.match(input, /Co-Authored-By: Codex <noreply@openai\.com>/);
   assert.equal(fs.readFileSync(result.exchange.packet, 'utf8'), 'Implement the clone packet.');
   assert.equal(calls.filter((method) => method === 'turn/start').length, 1);
+});
+
+
+for (const externalSeat of [undefined, 'clone', 'worktree']) {
+  test(`Codex ${externalSeat ? `external ${externalSeat}` : 'managed clone'} spawn and recovery apply only the authorized Git write grant`, async (t) => {
+    const { createCloneProviderFixture } = require('./helpers/clone-provider-fixture');
+    const { recover } = require('../scripts/lib/codex-adapter');
+    const fixture = await createCloneProviderFixture(t, externalSeat);
+    assert.equal(fixture.turnRequests.length, 1);
+    if (!externalSeat) {
+      assert.equal(fixture.seat.kind, 'clone');
+      assert.equal(fixture.seat.managed, true);
+    } else {
+      assert.equal(fixture.seat.managed, false);
+      assert.equal(fixture.seat.kind, externalSeat === 'clone' ? 'clone' : undefined);
+    }
+    for (let index = 0; index < 2; index += 1) {
+      await fixture.finishTurn();
+      const result = await recover({ ...fixture.options, laneId: fixture.lane.laneId,
+        message: `Complete recovery fixture turn ${index + 1}.`,
+      }, fixture.env);
+      assert.equal(result.operation, 'recover');
+    }
+    assert.equal(fixture.turnRequests.length, 3);
+    for (const request of fixture.turnRequests) {
+      if (externalSeat) {
+        assert.equal(Object.hasOwn(request, 'sandboxPolicy'), false);
+      } else {
+        assert.deepEqual(request.sandboxPolicy, {
+          type: 'workspaceWrite', writableRoots: [fixture.seat.gitDir], networkAccess: false,
+          excludeTmpdirEnvVar: false, excludeSlashTmp: false,
+        });
+        assert.equal(request.sandboxPolicy.writableRoots[0], `${fixture.seat.path}/.git`);
+      }
+    }
+  });
+}
+
+test('Codex recovery of an earlier managed linked worktree sends no Git write grant', async (t) => {
+  const { createCloneProviderFixture } = require('./helpers/clone-provider-fixture');
+  const { recover } = require('../scripts/lib/codex-adapter');
+  const fixture = await createCloneProviderFixture(t, 'legacy-worktree');
+  assert.equal(verifyRecordedSeat(fixture.repoRoot, fixture.lane.seat).managed, true);
+  await recover({ ...fixture.options, laneId: fixture.lane.laneId, message: 'Recover the legacy fixture.' }, fixture.env);
+  assert.equal(fixture.turnRequests.length, 1);
+  assert.equal(Object.hasOwn(fixture.turnRequests[0], 'sandboxPolicy'), false);
 });

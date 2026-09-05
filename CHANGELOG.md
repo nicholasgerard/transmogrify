@@ -2,6 +2,14 @@
 
 ## 0.6.1 (in progress)
 
+- Grant each managed Codex clone turn write access to exactly its own `.git`,
+  including recovery turns. Keep ordinary clone metadata and leave linked
+  worktrees and external seats without an override. Neutralize repository hooks,
+  fsmonitor, and SSH helpers in operator Git commands and disable submodule
+  recursion during harvest fetch. Treat non-40-hex handback SHA reports as absent
+  so `harvest --commit` can recover failed child commits, and report whether the
+  child supplied a commit SHA.
+
 - Create managed seats as clones so children can commit within their sandbox.
   Pin clone metadata and alternates, record the measured dissociation choice,
   fetch and verify child handback SHAs under the repository lock, and refuse
