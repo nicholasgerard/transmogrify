@@ -2,6 +2,12 @@
 
 ## 0.6.1 (in progress)
 
+- Create managed seats as clones so children can commit within their sandbox.
+  Pin clone metadata and alternates, record the measured dissociation choice,
+  fetch and verify child handback SHAs under the repository lock, and refuse
+  non-fast-forward updates or deletion of unfetched work. Preserve legacy
+  worktree cleanup and the operator commit fallback.
+
 - Add GPT-6 Astra to Codex execution guidance for `deep` and `max-quality`,
   with a receipted GPT-5.6 Sol fallback on older live catalogs, explicit model
   upgrade hints, and catalog-gated Ultra effort guidance.

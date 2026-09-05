@@ -15,15 +15,18 @@ const {
   completeLaneOperation,
   listOperations,
   pendingOperationForLane,
+  projectPaths,
   requireOwnedLane,
   settleTerminalLaneOperationPointer,
   stateRoot,
   updatePendingLaneOperation,
   withLaneLease,
+  withProjectLock,
 } = require('./state');
 const {
   cleanupStatus,
   provisionSeat,
+  readOperatorIdentity,
   removeProvisionedEntries,
   validateProvisionedEntries,
   verifyLaneSeat,
@@ -49,19 +52,22 @@ function exchangePaths(seatPath) {
 
 // This is deliberately the only child-facing contract injected by adapters.
 // JSON quoting keeps even an unusual absolute path on one inert text line.
-function exchangePreamble(seatPath) {
+function exchangePreamble(seatPath, provider = 'codex') {
   const paths = exchangePaths(seatPath);
   return `# Transmogrify lane exchange
 
 Your assigned worktree is ${JSON.stringify(seatPath)}.
 Write only inside this directory and /tmp.
-Do not commit. The operator commits your work under the title and body you hand back.
+Commit your work on the current branch with a clear title and body.
+Add this commit trailer: Co-Authored-By: ${providerAttribution({ target: provider, backend: provider })}
+Never push. Never change branches.
 Before finishing, write ${JSON.stringify(paths.handback)} with exactly these sections:
 Start with # Handback: <packet name>.
 
 ## Commit
 
 A one-line imperative title between 10 and 72 characters, then a blank line and the commit body.
+End this section with a separate line: SHA: <the full commit SHA you made>.
 
 ## What changed and why
 
@@ -76,8 +82,8 @@ End your final message with DONE, or BLOCKED and the reason.
 ---`;
 }
 
-function prependExchangePreamble(seatPath, input) {
-  return `${exchangePreamble(seatPath)}\n\n${input}`;
+function prependExchangePreamble(seatPath, input, provider) {
+  return `${exchangePreamble(seatPath, provider)}\n\n${input}`;
 }
 
 function writePacket(repoRoot, seat, packet) {
@@ -192,7 +198,14 @@ function parseHandback(text) {
   const match = /^([^\n]+)\n[ \t]*\n([\s\S]+)$/u.exec(commit);
   if (!match) throw coded('HARVEST_MISMATCH', 'handback commit requires a title, blank line, and body');
   const title = match[1];
-  const body = match[2].trim();
+  const shaLines = [...match[2].matchAll(/^SHA: (.*)$/gmu)];
+  if (shaLines.length > 1 || (shaLines.length === 1 &&
+      (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/iu.test(shaLines[0][1]) ||
+       !match[2].trimEnd().endsWith(shaLines[0][0])))) {
+    throw coded('HARVEST_MISMATCH', 'handback commit SHA must be one full SHA at the end of the Commit section');
+  }
+  const commitSha = shaLines[0]?.[1].toLowerCase() || null;
+  const body = (commitSha ? match[2].slice(0, shaLines[0].index) : match[2]).trim();
   const titleLength = [...title].length;
   if (title !== title.trim() || titleLength < 10 || titleLength > 72 ||
       /[\u0000-\u001f\u007f-\u009f]/u.test(title)) {
@@ -201,7 +214,7 @@ function parseHandback(text) {
   if (!body || /\u0000/u.test(body)) {
     throw coded('HARVEST_MISMATCH', 'handback commit body must be non-empty text');
   }
-  return { text, title, body, sections: Object.fromEntries(sections) };
+  return { text, title, body, commitSha, sections: Object.fromEntries(sections) };
 }
 
 function readHandback(seatPath) {
@@ -283,34 +296,8 @@ function stageChanges(seat, files) {
   return { staged, tree: gitText(seat.path, ['write-tree']) };
 }
 
-function readOperatorIdentity(seatPath) {
-  const identityEnv = Object.fromEntries([
-    ['HOME', process.env.HOME],
-    ['PATH', process.env.PATH],
-    ['USER', process.env.USER],
-    ['LOGNAME', process.env.LOGNAME],
-    ['XDG_CONFIG_HOME', process.env.XDG_CONFIG_HOME],
-    ['GIT_CONFIG_NOSYSTEM', '1'],
-  ].filter(([, value]) => value !== undefined));
-  const read = (key) => {
-    try {
-      return execFileSync('git', ['-C', seatPath, 'config', '--get', key], {
-        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: identityEnv,
-      }).trim();
-    } catch {
-      return '';
-    }
-  };
-  const name = read('user.name');
-  const email = read('user.email');
-  if (!name || !email || /[\r\n\u0000-\u001f\u007f]/u.test(`${name}${email}`)) {
-    throw coded('HARVEST_MISMATCH', 'operator Git identity is not configured safely');
-  }
-  return { name, email };
-}
-
-function createCommit(seat, message) {
-  const identity = readOperatorIdentity(seat.path);
+function createCommit(repoRoot, seat, message) {
+  const identity = readOperatorIdentity(repoRoot);
   gitBuffer(seat.path, [
     '-c', `user.name=${identity.name}`,
     '-c', `user.email=${identity.email}`,
@@ -455,6 +442,33 @@ function lastCompletedHarvest(repoRoot, laneId, env) {
     .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0] || null;
 }
 
+// The project lock serializes the ancestry check and ref update with other
+// harvests and cleanup. Fetch never pushes into a child's mutable repository.
+function fetchCloneHead(repoRoot, seat, expectedHead, env) {
+  return withProjectLock(projectPaths(repoRoot, env), () => {
+    verifyLaneSeat(repoRoot, seat);
+    if (gitText(seat.path, ['rev-parse', '--verify', 'HEAD']).toLowerCase() !== expectedHead) {
+      throw coded('HARVEST_MISMATCH', 'clone HEAD changed during harvest');
+    }
+    const existing = gitText(repoRoot, ['for-each-ref', '--format=%(objectname)', seat.branchRef]);
+    if (existing) {
+      // Consult the seat before fetching: the old commit must already be an
+      // ancestor there. Unknown history is a refusal, never a forced adoption.
+      try { gitText(seat.path, ['merge-base', '--is-ancestor', existing, expectedHead]); }
+      catch { throw coded('HARVEST_MISMATCH', 'harvest refuses a non-fast-forward repository branch update'); }
+    }
+    gitText(repoRoot, ['fetch', '--no-tags', '--no-write-fetch-head', '--', seat.path,
+      `+${seat.branchRef}:${seat.branchRef}`]);
+    const fetched = gitText(repoRoot, ['rev-parse', '--verify', seat.branchRef]).toLowerCase();
+    if (fetched !== expectedHead ||
+        gitText(seat.path, ['rev-parse', '--verify', 'HEAD']).toLowerCase() !== expectedHead) {
+      throw coded('HARVEST_MISMATCH', 'fetched branch does not match the harvested clone HEAD');
+    }
+    gitText(repoRoot, ['merge-base', '--is-ancestor', expectedHead, seat.branchRef]);
+    return fetched;
+  });
+}
+
 async function harvestLane(options, env = process.env, dependencies = {}) {
   if (!options.repoRoot || !path.isAbsolute(options.repoRoot) || !options.laneId) {
     throw coded('USAGE_ERROR', 'harvest requires absolute repoRoot and --lane');
@@ -494,6 +508,19 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
         });
       }
       const files = changedFiles(seat);
+      const baseHead = gitText(seat.path, ['rev-parse', '--verify', 'HEAD']).toLowerCase();
+      const fallbackCommit = options.commit === true && files.length > 0;
+      if (seat.kind === 'clone') {
+        if (handback.commitSha && handback.commitSha !== baseHead) {
+          throw coded('HARVEST_MISMATCH', 'handback commit SHA is not the clone HEAD');
+        }
+        if (!fallbackCommit && !handback.commitSha) {
+          throw coded('HARVEST_MISMATCH', 'clone handback requires the child commit SHA');
+        }
+        if (!fallbackCommit && files.length > 0) {
+          throw coded('HARVEST_MISMATCH', 'clone has uncommitted changes; use --commit to harvest them');
+        }
+      }
       const message = commitMessage(handback, lane);
       operation = beginLaneOperation(options.repoRoot, lane.laneId, {
         type: 'harvest',
@@ -501,8 +528,9 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
         details: {
           repoRoot: options.repoRoot,
           commit: options.commit === true,
+          fallbackCommit,
           cleanupProvisioned: options.cleanupProvisioned !== false,
-          baseHead: gitText(seat.path, ['rev-parse', '--verify', 'HEAD']).toLowerCase(),
+          baseHead,
           changedFiles: files,
           handbackSha256: sha256(handback.text),
           commitTitleSha256: sha256(handback.title),
@@ -525,7 +553,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
       throw coded('HARVEST_MISMATCH', 'handback changed after harvest began');
     }
 
-    if (details.commit) {
+    if (details.fallbackCommit ?? details.commit) {
       if (operation.state === 'planned') {
         const staged = stageChanges(seat, details.changedFiles);
         operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
@@ -544,7 +572,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
             }, env);
           }
           const message = commitMessage(handback, lane);
-          createCommit(seat, message);
+          createCommit(options.repoRoot, seat, message);
           if (dependencies.afterCommit) await dependencies.afterCommit();
           observed = commitMatches(seat, operation.details);
         }
@@ -552,6 +580,11 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
           state: 'committed', details: { ...operation.details, head: observed.head },
         }, env);
       }
+    }
+
+    if (seat.kind === 'clone') {
+      const expectedHead = operation.details.head || operation.details.baseHead;
+      fetchCloneHead(options.repoRoot, seat, expectedHead, env);
     }
 
     if (['planned', 'committed', 'copying'].includes(operation.state)) {
@@ -574,6 +607,13 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
 
     if (['copied', 'cleanupDispatching', 'cleanupComplete'].includes(operation.state)) {
       verifyHandbackCopies(operation.details, dependencies.fs || fs);
+      if (seat.kind === 'clone') {
+        verifyLaneSeat(options.repoRoot, seat);
+        if (gitText(seat.path, ['rev-parse', '--verify', 'HEAD']).toLowerCase() !==
+            (operation.details.head || operation.details.baseHead)) {
+          throw coded('HARVEST_MISMATCH', 'clone HEAD changed after the handback was fetched');
+        }
+      }
     }
 
     if (operation.details.cleanupProvisioned &&

@@ -46,7 +46,7 @@ outcome is unknown.
    (section 5).
 6. `lane.js steer`, `status`, `interrupt` or `stop` as the work needs
    (section 4).
-7. Run `lane.js harvest` (normally with `--commit`), then run the exact
+7. Run `lane.js harvest` (use `--commit` for uncommitted output), then run the exact
    `lane.js retire` command it prints (section 7).
 8. `lane.js reconcile` at startup and after each batch (section 6).
 
@@ -214,7 +214,7 @@ lanes; record their native handles in the packet, never as lane ids.
 Before any provider mutation the tools resolve `REPO_ROOT` and every seat to
 canonical absolute paths, reserve the lane, operation, target, name, input
 digest, and seat atomically in the outside-repository registry, materialize a
-managed worktree only after the reservation is durable, and require an
+managed clone only after the reservation is durable, and require an
 explicit `--cwd` to be an existing Git worktree inside `WORKTREES` that is
 never removed at retirement. For Codex, the provider-reported cwd is part of
 ownership on every read, resume, and turn.
@@ -404,17 +404,23 @@ bound lane keeps its state. Retirements are never abandoned.
 
 Every spawned child receives `.transmogrify/packet.md` in its seat and must
 write `.transmogrify/handback.md`. A child may edit only its seat and `/tmp`.
-It must not commit or write operator state. After the child is idle, harvest
-and optionally commit from the operator process:
+New managed seats are clones with their own Git metadata. The child commits
+on its current branch with the provider trailer injected by spawn, never
+pushes or changes branches, and ends the handback's Commit section with
+`SHA: <full commit SHA>`. It must not write operator state. After the child is
+idle, fetch and verify its work from the operator process:
 
 ```bash
 node "$SKILL_ROOT/scripts/lane.js" harvest \
-  --repo-root "$REPO_ROOT" --lane "$LANE_ID" --commit
+  --repo-root "$REPO_ROOT" --lane "$LANE_ID"
 ```
 
 Harvest refuses an active newest turn, validates the bounded handback as
-untrusted text, commits all non-provisioned changes with the handed-back title
-and body plus provider attribution, copies the handback owner-only under the
+untrusted text, verifies that the supplied SHA is the clone HEAD, and fetches
+the branch under the repository lock. A non-fast-forward update is refused.
+Use `--commit` when a child left uncommitted changes; it commits those changes
+in the seat with the handed-back title, body, and provider attribution before
+fetching. Harvest copies the handback owner-only under the
 state root, and removes recorded provisions by default. Use
 `--no-provisioned-cleanup` only to defer that exact cleanup. A pending harvest
 is resumed by rerunning the same command; do not use provider reconciliation
@@ -432,10 +438,13 @@ node "$SKILL_ROOT/scripts/lane.js" retire \
 Retirement records the digest with the seat's branch, HEAD, clean flag, and
 status digest; verifies the lane is stopped or stops the exact owned
 execution; archives the exact native thread or session and verifies it; then
-removes a managed worktree only if it was clean at harvest, its HEAD is
+removes a managed seat only if it was clean at harvest, its HEAD is
 unchanged, and it is still clean, counting tracked, untracked, and ignored
 files as dirt except for the exact provisions recorded on newer seats. Those
-entries are removed before worktree cleanup; older records retain the strict
+entries are removed before seat cleanup. A clone's HEAD must also be present
+at its recorded branch in the operator repository before removal. Its branch
+is preserved. Earlier linked worktree seats keep their registration checks and
+Git removal path; older provision records retain the strict
 all-files census. For Claude, `claude rm` runs only after the recorded seat path
 is absent, because that public command can delete a session and its worktree.
 External seats are never removed and never passed to `claude rm`.

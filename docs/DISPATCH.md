@@ -267,14 +267,17 @@ caller's spawn input verbatim and reserves
 `<seat>/.transmogrify/handback.md` for the child. A same-lane retry may replace
 the packet contents only while the file still has its recorded device and
 inode.
-The repository's private `.git/info/exclude` ignores `.transmogrify/`; the
-public `.gitignore` is never changed. The first provider message begins with
-one fixed preamble naming the exact seat and handback path. It tells the child:
+The clone's own `.git/info/exclude` ignores `.transmogrify/`; the
+public `.gitignore` is never changed. The first provider message carries the
+parent provenance box, the exchange preamble, then the packet. Without a parent
+dispatch the preamble leads. It tells the child:
 
 - write only inside the seat and `/tmp`;
-- do not commit, because the operator commits the reviewed work;
+- commit on the current branch with a clear title and body and the exact
+  provider `Co-Authored-By` trailer injected by spawn;
+- never push or change branches;
 - write `## Commit` with a 10–72 character one-line imperative title, a blank
-  line, and a non-empty body;
+  line, and a non-empty body, ending the section with `SHA: <full commit SHA>`;
 - write `## What changed and why`, `## Verified`, `## Not verified`, and
   `## Risks and decisions for the operator`; and
 - end its final message with `DONE`, or `BLOCKED` and the reason.
@@ -283,7 +286,7 @@ After a completion or idle event, run:
 
 ```bash
 node "$SKILL_ROOT/scripts/lane.js" harvest \
-  --repo-root "$REPO_ROOT" --lane "$LANE_ID" --commit
+  --repo-root "$REPO_ROOT" --lane "$LANE_ID"
 ```
 
 `harvest` proceeds only after provider observation reports `idle`, `stopped`,
@@ -292,10 +295,18 @@ node "$SKILL_ROOT/scripts/lane.js" harvest \
 command. Harvest reads at most 64 KiB through a no-follow file descriptor,
 strips control characters, treats all remaining content as inert text,
 validates the required sections and commit message, and reports `handback`,
-`changedFiles`, `head`, and `handbackSha256`. With `--commit`, it stages all
+`changedFiles`, `head`, and `handbackSha256`. A clone handback must name its
+current HEAD. Harvest fetches that branch from the seat under the repository
+lock, refuses a non-fast-forward update, and verifies that the fetched branch
+is exactly that HEAD. It never pushes. A clone with uncommitted changes needs
+`--commit`; this fallback stages all
 tracked and untracked seat changes except the recorded provisions and
 `.transmogrify/`, then commits with the operator's Git identity and the
-provider's `Co-Authored-By` trailer.
+provider's `Co-Authored-By` trailer, then fetches the new commit. The fallback
+accepts a title and body without a SHA. A supplied SHA must still match the
+pre-commit HEAD. With no changes, `--commit` accepts the child's existing SHA
+without making another commit. Older linked worktree seats retain their
+existing title-and-body harvest path.
 
 The accepted handback is fsynced owner-only to the immutable
 `<state root>/harvests/<lane-id>/<handback-sha256>.md` and then to
@@ -306,6 +317,20 @@ default the recorded provisions are then removed;
 `retire` command carrying the digest. Its monotonic journal records staging,
 commit dispatch, durable copy, and cleanup, so rerunning the same harvest
 recovers a crash between commit and copy without making a second commit.
+
+New managed seats are local clones with `--no-hardlinks --reference` to the
+operator Git directory. The receipt records the clone Git directory identity,
+origin, branch, base commit, and alternates path and content. Any change to the
+alternates is refused, including an added or removed entry. `git count-objects
+-v` supplies the loose and packed object sizes in KiB. At or below 32 MiB,
+with no existing alternates, creation adds `--dissociate`; otherwise it keeps
+the reference. The receipt records the measurement and choice. Local objects
+are copied without hardlinks, so repacking the operator repository does not
+remove those copies. No existing worktree seat migrates in place.
+
+Clone retirement removes the seat only after its harvested HEAD is present at
+the recorded branch in the operator repository. The branch survives removal.
+An unfetched clone is preserved, including its exchange provisions.
 
 When the project checkout has both `package.json` and `node_modules`, a managed
 seat receives `node_modules` as a symlink to the project checkout rather than a

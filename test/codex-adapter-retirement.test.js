@@ -11,7 +11,7 @@ const {
 } = require('../scripts/lib/state');
 const { createManagedSeat } = require('../scripts/lib/worktree');
 const { NO_RESPONSE, startMockAppServer } = require('./helpers/mock-app-server');
-const { createRepoWithSeat } = require('./helpers/repo-fixture');
+const { createRepoWithSeat, fetchSeatBranch } = require('./helpers/repo-fixture');
 
 function spawnOptions(fixture, url) {
   return {
@@ -143,9 +143,11 @@ test('Codex retire completes a blocked managed seat only after exact manual-remo
   const fixture = createRepoWithSeat(t);
   const laneId = '77777777-7777-4777-8777-777777777777';
   const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, laneId);
+  fetchSeatBranch(fixture.repoRoot, seat);
   fs.writeFileSync(`${seat.path}/.gitignore`, 'ignored/\n');
   execFileSync('git', ['-C', seat.path, 'add', '.gitignore']);
   execFileSync('git', ['-C', seat.path, 'commit', '-qm', 'ignore cleanup fixture']);
+  fetchSeatBranch(fixture.repoRoot, seat);
   let archiveCalls = 0;
   const changed = `${seat.path}/ignored/changed-after-harvest.txt`;
   const server = await startMockAppServer((request) => {
@@ -192,7 +194,7 @@ test('Codex retire completes a blocked managed seat only after exact manual-remo
   }, fixture.env), (error) => error.code === 'CLEANUP_BLOCKED');
   assert.equal(fs.existsSync(seat.path), true);
 
-  execFileSync('git', ['-C', fixture.repoRoot, 'worktree', 'remove', '--force', '--', seat.path]);
+  fs.rmSync(seat.path, { recursive: true });
   fs.symlinkSync(path.join(fixture.root, 'missing-seat-target'), seat.path);
   await assert.rejects(() => retire({
     repoRoot: fixture.repoRoot, laneId, url: server.url, acceptManualSeatRemoval: true,

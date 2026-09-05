@@ -28,4 +28,12 @@ function createRepoWithSeat(t) {
   return { root, repoRoot, stateDir, worktreesRoot, seat, env };
 }
 
-module.exports = { createRepoWithSeat };
+// Retirement tests focus on provider ordering after objects are already safe.
+// Use the actual seat receipt and Git transfer to prepare that prerequisite.
+function fetchSeatBranch(repoRoot, seat) {
+  if (seat.kind !== 'clone') return;
+  execFileSync('git', ['-C', repoRoot, 'fetch', '--no-tags', seat.path,
+    `${seat.branchRef}:${seat.branchRef}`], { stdio: 'pipe' });
+}
+
+module.exports = { createRepoWithSeat, fetchSeatBranch };

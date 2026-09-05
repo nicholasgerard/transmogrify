@@ -203,15 +203,18 @@ install -d -m 700 "$HOME/.local/share/transmogrify/worktrees/example-repository"
 ## Lane sandbox denials
 
 A managed child lane has `workspace-write` access to its exact worktree and
-`/tmp`. The private state root, Git common directory, loopback and Unix sockets,
+`/tmp`. The private state root, operator Git common directory, loopback and Unix sockets,
 process inspection such as `ps`, and the macOS Keychain remain outside that
 boundary. `EPERM` from those resources inside a lane means the sandbox is
 working as designed; it does not prove the resource is missing or unhealthy.
 
 The child writes its packet response only to
-`<seat>/.transmogrify/handback.md` and never commits. The operator runs
-`lane.js harvest --commit` on the host, where private state, Git metadata, and
-provider observation are available. Tests that require socket binding,
+`<seat>/.transmogrify/handback.md`. In a new clone seat it commits on its current
+branch and records the full SHA in the Commit section. The operator runs
+`lane.js harvest` on the host to fetch and verify it. Older linked worktree
+seats may still require `--commit`, which commits in the seat before harvest.
+Private state and provider observation remain available on the host. Tests that
+require socket binding,
 process inspection, Keychain access, or writes to the shared Git directory
 must likewise run on the host. Do not widen a child's writable roots or infer a
 provider outage from its sandbox denial.
@@ -644,3 +647,17 @@ credentials, private transcripts, or session identifiers in ordinary email.
 Report sensitive security findings through the
 [private vulnerability form](https://github.com/nicholasgerard/transmogrify/security/advisories/new),
 not a public issue.
+
+## Clone harvest or identity refusal
+
+A handback SHA must equal the clone's current HEAD. Correct a mistaken handback
+before retrying harvest. If work remains uncommitted, use `--commit` as the
+operator fallback. If a harvest journal is already pending, preserve its
+handback and retry with the same flags after reviewing the mismatch.
+
+A non-fast-forward refusal preserves the operator's branch. Review the two
+histories before taking manual action; never force a fetch to clear the error.
+An origin, branch, Git directory, or alternates mismatch preserves the seat.
+Do not repair receipts to match changed files. An unfetched clone cannot be
+retired automatically; harvest its exact HEAD first. Existing linked worktree
+seats continue using their recorded worktree verification and cleanup path.
