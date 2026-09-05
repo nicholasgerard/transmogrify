@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 (in progress)
+
+- Record whether a relay was launched or merely adopted. Stop only a launched
+  relay whose live process birth exactly matches its receipt.
+- Make Desktop persistence a receipt-backed transaction that preserves foreign
+  login settings, rolls back partial writes, and refuses unowned removal.
+- Mark installer backups with owner-only receipts. Retention now moves only
+  valid receipted backups and refuses symlinked trash paths.
+
 ## 0.6.0
 
 - A Claude lane spawned by a measured CLI persists the same exact runtime

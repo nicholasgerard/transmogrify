@@ -27,6 +27,7 @@ const {
   mutateLane,
   observeLaneStopped,
   pendingOperationForLane,
+  processIdentity,
   processMatches,
   projectPaths,
   readRegistry,
@@ -248,6 +249,30 @@ test('ownership locks remain usable without ps and never reap an unverified live
     kill() { const error = new Error('gone'); error.code = 'ESRCH'; throw error; },
     processBirth: () => null,
   }), false);
+});
+
+test('process identity requires an exact measurable birth before signalling', () => {
+  const owner = { pid: 44444, processBirth: 'recorded-birth' };
+  assert.equal(processIdentity(owner, {
+    kill() {},
+    processBirth: () => 'recorded-birth',
+  }), 'same');
+  assert.equal(processIdentity(owner, {
+    kill() {},
+    processBirth: () => 'recycled-birth',
+  }), 'different');
+  assert.equal(processIdentity(owner, {
+    kill() {},
+    processBirth: () => null,
+  }), 'unknown');
+  assert.equal(processIdentity(owner, {
+    kill() { const error = new Error('denied'); error.code = 'EPERM'; throw error; },
+    processBirth: () => 'recorded-birth',
+  }), 'unknown');
+  assert.equal(processIdentity(owner, {
+    kill() { const error = new Error('gone'); error.code = 'ESRCH'; throw error; },
+    processBirth: () => 'recorded-birth',
+  }), 'gone');
 });
 
 test('operation journal records intent before provider identity is known', (t) => {

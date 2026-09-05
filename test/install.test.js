@@ -7,7 +7,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const test = require('node:test');
 const { REPO_ROOT } = require('./helpers/run-cli');
-const { install, resolveWsRoot } = require('../scripts/install');
+const { BACKUP_RECEIPT_FILE, install, resolveWsRoot } = require('../scripts/install');
 
 function runInstaller(env, args = []) {
   return new Promise((resolve, reject) => {
@@ -94,6 +94,14 @@ test('installer replaces rather than overlays and preserves a backup', async (t)
     .filter((entry) => entry.startsWith('transmogrify.backup-'));
   assert.equal(backups.length, 1);
   assert.equal(fs.readFileSync(path.join(backupRoot, backups[0], 'stale-file'), 'utf8'), 'old');
+  const receiptFile = path.join(backupRoot, backups[0], BACKUP_RECEIPT_FILE);
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  assert.equal(fs.statSync(receiptFile).mode & 0o077, 0);
+  assert.deepEqual(Object.keys(receipt).sort(), ['createdAt', 'source', 'transaction', 'version']);
+  assert.equal(receipt.version, 1);
+  assert.equal(receipt.source, path.join(fs.realpathSync(home), '.claude', 'skills', 'transmogrify'));
+  assert.equal(backups[0], `transmogrify.backup-${receipt.transaction}`);
+  assert.equal(Number.isNaN(Date.parse(receipt.createdAt)), false);
   assert.deepEqual(
     fs.readdirSync(path.join(home, '.claude', 'skills')),
     ['transmogrify'],

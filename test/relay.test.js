@@ -24,6 +24,7 @@ function fixture(t) {
 function record(socketPath, overrides = {}) {
   return {
     version: 1,
+    origin: 'launched',
     pid: 45101,
     processBirth: 'relay-birth',
     host: '127.0.0.1',
@@ -106,10 +107,19 @@ test('ensure relay records one existing listener only after both endpoints ident
     spawnDetached: () => { spawned = true; return 45102; },
   });
   assert.equal(result.state, 'reused');
+  assert.equal(result.origin, 'adopted');
   assert.equal(result.pid, 45102);
   assert.equal(result.processBirth, 'observed-birth');
   assert.equal(spawned, false);
   assert.equal(readRelayRecord(env).pid, 45102);
+  assert.equal(activeRelayUrl(env, { processMatches: () => true }), result.url);
+  let signalled = false;
+  await assert.rejects(
+    () => stopRelay(env, { kill() { signalled = true; } }),
+    (error) => error.code === 'RELAY_NOT_OWNED',
+  );
+  assert.equal(signalled, false);
+  assert.equal(readRelayRecord(env).origin, 'adopted');
 });
 
 test('existing relay verification compares the complete initialized runtime identity', async () => {
@@ -133,12 +143,21 @@ test('existing relay verification compares the complete initialized runtime iden
   assert.equal(await sameRuntimeThroughRelay('/tmp/daemon.sock', 'ws://127.0.0.1:8844/', dependencies), false);
 });
 
-test('stop relay signals only the live pid-and-birth record it read', async (t) => {
+test('stop relay signals a launched relay only after affirmative process identity', async (t) => {
   const { env, socketPath } = fixture(t);
-  writeRelayRecord(record(socketPath), env);
+  await ensureRelay({ socketPath, pollMs: 0, attempts: 1 }, env, {
+    inspectListeners: async () => [],
+    processMatches: () => true,
+    spawnDetached() {
+      writeRelayRecord(record(socketPath), env);
+      return 45101;
+    },
+    sleep: async () => {},
+  });
   const signals = [];
   let live = true;
   const result = await stopRelay(env, {
+    processIdentity: () => 'same',
     processMatches: () => live,
     kill(pid, signal) { signals.push({ pid, signal }); live = false; },
     sleep: async () => {},
@@ -148,14 +167,33 @@ test('stop relay signals only the live pid-and-birth record it read', async (t) 
   assert.equal(fs.existsSync(relayPaths(env).record), false);
 });
 
-test('stop relay never signals a stale record', async (t) => {
+test('stop relay refuses unknown or different launched identities without signalling', async (t) => {
   const { env, socketPath } = fixture(t);
-  writeRelayRecord(record(socketPath), env);
+  for (const identity of ['unknown', 'different']) {
+    writeRelayRecord(record(socketPath), env);
+    let signalled = false;
+    await assert.rejects(
+      () => stopRelay(env, {
+        processIdentity: () => identity,
+        kill() { signalled = true; },
+      }),
+      (error) => error.code === 'RELAY_IDENTITY_UNVERIFIED',
+    );
+    assert.equal(signalled, false);
+    assert.equal(fs.existsSync(relayPaths(env).record), true);
+  }
+});
+
+test('a relay record without an origin is compatibility evidence, not stop ownership', async (t) => {
+  const { env, socketPath } = fixture(t);
+  const legacy = record(socketPath);
+  delete legacy.origin;
+  writeRelayRecord(legacy, env);
   let signalled = false;
-  const result = await stopRelay(env, {
-    processMatches: () => false,
-    kill() { signalled = true; },
-  });
-  assert.deepEqual(result, { stopped: false, pid: null });
+  await assert.rejects(
+    () => stopRelay(env, { kill() { signalled = true; } }),
+    (error) => error.code === 'RELAY_NOT_OWNED',
+  );
   assert.equal(signalled, false);
+  assert.equal(fs.existsSync(relayPaths(env).record), true);
 });

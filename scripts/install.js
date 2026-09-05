@@ -16,6 +16,7 @@ const { createRequire } = require('node:module');
 
 const SOURCE_ROOT = path.resolve(__dirname, '..');
 const INSTALL_MANIFEST = '.transmogrify-install.json';
+const BACKUP_RECEIPT_FILE = '.transmogrify-backup.json';
 const SKILL_SLUG = 'transmogrify';
 const HELP = `usage: install.sh [--target all|codex|claude] [--dry-run]
 
@@ -251,6 +252,22 @@ function removeExactStage(entry) {
   fs.rmSync(entry.stage, { recursive: true, force: true });
 }
 
+function writeBackupReceipt(entry, transaction) {
+  const file = path.join(entry.backup, BACKUP_RECEIPT_FILE);
+  fs.writeFileSync(file, `${JSON.stringify({
+    version: 1,
+    transaction,
+    createdAt: new Date().toISOString(),
+    source: entry.target,
+  }, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+}
+
+function removeBackupReceipt(backup) {
+  try { fs.unlinkSync(path.join(backup, BACKUP_RECEIPT_FILE)); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
 // Builds one complete install in a sibling stage and proves the bundled ws
 // module loads from it before that stage becomes eligible for a swap. A failure
 // removes the stage and leaves any existing installation untouched.
@@ -382,9 +399,11 @@ function install(options, hooks = {}) {
         fs.renameSync(entry.target, entry.backup);
       }
       try {
+        if (existed) writeBackupReceipt(entry, transactionId);
         fs.renameSync(entry.stage, entry.target);
       } catch (error) {
         if (existed && fs.existsSync(entry.backup) && !fs.existsSync(entry.target)) {
+          removeBackupReceipt(entry.backup);
           fs.renameSync(entry.backup, entry.target);
         }
         throw error;
@@ -395,7 +414,10 @@ function install(options, hooks = {}) {
     for (const entry of swapped.reverse()) {
       if (fs.existsSync(entry.failed)) fail(`failed-install target already exists: ${entry.failed}`);
       if (fs.existsSync(entry.target)) fs.renameSync(entry.target, entry.failed);
-      if (entry.existed && fs.existsSync(entry.backup)) fs.renameSync(entry.backup, entry.target);
+      if (entry.existed && fs.existsSync(entry.backup)) {
+        removeBackupReceipt(entry.backup);
+        fs.renameSync(entry.backup, entry.target);
+      }
     }
     for (const entry of stages) {
       removeExactStage(entry);
@@ -430,4 +452,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { install, parseOptions, recognizedInstall, resolveWsRoot };
+module.exports = { BACKUP_RECEIPT_FILE, install, parseOptions, recognizedInstall, resolveWsRoot };

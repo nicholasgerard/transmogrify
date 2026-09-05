@@ -12,7 +12,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { sleep } = require('./async');
 const {
-  atomicWriteJson, processBirth, processMatches, stateRoot,
+  atomicWriteJson, processBirth, processIdentity, processMatches, stateRoot,
 } = require('./state');
 const { inspectListeners } = require('./listeners');
 const { AppServerClient, validateUrl } = require('./app-server');
@@ -76,13 +76,15 @@ function readJson(file) {
 function validRecord(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
   const keys = Object.keys(record).sort();
-  const expected = [
+  const required = [
     'host', 'pid', 'port', 'processBirth', 'socketPath', 'startedAt', 'url', 'version',
   ].sort();
+  const expected = record.origin === undefined ? required : [...required, 'origin'].sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return false;
   try {
     return record.version === RECORD_VERSION && Number.isInteger(record.pid) && record.pid > 0 &&
       typeof record.processBirth === 'string' && Boolean(record.processBirth) &&
+      (record.origin === undefined || ['launched', 'adopted'].includes(record.origin)) &&
       validateHost(record.host) === record.host && validatePort(record.port) === record.port &&
       validateSocketPath(record.socketPath) === record.socketPath &&
       relayUrl(record.host, record.port) === record.url &&
@@ -185,6 +187,7 @@ async function ensureRelay(options, env = process.env, dependencies = {}) {
     if (!birth) throw new RelayError(`relay port :${port} is occupied by an unowned listener`);
     const observed = {
       version: RECORD_VERSION,
+      origin: 'adopted',
       pid: pids[0],
       processBirth: birth,
       host,
@@ -228,9 +231,22 @@ async function ensureRelay(options, env = process.env, dependencies = {}) {
 }
 
 async function stopRelay(env = process.env, dependencies = {}) {
-  const record = runningRelay(env, dependencies);
   const paths = relayPaths(env);
+  const record = readRelayRecord(env);
   if (!record) return { stopped: false, pid: null };
+  if (record.origin !== 'launched') {
+    throw new RelayError('refusing to stop a compatible relay that Transmogrify did not launch', 'RELAY_NOT_OWNED');
+  }
+  const identity = (dependencies.processIdentity || processIdentity)(record, dependencies);
+  if (identity === 'gone') {
+    try { fs.unlinkSync(paths.record); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    return { stopped: false, pid: null };
+  }
+  if (identity !== 'same') {
+    throw new RelayError('refusing to stop a relay whose process identity is not affirmatively verified', 'RELAY_IDENTITY_UNVERIFIED');
+  }
   const signal = dependencies.kill || process.kill.bind(process);
   signal(record.pid, 'SIGTERM');
   const wait = dependencies.sleep || sleep;
@@ -254,6 +270,7 @@ async function serveRelay(options, env = process.env, dependencies = {}) {
   if (!birth) throw new RelayError('cannot establish the relay process birth');
   const record = {
     version: RECORD_VERSION,
+    origin: 'launched',
     pid: process.pid,
     processBirth: birth,
     host,
@@ -293,7 +310,8 @@ async function serveRelay(options, env = process.env, dependencies = {}) {
     server.once('error', reject);
   });
   const latest = readRelayRecord(env);
-  if (latest?.pid === record.pid && latest.processBirth === record.processBirth) {
+  if (latest?.origin === 'launched' && latest.pid === record.pid &&
+      latest.processBirth === record.processBirth) {
     try { fs.unlinkSync(relayPaths(env).record); } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
@@ -338,7 +356,9 @@ async function main(argv = process.argv.slice(2), env = process.env) {
 if (require.main === module) {
   main().catch((error) => {
     console.error(error.message);
-    process.exitCode = error.code === 'USAGE_ERROR' ? 2 : 3;
+    process.exitCode = [
+      'USAGE_ERROR', 'RELAY_IDENTITY_UNVERIFIED', 'RELAY_NOT_OWNED',
+    ].includes(error.code) ? 2 : 3;
   });
 }
 

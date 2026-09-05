@@ -33,23 +33,45 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 // Only an installer backup is ever a candidate. A `.failed-*` entry records a
 // broken install and is left in place for manual review.
 const BACKUP_ENTRY_PATTERN = /^transmogrify\.backup-/;
+const BACKUP_RECEIPT_FILE = '.transmogrify-backup.json';
 
 function isoDateStamp(now = new Date()) {
   return now.toISOString().slice(0, 10);
 }
 
-// Create every missing path segment as an owner-only 0700 directory, and
-// re-assert the mode on the leaf even when it already existed.
+function lstatIfPresent(target) {
+  try { return fs.lstatSync(target); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function assertRealDirectory(directory, label) {
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`${label} is not a real directory`);
+  }
+  return stat;
+}
+
+// Create every missing path segment as an owner-only 0700 directory. Every
+// existing segment is inspected with lstat so chmod can never follow a link.
 function ensureTrashDirectory(directory) {
   const missing = [];
   let current = directory;
-  while (!fs.existsSync(current)) {
+  while (!lstatIfPresent(current)) {
     missing.unshift(current);
     const parent = path.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  for (const segment of missing) fs.mkdirSync(segment, { mode: 0o700 });
+  assertRealDirectory(current, 'trash ancestor');
+  for (const segment of missing) {
+    assertRealDirectory(path.dirname(segment), 'trash parent');
+    fs.mkdirSync(segment, { mode: 0o700 });
+    assertRealDirectory(segment, 'trash directory');
+  }
+  assertRealDirectory(directory, 'trash directory');
   fs.chmodSync(directory, 0o700);
 }
 
@@ -60,7 +82,7 @@ function ensureTrashDirectory(directory) {
 function moveToTrash(sourcePath, trashDirectory) {
   ensureTrashDirectory(trashDirectory);
   const destination = path.join(trashDirectory, path.basename(sourcePath));
-  if (fs.existsSync(destination)) {
+  if (lstatIfPresent(destination)) {
     throw new Error(`trash destination already exists: ${path.basename(destination)}`);
   }
   fs.renameSync(sourcePath, destination);
@@ -127,6 +149,28 @@ function backupOrder(name, mtimeMs) {
   return stamp ? stamp[1] : `0000000000000000000Z:${String(Math.floor(mtimeMs)).padStart(16, '0')}`;
 }
 
+function validBackupReceipt(entryPath, entryName) {
+  const entryStat = lstatIfPresent(entryPath);
+  if (!entryStat?.isDirectory() || entryStat.isSymbolicLink()) return false;
+  const receiptPath = path.join(entryPath, BACKUP_RECEIPT_FILE);
+  const stat = lstatIfPresent(receiptPath);
+  if (!stat?.isFile() || stat.isSymbolicLink() ||
+      (typeof process.getuid === 'function' && stat.uid !== process.getuid()) ||
+      (stat.mode & 0o077) !== 0) return false;
+  let receipt;
+  try { receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8')); } catch { return false; }
+  const keys = receipt && typeof receipt === 'object' && !Array.isArray(receipt)
+    ? Object.keys(receipt).sort() : [];
+  const expected = ['createdAt', 'source', 'transaction', 'version'].sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index]) &&
+    receipt.version === 1 &&
+    typeof receipt.transaction === 'string' && Boolean(receipt.transaction) &&
+    entryName === `transmogrify.backup-${receipt.transaction}` &&
+    typeof receipt.createdAt === 'string' && !Number.isNaN(Date.parse(receipt.createdAt)) &&
+    typeof receipt.source === 'string' && path.isAbsolute(receipt.source) &&
+    path.normalize(receipt.source) === receipt.source;
+}
+
 // Installer backups beyond the newest `keepBackups`, independently per
 // backup root. Age plays no part: this is a pure count-based retention over
 // `transmogrify.backup-*` entries, newest first by their transaction stamp.
@@ -136,13 +180,18 @@ function retainBackups(env, options, isoDate) {
   for (const root of backupRoots(env)) {
     let entries;
     try {
+      const rootStat = fs.lstatSync(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+        throw new Error('backup root is not a real directory');
+      }
       entries = fs.readdirSync(root, { withFileTypes: true });
     } catch (error) {
       if (error.code === 'ENOENT') continue;
       throw error;
     }
     const backups = entries
-      .filter((entry) => BACKUP_ENTRY_PATTERN.test(entry.name))
+      .filter((entry) => BACKUP_ENTRY_PATTERN.test(entry.name) &&
+        validBackupReceipt(path.join(root, entry.name), entry.name))
       .map((entry) => {
         const entryPath = path.join(root, entry.name);
         return { path: entryPath, order: backupOrder(entry.name, fs.lstatSync(entryPath).mtimeMs) };
@@ -186,6 +235,7 @@ function runRetention(options, env = process.env) {
 
 module.exports = {
   BACKUP_ENTRY_PATTERN,
+  BACKUP_RECEIPT_FILE,
   DEFAULT_KEEP_BACKUPS,
   DEFAULT_KEEP_DAYS,
   backupRoots,

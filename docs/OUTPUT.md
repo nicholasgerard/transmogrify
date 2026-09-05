@@ -61,6 +61,13 @@ unreadable evidence is `false`. An attached relay receipt also includes
 `attachment.relay.url` and `attachment.relay.socketPath`. The doctor's
 `nativeVisibility` copies `persisted` as the same boolean for guided setup.
 
+Relay helper records include `origin`, either `launched` or `adopted`; a legacy
+record may omit it and is interpreted as adopted. A successful `persist` result
+adds `persistence.phase: applied`. `apply-persisted` adds
+`environmentChanged`, which is true only when it set a previously unset login
+value. Persistence refusals may report `currentValue`, `plannedValue`, and
+`appliedValue` so the owner can see what would be replaced.
+
 ## Operations
 
 ### `setup`
@@ -220,7 +227,8 @@ With `--retention`, the result carries `retention` instead of
 `providers`/`counts`/`setup`: `dryRun`, `keepDays`, `keepBackups`,
 `operations`, `events`, `backups` (each `candidates`, `moved`), and
 `trashDir`. Retention only moves matter into a recoverable trash directory;
-it never unlinks anything.
+it never unlinks anything. Backup counts include only entries with a valid
+owner-only installer receipt.
 
 ### `doctor`
 

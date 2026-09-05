@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { execFile } = require('node:child_process');
@@ -13,6 +15,7 @@ const {
   ensure,
   parseEstablishedConnections,
   persist,
+  persistenceReceiptPath,
   resolveRuntimeUrl,
   launchAgentContents,
   stableNodePath,
@@ -354,6 +357,32 @@ test('ensure asks runtime-up for the relay before launching against an absent li
   ]]);
 });
 
+test('ensure launch-only uses an existing listener and never starts a runtime or relay', async () => {
+  const ready = scenario({
+    running: false,
+    runtimeListening: true,
+    runtimePort: 8844,
+    relayRecord: {
+      url: 'ws://127.0.0.1:8844/',
+      socketPath: '/private/tmp/codex-daemon.sock',
+    },
+  });
+  ready.dependencies.runtimeUp = async () => { throw new Error('must not start a runtime'); };
+  const result = await ensure({ launchOnly: true }, ENV, ready.dependencies);
+  assert.equal(result.action, 'launched');
+  assert.equal(result.receipt.attachment.state, 'attached');
+
+  const absent = scenario({ running: false, runtimeListening: false });
+  let runtimeStarted = false;
+  absent.dependencies.runtimeUp = async () => { runtimeStarted = true; };
+  await assert.rejects(
+    () => ensure({ launchOnly: true }, ENV, absent.dependencies),
+    (error) => error.code === 'RELAY_UNAVAILABLE',
+  );
+  assert.equal(runtimeStarted, false);
+  assert.deepEqual(absent.state.launches, []);
+});
+
 test('ensure refuses when runtime-up returns an endpoint without a listener', async () => {
   const fixture = scenario({ running: false, runtimeListening: false });
   fixture.dependencies.runtimeUp = async () => ({
@@ -410,8 +439,10 @@ test('the CLI parses operations strictly and reports the disabled state with exi
   assert.throws(() => parseCli(['ensure', '--timeout-ms', '0']), /positive integer/);
   assert.deepEqual(parseCli(['persist', '--dry-run']), {
     operation: 'persist', url: undefined, relaunch: false, timeoutMs: undefined,
-    dryRun: true, authorize: false,
+    launchOnly: false, dryRun: true, authorize: false,
   });
+  assert.equal(parseCli(['ensure', '--launch-only']).launchOnly, true);
+  assert.throws(() => parseCli(['ensure', '--launch-only', '--relaunch-desktop']), /cannot be combined/);
   assert.throws(() => parseCli(['ensure', '--dry-run']), /persist and unpersist only/);
   assert.throws(() => parseCli(['unpersist', '--url', 'ws://127.0.0.1:8844']), /does not apply/);
   const disabled = await main(['check'], { TRANSMOGRIFY_DESKTOP_ATTACH: 'off' }, scenario().dependencies);
@@ -462,57 +493,160 @@ test('persist dry-run prints the exact LaunchAgent and launchctl setting without
   assert.match(result.launchAgent.contents, /<string>ws:\/\/127\.0\.0\.1:8844\/<\/string>/);
 });
 
-test('persist and its login apply ensure the runtime before setting the environment', async () => {
+function persistenceFixture(t, overrides = {}) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tm-desktop-persist-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const persistenceStateRoot = path.join(root, 'state');
+  fs.mkdirSync(home, { mode: 0o700 });
+  const state = { currentValue: '', runtimeUrl: 'ws://127.0.0.1:8844/', ...overrides };
   const calls = [];
   const dependencies = {
     platform: 'darwin',
-    home: '/Users/tester',
+    home,
+    persistenceStateRoot,
     nodePath: '/opt/node/bin/node',
     scriptPath: '/opt/transmogrify/scripts/desktop-attach.js',
-    runningRelay: () => null,
-    runtimeUp: async () => {
-      calls.push('runtime-up');
-      return { runtime: 'managed-daemon', url: 'ws://127.0.0.1:8844/' };
+    runningRelay: () => ({
+      url: state.runtimeUrl,
+      socketPath: '/private/tmp/codex-daemon.sock',
+    }),
+    launchctlGetenv: async () => state.currentValue,
+    launchctl: async (args) => {
+      calls.push(`launchctl:${args.join(' ')}`);
+      if (args[0] === 'setenv') state.currentValue = args[2];
+      if (args[0] === 'unsetenv') state.currentValue = '';
     },
-    launchctl: async (args) => { calls.push(`launchctl:${args.join(' ')}`); },
-    plistWriter: async (file, contents) => {
-      calls.push(`write:${file}`);
-      assert.match(contents, /runtime-up|apply-persisted/);
+    runtimeUp: async (options) => {
+      calls.push('runtime-up');
+      return { runtime: 'managed-daemon', url: options.url };
     },
   };
-  await assert.rejects(() => persist({}, {}, dependencies), /require --authorize/);
-  const result = await persist({ authorize: true }, {}, dependencies);
+  return { env: { HOME: home }, state, calls, dependencies };
+}
+
+test('persist and its login apply verify the runtime before setting the environment', async (t) => {
+  const fixture = persistenceFixture(t);
+  await assert.rejects(() => persist({}, fixture.env, fixture.dependencies), /require --authorize/);
+  const result = await persist({ authorize: true }, fixture.env, fixture.dependencies);
   assert.equal(result.launchAgent.written, true);
-  assert.deepEqual(calls.slice(0, 3), [
+  assert.equal(result.persistence.phase, 'applied');
+  assert.deepEqual(fixture.calls, [
     'runtime-up',
     'launchctl:setenv CODEX_APP_SERVER_WS_URL ws://127.0.0.1:8844/',
-    'write:/Users/tester/Library/LaunchAgents/sh.transmogrify.attach.plist',
   ]);
+  assert.equal(fs.existsSync(result.launchAgent.path), true);
+  assert.equal(fs.statSync(persistenceReceiptPath(fixture.env, fixture.dependencies)).mode & 0o077, 0);
 
-  calls.length = 0;
-  const applied = await applyPersisted({ url: 'ws://127.0.0.1:8844/' }, {}, dependencies);
+  fixture.calls.length = 0;
+  fixture.state.currentValue = '';
+  const applied = await applyPersisted(
+    { url: 'ws://127.0.0.1:8844/' }, fixture.env, fixture.dependencies,
+  );
   assert.equal(applied.runtimeReadyBeforeEnvironment, true);
-  assert.deepEqual(calls, [
+  assert.equal(applied.environmentChanged, true);
+  assert.deepEqual(fixture.calls, [
     'runtime-up',
     'launchctl:setenv CODEX_APP_SERVER_WS_URL ws://127.0.0.1:8844/',
   ]);
 });
 
-test('unpersist removes the managed plist before unsetting the login environment', async () => {
-  const calls = [];
-  const dependencies = {
-    platform: 'darwin',
-    home: '/Users/tester',
-    plistRemover: async (file) => { calls.push(`remove:${file}`); return true; },
-    launchctl: async (args) => { calls.push(`launchctl:${args.join(' ')}`); },
+test('persist refuses a foreign login setting before runtime or file mutation', async (t) => {
+  const fixture = persistenceFixture(t, { currentValue: 'ws://127.0.0.1:9999/' });
+  await assert.rejects(
+    () => persist({ authorize: true }, fixture.env, fixture.dependencies),
+    (error) => error.code === 'FOREIGN_LOGIN_SETTING' && /would replace/.test(error.message),
+  );
+  assert.deepEqual(fixture.calls, []);
+  assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), false);
+});
+
+test('persist refuses a foreign LaunchAgent before inspecting the login setting', async (t) => {
+  const fixture = persistenceFixture(t);
+  const file = path.join(fixture.env.HOME, 'Library', 'LaunchAgents', 'sh.transmogrify.attach.plist');
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, '<plist>foreign</plist>', { mode: 0o600 });
+  let inspected = false;
+  fixture.dependencies.launchctlGetenv = async () => { inspected = true; return ''; };
+  await assert.rejects(
+    () => persist({ authorize: true }, fixture.env, fixture.dependencies),
+    (error) => error.code === 'FOREIGN_LAUNCH_AGENT',
+  );
+  assert.equal(inspected, false);
+  assert.deepEqual(fixture.calls, []);
+});
+
+test('a failing plist writer restores the previous value and leaves no plist or receipt', async (t) => {
+  const fixture = persistenceFixture(t, { currentValue: 'ws://127.0.0.1:8844/' });
+  const file = path.join(fixture.env.HOME, 'Library', 'LaunchAgents', 'sh.transmogrify.attach.plist');
+  fixture.dependencies.plistWriter = async (target, contents) => {
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(target, contents, { mode: 0o600 });
+    throw new Error('simulated plist write failure');
   };
-  await assert.rejects(() => unpersist({}, {}, dependencies), /require --authorize/);
-  const result = await unpersist({ authorize: true }, {}, dependencies);
+  await assert.rejects(
+    () => persist({ authorize: true }, fixture.env, fixture.dependencies),
+    /simulated plist write failure/,
+  );
+  assert.equal(fixture.state.currentValue, 'ws://127.0.0.1:8844/');
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), false);
+});
+
+test('persist recovers an interrupted receipt before starting a new transaction', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  const receiptFile = persistenceReceiptPath(fixture.env, fixture.dependencies);
+  const interrupted = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  interrupted.phase = 'plistWritten';
+  fs.writeFileSync(receiptFile, `${JSON.stringify(interrupted, null, 2)}\n`, { mode: 0o600 });
+  fixture.calls.length = 0;
+
+  const result = await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  assert.equal(result.persistence.phase, 'applied');
+  assert.deepEqual(fixture.calls, [
+    'launchctl:unsetenv CODEX_APP_SERVER_WS_URL',
+    'runtime-up',
+    'launchctl:setenv CODEX_APP_SERVER_WS_URL ws://127.0.0.1:8844/',
+  ]);
+});
+
+test('unpersist removes only a receipt-owned plist and restores the previous value', async (t) => {
+  const fixture = persistenceFixture(t);
+  const persisted = await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  fixture.calls.length = 0;
+  await assert.rejects(() => unpersist({}, fixture.env, fixture.dependencies), /require --authorize/);
+  const result = await unpersist({ authorize: true }, fixture.env, fixture.dependencies);
   assert.equal(result.launchAgent.removed, true);
-  assert.deepEqual(calls, [
-    'remove:/Users/tester/Library/LaunchAgents/sh.transmogrify.attach.plist',
+  assert.deepEqual(fixture.calls, [
     'launchctl:unsetenv CODEX_APP_SERVER_WS_URL',
   ]);
+  assert.equal(fs.existsSync(persisted.launchAgent.path), false);
+  assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), false);
+});
+
+test('unpersist refuses a changed login value and leaves owned state intact', async (t) => {
+  const fixture = persistenceFixture(t);
+  const persisted = await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  fixture.calls.length = 0;
+  fixture.state.currentValue = 'ws://127.0.0.1:9999/';
+  await assert.rejects(
+    () => unpersist({ authorize: true }, fixture.env, fixture.dependencies),
+    (error) => error.code === 'FOREIGN_LOGIN_SETTING' && /9999/.test(error.message),
+  );
+  assert.deepEqual(fixture.calls, []);
+  assert.equal(fs.existsSync(persisted.launchAgent.path), true);
+  assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), true);
+});
+
+test('unpersist without an owned plist and receipt never clears the login value', async (t) => {
+  const fixture = persistenceFixture(t, { currentValue: 'ws://127.0.0.1:8844/' });
+  await assert.rejects(
+    () => unpersist({ authorize: true }, fixture.env, fixture.dependencies),
+    (error) => error.code === 'PERSISTENCE_NOT_OWNED',
+  );
+  assert.equal(fixture.state.currentValue, 'ws://127.0.0.1:8844/');
+  assert.deepEqual(fixture.calls, []);
 });
 
 test('the LaunchAgent prefers a stable Node alias that resolves to the running executable', () => {

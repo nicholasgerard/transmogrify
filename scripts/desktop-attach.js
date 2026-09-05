@@ -38,6 +38,8 @@ options:
                             live relay record, then legacy port 8843)
   --relaunch-desktop        authorize quitting a running unattached Desktop
                             for this run (or set ${RELAUNCH_ENV}=auto)
+  --launch-only             launch a stopped Desktop against an already-live
+                            relay without starting a runtime or relay
   --timeout-ms <ms>         attachment wait after a launch
                             (default ${DEFAULT_ATTACH_TIMEOUT_MS})
   --dry-run                 show the exact persistence write and environment
@@ -74,6 +76,7 @@ function parseCli(argv) {
     options: {
       url: { type: 'string' },
       'relaunch-desktop': { type: 'boolean' },
+      'launch-only': { type: 'boolean' },
       'timeout-ms': { type: 'string' },
       'dry-run': { type: 'boolean' },
       authorize: { type: 'boolean' },
@@ -85,8 +88,12 @@ function parseCli(argv) {
   }
   const operation = parsed.positionals[0];
   if (operation !== 'ensure' &&
-      (parsed.values['relaunch-desktop'] !== undefined || parsed.values['timeout-ms'] !== undefined)) {
-    usage('--relaunch-desktop and --timeout-ms apply to ensure only');
+      (parsed.values['relaunch-desktop'] !== undefined || parsed.values['launch-only'] !== undefined ||
+        parsed.values['timeout-ms'] !== undefined)) {
+    usage('--relaunch-desktop, --launch-only, and --timeout-ms apply to ensure only');
+  }
+  if (parsed.values['relaunch-desktop'] === true && parsed.values['launch-only'] === true) {
+    usage('--launch-only cannot be combined with --relaunch-desktop');
   }
   if (!['persist', 'unpersist'].includes(operation) &&
       (parsed.values['dry-run'] !== undefined || parsed.values.authorize !== undefined)) {
@@ -106,6 +113,7 @@ function parseCli(argv) {
     operation,
     url: parsed.values.url,
     relaunch: parsed.values['relaunch-desktop'] === true,
+    launchOnly: parsed.values['launch-only'] === true,
     timeoutMs,
     dryRun: parsed.values['dry-run'] === true,
     authorize: parsed.values.authorize === true,

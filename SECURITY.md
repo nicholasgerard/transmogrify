@@ -59,10 +59,19 @@ seat identity, runtime/account identity, and pending-operation journal.
 - Never mutate every row returned by a discovery command.
 - Recheck exact identity immediately before stop, archive, local removal, or
   worktree removal.
+- Treat process liveness as a conservative lock-only check. Send a signal only
+  after a fresh liveness and process-birth measurement exactly matches an owned
+  launch receipt.
 - Treat ambiguity and runtime drift as hard refusals.
 - Keep the registry outside the repository and Git common directory.
 - Keep state directories current-user-owned mode `0700`, JSON records mode
   `0600`, and managed `WORKTREES` roots current-user-owned mode `0700`.
+
+Desktop persistence records its previous and applied login values in an
+owner-only receipt before writing the LaunchAgent or changing the environment.
+It never replaces a foreign setting or plist. Removal requires both the receipt
+and the still-matching applied value, and restores rather than erases a value
+that existed before the transaction.
 
 ## Credentials and private Claude archive
 
@@ -144,6 +153,11 @@ unique short job ID again immediately before `rm` dispatch.
 
 Disposable live probes must have an explicit disposable name, must not reuse or
 touch another session, and must be archived immediately with a verified result.
+
+Installer backup retention accepts only directories with a valid owner-only
+`.transmogrify-backup.json` receipt written by the installer. Matching names
+without that receipt remain untouched. Backup roots and trash paths are checked
+with `lstat`; a symlink is refused before any move or permission change.
 
 ## Reporting a vulnerability
 
