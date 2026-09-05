@@ -83,7 +83,9 @@ to the public `--cloud` command through stdin.
 Before the prompt and unique marker, Transmogrify prepends the same portable
 exchange preamble used for Codex lanes. The caller's original packet is
 written verbatim to `<seat>/.transmogrify/packet.md`; the Claude child writes
-its structured handback beside it and does not commit.
+its structured handback beside it. In a managed clone seat, the Claude child
+commits on its assigned branch and reports the full SHA in that handback.
+The operator can use `harvest --commit` as the fallback.
 
 Model, effort, and speed follow Anthropic's documented `--model`, `--effort`,
 and `--settings` surfaces. Every request is resolved before provider access,
@@ -230,8 +232,10 @@ endpoint shape, or ambiguous resource ID stops retirement.
 
 Retirement order is:
 
-1. operator-side `harvest` of the worktree handback, including the optional
-   operator commit and durable owner-only copy, then the seat receipt;
+1. operator-side `harvest` of the seat handback: for clone seats, verify the
+   child SHA equals clone HEAD and fetch that HEAD into the preserved operator
+   branch; use `harvest --commit` for an operator commit when needed, then
+   make the durable owner-only handback copy and seat receipt;
 2. exact whole-session stop and verification;
 3. exact remote archive and verification;
 4. for an external or explicitly deferred seat, preserve the seat, never

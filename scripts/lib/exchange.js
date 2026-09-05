@@ -1,8 +1,9 @@
 'use strict';
 
 // Portable lane exchange and harvest. The child receives one worktree-local
-// packet, writes one bounded handback, and never needs access to private
-// operator state or Git metadata. The host treats that handback only as text.
+// packet and writes one bounded handback without access to private operator
+// state. A clone seat grants exactly its own .git for child commits. The host
+// treats that handback only as text.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');

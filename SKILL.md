@@ -138,10 +138,9 @@ lanes still work here in protocol-only mode."
 
 Codex `ok:true` proves the protocol runtime; `nativeVisibility.verified:true`
 is the separate measured receipt that Codex Desktop is a client of that
-runtime, so new lanes render and stream in the app. If Desktop restarts while
-an independently managed app-server survives, that receipt goes false by
-itself: reconcile only the exact lanes the surviving runtime owns and
-re-attach before new dispatches. On the Claude side, an unavailable,
+runtime, so new lanes render and stream in the app. After a Desktop restart, run a fresh `desktop-attach.js check` to measure
+attachment; persistence may reconnect it. Reconcile only exact-owned lanes
+and restore missing attachment before native dispatches. On the Claude side, an unavailable,
 below-minimum, or failed-measurement CLI is a hard stop for lifecycle
 mutations; a changed Desktop build disables private archival only.
 
@@ -316,9 +315,9 @@ when the parent has a wake channel, delivers one short message per round
 into this session naming every child event of that round, its kind, and the
 two commands to run (`wait --timeout-ms 0`, then `ack --through` the highest
 sequence named). Treat that message as the signal to run them; it never
-carries child output. An observation that only confirms your own completed
-retire, stop, or interrupt is recorded already acknowledged and never wakes
-you. When `wake.channel` is `none`, or
+carries child output. Retire, stop, and interrupt events remain pending until `ack`.
+A matching `--parent-context-file` suppresses only the redundant wake;
+observation never acknowledges the event. When `wake.channel` is `none`, or
 as a fallback at any time, run the wait above: on a Claude Code host as a
 background command so its return re-invokes you, on a Codex host in the
 foreground. Every call with a positive timeout observes every child first and returns all
@@ -468,7 +467,7 @@ Never archive or prune a provider row because it looks stale.
 
 | Symptom | Meaning | Do |
 | --- | --- | --- |
-| exit 2 | usage error or safe refusal; nothing was attempted | fix the request; nothing to reconcile |
+| exit 2 | usage error, safe refusal, or `CLEANUP_RETRYABLE` after verified provider retirement | fix a refused request; retry cleanup with the exact retire command |
 | exit 3 | failure or uncertain outcome after an attempt | reconcile before any retry; never turn it into a success receipt |
 | `NOT_OWNED` | not an exact registry-owned lane (ids must be complete) | use the full `laneId`; never adopt by name |
 | `PENDING_OPERATION` | the lane has an unresolved journal | `reconcile --lane`, then `abandon` only on the owner's decision |
@@ -482,9 +481,10 @@ Never archive or prune a provider row because it looks stale.
 
 Every code has a symptom row and repair in
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#symptom-index); read it
-before improvising. Every tool prints structured JSON on one exit table
-(0 confirmed, 2 refused, 3 failed or uncertain, 1 internal) and accepts
-`--timeout-ms`; the public output contract is
+before improvising. Tools print structured JSON, except `doctor --explain` on a TTY prints a
+terminal summary unless `--json` is set. They share one exit table
+(0 confirmed, 2 refused or retryable cleanup, 3 failed or uncertain, 1 internal)
+and accept `--timeout-ms`; the public output contract is
 [docs/OUTPUT.md](docs/OUTPUT.md).
 
 ## 9. Provider rules that never bend

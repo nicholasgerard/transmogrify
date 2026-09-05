@@ -2,6 +2,10 @@
 
 ## 0.6.1 (in progress)
 
+- Align lifecycle references, troubleshooting, and site copy with clone harvest,
+  measured attachment, durable acknowledgements, and setup behavior; add public
+  documentation regression assertions.
+
 - Create managed seats as clones so children can commit on their assigned
   branch and hand back the commit SHA for operator harvest.
 - Give every managed Codex clone turn, including recovery, write access to its
