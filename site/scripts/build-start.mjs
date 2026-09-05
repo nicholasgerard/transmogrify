@@ -7,6 +7,36 @@ const { IDE_CONTEXT, TERMINAL_CONTEXT, UNSUPPORTED_CONTEXT } = setupPlan;
 
 export const RELEASE_COMMIT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
+export const PREREQUISITE_BLOCK = `command -v git >/dev/null 2>&1 || {
+  printf '%s\\n' 'Transmogrify needs Git. Install Git, then start again.' >&2
+  exit 1
+}
+command -v node >/dev/null 2>&1 || {
+  printf '%s\\n' 'Transmogrify needs Node.js 20 or newer. Install it, then start again.' >&2
+  exit 1
+}
+command -v npm >/dev/null 2>&1 || {
+  printf '%s\\n' 'Transmogrify needs npm. Install it, then start again.' >&2
+  exit 1
+}
+node -e 'const major = Number(process.versions.node.split(".")[0]); process.exit(Number.isSafeInteger(major) && major >= 20 ? 0 : 1)' || {
+  printf '%s\\n' 'Transmogrify needs Node.js 20 or newer. Upgrade Node.js, then start again.' >&2
+  exit 1
+}
+git rev-parse --verify HEAD >/dev/null || {
+  printf '%s\\n' 'Open a Git repository with at least one commit, then start again.' >&2
+  exit 1
+}
+REPO_ROOT="$(git rev-parse --show-toplevel)" || {
+  printf '%s\\n' 'The repository root could not be resolved. Fix Git, then start again.' >&2
+  exit 1
+}
+test -n "$REPO_ROOT" || {
+  printf '%s\\n' 'The repository root was empty. Fix Git, then start again.' >&2
+  exit 1
+}
+export REPO_ROOT`;
+
 export function renderStart({ releaseCommit, version }) {
   if (!releaseCommit) {
     return `# Transmogrify is not published yet
@@ -29,13 +59,23 @@ current task. These instructions are for either a Codex or Claude Code host.
 The executable source is pinned to Git commit \`${releaseCommit}\`; do not
 replace it with a branch, tag, or different revision.
 
-1. Before changing directories or creating scratch space, resolve and preserve
-   the exact target repository root. Derive a collision-resistant private
-   external worktree root for that repository and create every
-   Transmogrify-owned directory with owner-only permissions:
+1. Check every prerequisite before changing directories, invoking the
+   installer, or creating anything. Git, Node.js, and npm must be available.
+   Node.js must be version 20 or newer. The current directory must be inside a
+   Git repository that already has a commit. Resolve the repository root before
+   exporting it, so a failure cannot be hidden:
 
    \`\`\`bash
-   export REPO_ROOT="$(git rev-parse --show-toplevel)"
+${PREREQUISITE_BLOCK.split('\n').map((line) => `   ${line}`).join('\n')}
+   \`\`\`
+
+   Stop if any prerequisite fails. Do not begin preparation or substitute a
+   different repository.
+2. Derive a collision-resistant private external worktree root for that
+   repository. Create every Transmogrify-owned directory with owner-only
+   permissions:
+
+   \`\`\`bash
    export TRANSMOGRIFY_DATA_ROOT="$HOME/.local/share/transmogrify"
    install -d -m 700 "$TRANSMOGRIFY_DATA_ROOT"
    install -d -m 700 "$TRANSMOGRIFY_DATA_ROOT/worktrees"
@@ -48,7 +88,7 @@ replace it with a branch, tag, or different revision.
    Pass \`REPO_ROOT\` to repository-bound lifecycle calls. Pass \`WORKTREES\`
    when spawning a managed lane; later calls recover the exact seat from its
    durable lane record.
-2. Create a fresh scratch directory outside the target repository, fetch only
+3. Create a fresh scratch directory outside the target repository, fetch only
    the pinned release commit, and verify the checked-out object and version:
 
    \`\`\`bash
@@ -69,7 +109,7 @@ replace it with a branch, tag, or different revision.
 
    Report the verified version and commit before installation. If either check
    fails, stop; never fall back to the repository default branch.
-3. Install for both Claude and Codex. Install dependencies and preview the
+4. Install for both Claude and Codex. Install dependencies and preview the
    change before running the installer by absolute path inside the verified
    scratch checkout:
 
@@ -86,7 +126,7 @@ replace it with a branch, tag, or different revision.
    Do not pass a host-selection option. The default installs both copies so a
    new session in either desktop app can use the same setup. Do not replace an
    unrelated occupied skill directory.
-4. Use either installed copy as the command root, then open and follow its
+5. Use either installed copy as the command root, then open and follow its
    \`SKILL.md\` completely. Use the external \`WORKTREES\` root established
    above instead of the inside-repository default.
 
@@ -94,7 +134,7 @@ replace it with a branch, tag, or different revision.
    export SKILL_ROOT="$HOME/.agents/skills/transmogrify"
    test -f "$SKILL_ROOT/SKILL.md" || export SKILL_ROOT="$HOME/.claude/skills/transmogrify"
    \`\`\`
-5. Run the read-only explaining doctor for both hosts before describing the
+6. Run the read-only explaining doctor for both hosts before describing the
    machine or asking the user for anything:
 
    \`\`\`bash
@@ -104,7 +144,7 @@ replace it with a branch, tag, or different revision.
      --explain
    \`\`\`
 
-6. Read the doctor's setup plan, but do not paste its JSON into the
+7. Read the doctor's setup plan, but do not paste its JSON into the
    conversation. If its context sentence is present, say it exactly. The
    expected context sentences are:
 
@@ -116,7 +156,7 @@ replace it with a branch, tag, or different revision.
    what is needed and why, and what happens next. Use plain words. Keep
    identifiers, file paths, ports, command names, and error codes out of the
    conversation unless the user asks for them.
-7. Work through the plan's first remaining step only. State what the step does
+8. Work through the plan's first remaining step only. State what the step does
    and why it is needed. If it needs consent, ask one yes-or-no question and
    wait. Never ask permission for a step the plan already shows cannot work.
    After consent, run \`setup.js\` with only the matching permission for that
@@ -137,7 +177,7 @@ replace it with a branch, tag, or different revision.
    give the short status block again, and handle only the new first step. Do
    not pre-authorize later steps. If the user declines, explain what remains
    available and stop asking about that step.
-8. When setup is ready, follow the installed skill's ownership and safety
+9. When setup is ready, follow the installed skill's ownership and safety
    rules. Reuse what the doctor found. Never kill, restart, reconfigure, steer,
    interrupt, archive, or adopt work that this installation does not own. In an
    IDE agent, finish setup and send the user to one of the desktop apps; do not

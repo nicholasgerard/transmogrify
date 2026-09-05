@@ -461,31 +461,57 @@ function execFilePromise(executable, args, options = {}) {
   });
 }
 
+function cliDiscoveryError(reason) {
+  const message = reason === 'cli-not-found'
+    ? 'Claude CLI was not found'
+    : 'Claude CLI is not executable';
+  return new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', message, { reason });
+}
+
+function isPermissionError(error) {
+  return error?.code === 'EACCES' || error?.code === 'EPERM';
+}
+
 // Resolve the Claude CLI to an absolute realpath and require it to be an
 // owner-controlled executable regular file.
 function resolveCliPath(options, env, dependencies) {
   const requested = options.claudeBin || env.CLAUDE_BIN;
   let candidate = requested;
   if (!candidate) {
-    candidate = dependencies.execFileSync('/usr/bin/which', ['claude'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: sanitizedClaudeEnv(env),
-      maxBuffer: MAX_CAPTURE_BYTES,
-      timeout: DEFAULT_COMMAND_TIMEOUT_MS,
-    }).trim();
+    try {
+      candidate = dependencies.execFileSync('/usr/bin/which', ['claude'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: sanitizedClaudeEnv(env),
+        maxBuffer: MAX_CAPTURE_BYTES,
+        timeout: DEFAULT_COMMAND_TIMEOUT_MS,
+      }).trim();
+    } catch (error) {
+      if (error?.status === 1) throw cliDiscoveryError('cli-not-found');
+      if (isPermissionError(error)) throw cliDiscoveryError('cli-not-executable');
+      throw error;
+    }
   }
   if (!candidate || !path.isAbsolute(candidate)) {
-    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude CLI must resolve to an absolute path', {
-      reason: 'cli-not-found',
-    });
+    throw cliDiscoveryError('cli-not-found');
   }
-  const resolved = fs.realpathSync(candidate);
-  const stat = assertSafeRegularFile(resolved, 'Claude CLI');
+  let resolved;
+  try {
+    resolved = fs.realpathSync(candidate);
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw cliDiscoveryError('cli-not-found');
+    if (isPermissionError(error)) throw cliDiscoveryError('cli-not-executable');
+    throw error;
+  }
+  let stat;
+  try {
+    stat = assertSafeRegularFile(resolved, 'Claude CLI');
+  } catch (error) {
+    if (isPermissionError(error)) throw cliDiscoveryError('cli-not-executable');
+    throw error;
+  }
   if ((stat.mode & 0o111) === 0) {
-    throw new ClaudeSurfaceError('UNSUPPORTED_ENVIRONMENT', 'Claude CLI is not executable', {
-      reason: 'cli-not-executable',
-    });
+    throw cliDiscoveryError('cli-not-executable');
   }
   return resolved;
 }
@@ -543,18 +569,32 @@ function createClaudeSurface(dependencies = {}) {
     };
   }
 
-  // Probe a previously unknown build once. Both argument checks use --help so
-  // they exercise the CLI parser without creating or addressing a real session.
+  // Probe a previously unknown build once. The JSON commands observe vendor
+  // output. The two argument checks use --help, so they prove only that the CLI
+  // accepts those options. The follow-up acknowledgment parser is exercised on
+  // our own fixture and is not vendor evidence. No real session is addressed.
   // A failed record is durable too, preventing repeated provider reads for the
   // same executable digest and naming the exact failed probe to the doctor.
   function measureCliBuild(runtime, options = {}) {
     const env = options.env || process.env;
     const preverified = VERIFIED_CLI_BUILDS.get(runtime.cliVersion) === runtime.cliSha256;
+    const probeNames = [
+      'version',
+      'auth-status-json',
+      'agents-json-all',
+      'settings-argument',
+      'follow-up-options',
+    ];
     const existing = readMeasuredBuild(
       runtime.cliVersion, runtime.cliSha256, runtime.cliPath, env,
     );
-    if (existing?.result === 'good') return existing;
-    if (existing && !preverified) {
+    const existingProbeNames = existing?.probes.map((probe) => probe.name) || [];
+    const existingIsCurrent = existing &&
+      ['verified-build-fast-path', 'vendor-observations-and-option-checks'].includes(existing.source) &&
+      JSON.stringify(existingProbeNames) ===
+        JSON.stringify(probeNames.slice(0, existingProbeNames.length));
+    if (existingIsCurrent && existing.result === 'good') return existing;
+    if (existingIsCurrent && !preverified) {
       throw new ClaudeSurfaceError(
         'UNSUPPORTED_ENVIRONMENT',
         `Claude CLI compatibility probe failed: ${existing.failingProbe}`,
@@ -562,13 +602,6 @@ function createClaudeSurface(dependencies = {}) {
       );
     }
 
-    const probeNames = [
-      'version',
-      'auth-status-json',
-      'agents-json-all',
-      'settings-argument',
-      'follow-up-acknowledgment',
-    ];
     if (preverified) {
       const record = buildMeasurementRecord(
         runtime,
@@ -605,7 +638,7 @@ function createClaudeSurface(dependencies = {}) {
         const help = command(['--settings', '{}', '--help']);
         if (!/(?:^|\s)--settings(?:\s|[=<,]|$)/m.test(help)) throw new Error('missing --settings help');
       }],
-      ['follow-up-acknowledgment', () => {
+      ['follow-up-options', () => {
         const bridgeId = 'cse_transmogrifyCompatibilityProbe';
         const help = command(['-p', '--cloud', bridgeId, '--output-format', 'json', '--help']);
         if (!help.includes('--cloud') || !help.includes('--output-format')) {
@@ -627,7 +660,9 @@ function createClaudeSurface(dependencies = {}) {
         probes.push({ name, ok: true });
       } catch {
         probes.push({ name, ok: false });
-        const record = buildMeasurementRecord(runtime, 'live-probe', probes, 'failed', name);
+        const record = buildMeasurementRecord(
+          runtime, 'vendor-observations-and-option-checks', probes, 'failed', name,
+        );
         deps.atomicWriteJson(measuredBuildFile(runtime.cliSha256, env), record);
         throw new ClaudeSurfaceError(
           'UNSUPPORTED_ENVIRONMENT',
@@ -636,7 +671,9 @@ function createClaudeSurface(dependencies = {}) {
         );
       }
     }
-    const record = buildMeasurementRecord(runtime, 'live-probe', probes, 'good');
+    const record = buildMeasurementRecord(
+      runtime, 'vendor-observations-and-option-checks', probes, 'good',
+    );
     deps.atomicWriteJson(measuredBuildFile(runtime.cliSha256, env), record);
     return record;
   }

@@ -191,6 +191,60 @@ test('Claude auth parsing and child environment exclude ambient Claude credentia
   });
 });
 
+test('Claude CLI discovery classifies absence and permission failures without hiding other errors', (t) => {
+  const env = { PATH: '/empty' };
+  const whichMissing = createClaudeSurface({
+    platform: 'darwin', arch: 'arm64',
+    execFileSync() {
+      const error = new Error('not found');
+      error.status = 1;
+      throw error;
+    },
+  });
+  assert.throws(() => whichMissing.preflight({}, env), (error) =>
+    error.code === 'UNSUPPORTED_ENVIRONMENT' && error.details.reason === 'cli-not-found');
+
+  const permissionDenied = createClaudeSurface({
+    platform: 'darwin', arch: 'arm64',
+    execFileSync() {
+      const error = new Error('permission denied');
+      error.code = 'EACCES';
+      throw error;
+    },
+  });
+  assert.throws(() => permissionDenied.preflight({}, env), (error) =>
+    error.code === 'UNSUPPORTED_ENVIRONMENT' && error.details.reason === 'cli-not-executable');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-permissions-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const nonExecutable = path.join(root, 'claude');
+  fs.writeFileSync(nonExecutable, '#!/bin/sh\n', { mode: 0o600 });
+  assert.throws(
+    () => createClaudeSurface({ platform: 'darwin', arch: 'arm64' }).preflight(
+      { claudeBin: nonExecutable }, env,
+    ),
+    (error) => error.code === 'UNSUPPORTED_ENVIRONMENT' &&
+      error.details.reason === 'cli-not-executable',
+  );
+
+  const unexpected = createClaudeSurface({
+    platform: 'darwin', arch: 'arm64',
+    execFileSync() {
+      const error = new Error('timed out');
+      error.code = 'ETIMEDOUT';
+      throw error;
+    },
+  });
+  assert.throws(() => unexpected.preflight({}, env), (error) => error.code === 'ETIMEDOUT');
+
+  assert.throws(
+    () => createClaudeSurface({ platform: 'darwin', arch: 'arm64' }).preflight(
+      { claudeBin: path.join(os.tmpdir(), 'missing-claude-cli') }, env,
+    ),
+    (error) => error.code === 'UNSUPPORTED_ENVIRONMENT' && error.details.reason === 'cli-not-found',
+  );
+});
+
 test('Claude preflight pins platform, CLI identity, default config, and account fingerprint', (t) => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-surface-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -252,7 +306,7 @@ test('Claude preflight pins platform, CLI identity, default config, and account 
   );
 });
 
-test('Claude preflight measures a newer build once and reuses its owner-only cache', (t) => {
+test('Claude preflight records truthful option checks, refreshes stale labels, and reuses its cache', (t) => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-measure-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const cli = path.join(root, 'claude');
@@ -286,19 +340,39 @@ test('Claude preflight measures a newer build once and reuses its owner-only cac
   const env = { PATH: '/bin', TRANSMOGRIFY_STATE_DIR: state };
   const first = surface.preflight({ claudeBin: cli }, env);
   assert.equal(first.cliVersion, '2.1.259');
-  assert.equal(first.cliMeasurement.source, 'live-probe');
+  assert.equal(first.cliMeasurement.source, 'vendor-observations-and-option-checks');
   assert.deepEqual(calls.map((args) => args[0]), [
     '--version', '--version', 'auth', 'agents', '--settings', '-p', 'auth',
   ]);
   const recordPath = measuredBuildFile(digest, env);
   assert.equal(fs.statSync(recordPath).mode & 0o777, 0o600);
-  assert.equal(JSON.parse(fs.readFileSync(recordPath, 'utf8')).result, 'good');
+  const measurement = JSON.parse(fs.readFileSync(recordPath, 'utf8'));
+  assert.equal(measurement.result, 'good');
+  assert.equal(measurement.probes.at(-1).name, 'follow-up-options');
   assert.equal(isVerifiedCliBuild('2.1.259', digest, {
     cliPath: fs.realpathSync(cli), env,
   }), true);
 
+  fs.writeFileSync(recordPath, JSON.stringify({
+    ...measurement,
+    source: 'live-probe',
+    probes: measurement.probes.map((probe) => probe.name === 'follow-up-options'
+      ? { ...probe, name: 'follow-up-acknowledgment' }
+      : probe),
+  }));
+  const beforeRefresh = calls.length;
   surface.preflight({ claudeBin: cli }, env);
-  assert.deepEqual(calls.slice(7).map((args) => args[0]), ['--version', 'auth']);
+  assert.deepEqual(calls.slice(beforeRefresh).map((args) => args[0]), [
+    '--version', '--version', 'auth', 'agents', '--settings', '-p', 'auth',
+  ]);
+  assert.equal(
+    JSON.parse(fs.readFileSync(recordPath, 'utf8')).source,
+    'vendor-observations-and-option-checks',
+  );
+
+  const beforeReuse = calls.length;
+  surface.preflight({ claudeBin: cli }, env);
+  assert.deepEqual(calls.slice(beforeReuse).map((args) => args[0]), ['--version', 'auth']);
 });
 
 test('Claude preflight rejects below-minimum builds and names a cached failed probe', (t) => {

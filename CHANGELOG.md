@@ -6,6 +6,18 @@
   then packet again. The exchange preamble had been prepended after the
   provenance box was rendered, burying the `╭─ Transmogrify` block that names the
   parent session.
+- Classify an absent Claude Code executable as an installable setup need and
+  report permission failures as a non-executable CLI instead of falling into
+  generic manual recovery.
+- Identify Claude and Codex desktop hosts from verified bundle identifiers at
+  relocated, system, or per-user app paths. Export the same read-only bundle
+  inventory and bundled CLI paths for later doctor and attachment reuse.
+- Describe newer Claude CLI measurement as vendor observations plus option
+  checks. The local follow-up acknowledgment fixture is no longer presented as
+  a live vendor probe.
+- Make the published start handoff verify Git, Node.js 20 or newer, npm, a
+  committed repository, and a visibly resolved repository root before it
+  creates any preparation directory.
 
 ## 0.6.0
 

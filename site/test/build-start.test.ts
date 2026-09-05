@@ -1,10 +1,52 @@
 import assert from 'node:assert/strict';
-import { describe, test } from 'node:test';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { describe, test, type TestContext } from 'node:test';
 
 import { renderStart } from '../scripts/build-start.mjs';
 import setupPlan from '../../scripts/lib/setup-plan.js';
 
 const { IDE_CONTEXT, TERMINAL_CONTEXT, UNSUPPORTED_CONTEXT } = setupPlan;
+
+function renderedPrerequisiteBlock() {
+  const source = renderStart({ releaseCommit: '1'.repeat(40), version: '0.2.0' });
+  const firstBashBlock = /```bash\n([\s\S]*?)\n\s*```/.exec(source);
+  assert.ok(firstBashBlock, 'the generated handoff has a prerequisite shell block');
+  return firstBashBlock[1].replace(/^ {3}/gm, '');
+}
+
+function executable(file: string, body = '#!/bin/sh\nexit 0\n') {
+  writeFileSync(file, body, { mode: 0o700 });
+}
+
+function runPrerequisites(t: TestContext, options: {
+  cwd: string;
+  commands?: Record<string, string>;
+}) {
+  const fixture = mkdtempSync(join(tmpdir(), 'transmogrify-start-prerequisites-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const bin = join(fixture, 'bin');
+  const marker = join(fixture, 'preparation-reached');
+  if (options.commands) {
+    mkdirSync(bin, { mode: 0o700 });
+    for (const [name, body] of Object.entries(options.commands)) executable(join(bin, name), body);
+  }
+  const result = spawnSync('/bin/bash', ['-c', [
+    renderedPrerequisiteBlock(),
+    'printf reached > "$PREPARATION_MARKER"',
+  ].join('\n')], {
+    cwd: options.cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: options.commands ? bin : process.env.PATH,
+      PREPARATION_MARKER: marker,
+    },
+  });
+  return { result, preparationReached: existsSync(marker) };
+}
 
 describe('renderStart', () => {
   test('disables installation when no public release commit is configured', () => {
@@ -38,6 +80,84 @@ describe('renderStart', () => {
     assert.match(source, /\.claude\/skills\/transmogrify/);
     assert.match(source, /--target all \\\n\s+--explain/);
     assert.doesNotMatch(source, /git clone|origin main/);
+  });
+
+  test('checks prerequisites before creating any Transmogrify path', () => {
+    const source = renderStart({ releaseCommit: '1'.repeat(40), version: '0.2.0' });
+    const prerequisites = source.indexOf('command -v git');
+    const preparation = source.indexOf('install -d -m 700');
+    assert.ok(prerequisites >= 0 && prerequisites < preparation);
+    assert.match(source, /command -v node/);
+    assert.match(source, /command -v npm/);
+    assert.match(source, /major >= 20/);
+    assert.match(source, /git rev-parse --verify HEAD/);
+    assert.match(source, /REPO_ROOT="\$\(git rev-parse --show-toplevel\)"/);
+    assert.match(source, /\n\s+export REPO_ROOT\n/);
+    assert.doesNotMatch(source, /export REPO_ROOT="\$\(git rev-parse --show-toplevel\)"/);
+  });
+
+  test('stops before preparation outside a Git repository', (t) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'transmogrify-start-no-repo-'));
+    t.after(() => rmSync(cwd, { recursive: true, force: true }));
+    const { result, preparationReached } = runPrerequisites(t, { cwd });
+    assert.notEqual(result.status, 0);
+    assert.equal(preparationReached, false);
+    assert.match(result.stderr, /Git repository with at least one commit/);
+  });
+
+  test('stops before preparation in an unborn Git repository', (t) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'transmogrify-start-unborn-'));
+    t.after(() => rmSync(cwd, { recursive: true, force: true }));
+    assert.equal(spawnSync('git', ['init'], { cwd }).status, 0);
+    const { result, preparationReached } = runPrerequisites(t, { cwd });
+    assert.notEqual(result.status, 0);
+    assert.equal(preparationReached, false);
+    assert.match(result.stderr, /Git repository with at least one commit/);
+  });
+
+  test('stops before preparation when Node.js is missing', (t) => {
+    const { result, preparationReached } = runPrerequisites(t, {
+      cwd: tmpdir(),
+      commands: { git: '#!/bin/sh\nexit 0\n', npm: '#!/bin/sh\nexit 0\n' },
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(preparationReached, false);
+    assert.match(result.stderr, /needs Node\.js 20 or newer/);
+  });
+
+  test('stops before preparation when Node.js is below the minimum', (t) => {
+    const { result, preparationReached } = runPrerequisites(t, {
+      cwd: tmpdir(),
+      commands: {
+        git: '#!/bin/sh\nexit 0\n',
+        node: '#!/bin/sh\nexit 1\n',
+        npm: '#!/bin/sh\nexit 0\n',
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(preparationReached, false);
+    assert.match(result.stderr, /Upgrade Node\.js/);
+  });
+
+  test('stops before preparation when repository-root resolution fails visibly', (t) => {
+    const { result, preparationReached } = runPrerequisites(t, {
+      cwd: tmpdir(),
+      commands: {
+        git: [
+          '#!/bin/sh',
+          'if test "$1" = rev-parse && test "$2" = --verify; then exit 0; fi',
+          'printf "%s\\n" "root resolution failed at Git boundary" >&2',
+          'exit 2',
+          '',
+        ].join('\n'),
+        node: '#!/bin/sh\nexit 0\n',
+        npm: '#!/bin/sh\nexit 0\n',
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(preparationReached, false);
+    assert.match(result.stderr, /root resolution failed at Git boundary/);
+    assert.match(result.stderr, /repository root could not be resolved/);
   });
 
   test('uses the explaining doctor and guided setup one consented step at a time', () => {

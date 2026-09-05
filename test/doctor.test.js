@@ -15,6 +15,7 @@ const {
 const {
   PINNED_CLI_SHA256,
   PINNED_CLI_VERSION,
+  createClaudeSurface,
 } = require('../scripts/lib/claude-surface');
 const {
   beginLaneOperation,
@@ -212,6 +213,36 @@ test('doctor creates the outside-repository registry and skips unrequested provi
     'thread/name/set',
     'thread/archive',
   ]);
+});
+
+test('doctor turns real missing Claude discovery into the install plan', async (t) => {
+  const fixture = createRepoWithSeat(t);
+  const result = await main([
+    '--repo-root', fixture.repoRoot,
+    '--target', 'claude',
+    '--explain',
+  ], { ...fixture.env, PATH: '/empty' }, {
+    createClaudeSurface: () => createClaudeSurface({
+      platform: 'darwin',
+      arch: 'arm64',
+      execFileSync(executable, args) {
+        assert.equal(executable, '/usr/bin/which');
+        assert.deepEqual(args, ['claude']);
+        const error = new Error('not found');
+        error.status = 1;
+        throw error;
+      },
+    }),
+    detectHostContext: () => ({
+      app: 'shell',
+      surface: 'terminal',
+      platform: { os: 'darwin', arch: 'arm64', claudeLanesSupported: true },
+    }),
+  });
+
+  assert.equal(result.providers.claude.setup.reason, 'cli-not-found');
+  assert.equal(result.setup.plan.steps[0].what, 'Install Claude Code.');
+  assert.match(result.setup.plan.steps[0].command, /--install-claude-cli$/);
 });
 
 test('doctor turns a measured Desktop attachment into the native-visibility receipt', async (t) => {
