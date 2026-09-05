@@ -25,6 +25,7 @@ const {
   cleanupStatus,
   provisionSeat,
   removeProvisionedEntries,
+  validateProvisionedEntries,
   verifyLaneSeat,
 } = require('./worktree');
 
@@ -85,15 +86,30 @@ function writePacket(repoRoot, seat, packet) {
   const paths = exchangePaths(provisioned.path);
   let descriptor;
   try {
-    descriptor = fs.openSync(paths.packet,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC |
+    const existingReceipt = provisioned.packetReceipt;
+    if (existingReceipt !== undefined &&
+        (!existingReceipt || typeof existingReceipt !== 'object' ||
+          Object.keys(existingReceipt).sort().join(',') !== 'dev,ino' ||
+          !Number.isSafeInteger(existingReceipt.dev) || existingReceipt.dev < 0 ||
+          !Number.isSafeInteger(existingReceipt.ino) || existingReceipt.ino < 0)) {
+      throw coded('SEAT_MISMATCH', 'lane packet has an invalid creation receipt');
+    }
+    descriptor = fs.openSync(paths.packet, existingReceipt
+      ? fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0)
+      : fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
         (fs.constants.O_NOFOLLOW || 0), 0o600);
     const stat = fs.fstatSync(descriptor);
     if (!stat.isFile() || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
       throw coded('SEAT_MISMATCH', 'lane packet path is not an owner-written regular file');
     }
+    if (existingReceipt &&
+        (stat.dev !== existingReceipt.dev || stat.ino !== existingReceipt.ino)) {
+      throw coded('SEAT_MISMATCH', 'lane packet no longer matches its creation receipt');
+    }
     fs.fchmodSync(descriptor, 0o600);
+    if (existingReceipt) fs.ftruncateSync(descriptor, 0);
     fs.writeFileSync(descriptor, packet, { encoding: 'utf8' });
+    provisioned.packetReceipt = { dev: stat.dev, ino: stat.ino };
   } catch (error) {
     if (error.code === 'SEAT_MISMATCH') throw error;
     throw coded('SEAT_MISMATCH', 'lane packet could not be written safely');
@@ -217,8 +233,10 @@ function safeRelativePath(file) {
 }
 
 function isProvisioned(file, provisioned = []) {
+  const names = validateProvisionedEntries(provisioned).entries.map((entry) =>
+    typeof entry === 'string' ? entry : entry.name);
   return file === '.transmogrify' || file.startsWith('.transmogrify/') ||
-    provisioned.some((entry) => file === entry || file.startsWith(`${entry}/`));
+    names.some((entry) => file === entry || file.startsWith(`${entry}/`));
 }
 
 function changedFiles(seat) {
@@ -315,9 +333,9 @@ function commitMatches(seat, details) {
   return { committed: true, head };
 }
 
-function ensurePrivateDirectory(directory) {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const stat = fs.lstatSync(directory);
+function ensurePrivateDirectory(directory, fsApi = fs) {
+  fsApi.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const stat = fsApi.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 ||
       (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
     throw coded('HARVEST_MISMATCH', 'durable harvest directory is not owner-only');
@@ -328,20 +346,79 @@ function durableHandbackPath(laneId, env) {
   return path.join(stateRoot(env), 'harvests', laneId, 'handback.md');
 }
 
-function copyHandback(file, text) {
-  ensurePrivateDirectory(path.dirname(path.dirname(file)));
-  ensurePrivateDirectory(path.dirname(file));
-  const temporary = path.join(path.dirname(file), `.handback-${process.pid}-${crypto.randomUUID()}`);
+function immutableHandbackPath(laneId, digest, env) {
+  return path.join(stateRoot(env), 'harvests', laneId, `${digest}.md`);
+}
+
+function fsyncDirectory(directory, fsApi) {
+  const descriptor = fsApi.openSync(directory, 'r');
+  try { fsApi.fsyncSync(descriptor); } finally { fsApi.closeSync(descriptor); }
+}
+
+function writeImmutableHandback(file, text, expectedSha256, fsApi) {
+  let descriptor;
   try {
-    fs.writeFileSync(temporary, text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    fs.chmodSync(temporary, 0o600);
-    fs.renameSync(temporary, file);
+    descriptor = fsApi.openSync(file, 'wx', 0o600);
+    fsApi.writeFileSync(descriptor, text, 'utf8');
+    fsApi.fsyncSync(descriptor);
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const existing = fsApi.readFileSync(file);
+    if (sha256(existing) !== expectedSha256) {
+      throw coded('HARVEST_MISMATCH', 'immutable handback copy digest differs');
+    }
+    return;
   } finally {
-    try { fs.unlinkSync(temporary); } catch {}
+    if (descriptor !== undefined) fsApi.closeSync(descriptor);
   }
-  const copied = fs.readFileSync(file);
-  if (sha256(copied) !== sha256(text)) throw coded('HARVEST_MISMATCH', 'durable handback copy digest differs');
-  return sha256(copied);
+  fsyncDirectory(path.dirname(file), fsApi);
+}
+
+function atomicWriteHandback(file, text, fsApi) {
+  const temporary = path.join(path.dirname(file), `.handback-${process.pid}-${crypto.randomUUID()}`);
+  let descriptor;
+  try {
+    descriptor = fsApi.openSync(temporary, 'wx', 0o600);
+    fsApi.writeFileSync(descriptor, text, 'utf8');
+    fsApi.fsyncSync(descriptor);
+  } catch (error) {
+    try { fsApi.unlinkSync(temporary); } catch {}
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fsApi.closeSync(descriptor);
+  }
+  fsApi.renameSync(temporary, file);
+  fsyncDirectory(path.dirname(file), fsApi);
+}
+
+function copyHandback(file, immutableFile, text, fsApi = fs) {
+  ensurePrivateDirectory(path.dirname(path.dirname(file)), fsApi);
+  ensurePrivateDirectory(path.dirname(file), fsApi);
+  const expectedSha256 = sha256(text);
+  writeImmutableHandback(immutableFile, text, expectedSha256, fsApi);
+  atomicWriteHandback(file, text, fsApi);
+  const latest = fsApi.readFileSync(file);
+  const immutable = fsApi.readFileSync(immutableFile);
+  if (sha256(latest) !== expectedSha256 || sha256(immutable) !== expectedSha256) {
+    throw coded('HARVEST_MISMATCH', 'durable handback copy digest differs');
+  }
+  return expectedSha256;
+}
+
+function verifyHandbackCopies(details, fsApi = fs) {
+  let latest;
+  let immutable;
+  try {
+    latest = fsApi.readFileSync(details.durableHandback);
+    immutable = fsApi.readFileSync(details.immutableHandback);
+  } catch {
+    throw coded('HARVEST_MISMATCH', 'durable handback copy could not be verified');
+  }
+  if (details.copiedSha256 !== details.handbackSha256 ||
+      sha256(latest) !== details.handbackSha256 ||
+      sha256(immutable) !== details.handbackSha256) {
+    throw coded('HARVEST_MISMATCH', 'durable handback copy digest differs');
+  }
 }
 
 function quoteCommand(value) {
@@ -387,9 +464,13 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
     const seat = verifyLaneSeat(options.repoRoot, lane.seat);
     let operation = pendingOperationForLane(options.repoRoot, lane.laneId, env);
     const observation = dependencies.observe ? await dependencies.observe(lane) : null;
-    if (['executing', 'waiting'].includes(observation?.phase) ||
-        (!observation && lane.state === 'active')) {
-      throw coded('TARGET_ACTIVE', 'lane still has an active turn', { laneId: lane.laneId });
+    if (!['idle', 'stopped', 'completed', 'retired'].includes(observation?.phase)) {
+      const nextReadOnlyStep = `lane.js status --lane ${lane.laneId}`;
+      throw coded(
+        'TARGET_ACTIVE',
+        `lane is not confirmed quiescent; run ${nextReadOnlyStep}`,
+        { laneId: lane.laneId, nextReadOnlyStep, ownerAction: nextReadOnlyStep },
+      );
     }
     if (operation && operation.type !== 'harvest') {
       throw coded('PENDING_OPERATION', `lane has unresolved ${operation.type} operation`, {
@@ -427,6 +508,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
           commitTitleSha256: sha256(handback.title),
           commitMessageSha256: sha256(message.trimEnd()),
           durableHandback: durableHandbackPath(lane.laneId, env),
+          immutableHandback: immutableHandbackPath(lane.laneId, sha256(handback.text), env),
         },
       }, env);
     } else if (operation.details.commit !== (options.commit === true) ||
@@ -478,10 +560,20 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
           state: 'copying', details: operation.details,
         }, env);
       }
-      const copiedSha256 = copyHandback(operation.details.durableHandback, handback.text);
+      const copiedSha256 = copyHandback(
+        operation.details.durableHandback,
+        operation.details.immutableHandback,
+        handback.text,
+        dependencies.fs || fs,
+      );
       operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
         state: 'copied', details: { ...operation.details, copiedSha256 },
       }, env);
+      if (dependencies.afterCopy) await dependencies.afterCopy(operation);
+    }
+
+    if (['copied', 'cleanupDispatching', 'cleanupComplete'].includes(operation.state)) {
+      verifyHandbackCopies(operation.details, dependencies.fs || fs);
     }
 
     if (operation.details.cleanupProvisioned &&
@@ -514,9 +606,11 @@ module.exports = {
   MAX_HANDBACK_BYTES,
   REQUIRED_SECTIONS,
   changedFiles,
+  copyHandback,
   exchangePaths,
   exchangePreamble,
   harvestLane,
+  immutableHandbackPath,
   parseHandback,
   prependExchangePreamble,
   readHandback,

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 (in progress)
+
+- Receipt every created seat provision and refuse automatic cleanup when an
+  entry was replaced, gained unexpected output, or came from a version 0.6.0
+  name-only record.
+- Require an affirmative quiescent provider observation before harvest.
+- Fsync durable handbacks before journaling them as copied and retain one
+  immutable content-addressed copy for every distinct harvested handback.
+
 ## 0.6.0
 
 - A Claude lane spawned by a measured CLI persists the same exact runtime

@@ -11,12 +11,19 @@ const {
   exchangePaths,
   exchangePreamble,
   harvestLane,
+  immutableHandbackPath,
   parseHandback,
   readHandback,
   writePacket,
 } = require('../scripts/lib/exchange');
+const { phaseFields } = require('../scripts/lib/output-schema');
 const { listOperations, registerLane } = require('../scripts/lib/state');
-const { cleanupStatus, createManagedSeat } = require('../scripts/lib/worktree');
+const {
+  cleanupStatus,
+  createManagedSeat,
+  plannedProvisionedEntries,
+  verifySeat,
+} = require('../scripts/lib/worktree');
 const { createRepoWithSeat } = require('./helpers/repo-fixture');
 
 function handback(overrides = {}) {
@@ -108,12 +115,48 @@ test('handback reads are bounded and refuse oversize files', (t) => {
   assert.throws(() => readHandback(fixture.seat.path), { code: 'HARVEST_MISMATCH' });
 });
 
+test('writePacket refuses an unreceipted packet and retries only the same inode', (t) => {
+  const fixture = createRepoWithSeat(t);
+  const seat = createManagedSeat(fixture.repoRoot, fixture.worktreesRoot, crypto.randomUUID());
+  const packet = exchangePaths(seat.path).packet;
+  fs.writeFileSync(packet, 'unowned packet\n');
+  assert.throws(() => writePacket(fixture.repoRoot, seat, 'replacement\n'), {
+    code: 'SEAT_MISMATCH',
+  });
+  assert.equal(fs.readFileSync(packet, 'utf8'), 'unowned packet\n');
+
+  fs.unlinkSync(packet);
+  const first = writePacket(fixture.repoRoot, seat, 'first\n');
+  const firstStat = fs.statSync(packet);
+  const retry = writePacket(fixture.repoRoot, first.seat, 'second\n');
+  const retryStat = fs.statSync(packet);
+  assert.deepEqual(retry.seat.packetReceipt, { dev: firstStat.dev, ino: firstStat.ino });
+  assert.equal(retryStat.ino, firstStat.ino);
+  assert.equal(fs.readFileSync(packet, 'utf8'), 'second\n');
+});
+
+test('writePacket refuses a pre-existing exchange directory in an external seat', (t) => {
+  const fixture = createRepoWithSeat(t);
+  const exchange = exchangePaths(fixture.seat).directory;
+  fs.mkdirSync(exchange);
+  fs.writeFileSync(path.join(exchange, 'external-output.txt'), 'preserve me\n');
+  const seat = {
+    ...verifySeat(fixture.repoRoot, fixture.seat, fixture.worktreesRoot),
+    provisioned: plannedProvisionedEntries(fixture.repoRoot),
+  };
+
+  assert.throws(() => writePacket(fixture.repoRoot, seat, 'packet\n'), {
+    code: 'SEAT_IDENTITY_MISMATCH',
+  });
+  assert.equal(fs.readFileSync(path.join(exchange, 'external-output.txt'), 'utf8'), 'preserve me\n');
+});
+
 test('harvest reports a missing handback without opening a journal', async (t) => {
   const fixture = managedLane(t);
   const result = await harvestLane({
     repoRoot: fixture.repoRoot,
     laneId: fixture.lane.laneId,
-  }, fixture.env, { observe: async () => ({ phase: 'idle' }) });
+  }, fixture.env, { observe: async () => phaseFields('codex', 'idle') });
   assert.equal(result.handback, 'missing');
   assert.equal(result.handbackSha256, null);
   assert.equal(result.retireCommand, null);
@@ -132,7 +175,7 @@ test('harvest commits reviewed changes, excludes provisions, and copies a matchi
     repoRoot: fixture.repoRoot,
     laneId: fixture.lane.laneId,
     commit: true,
-  }, fixture.env, { observe: async () => ({ phase: 'idle' }) });
+  }, fixture.env, { observe: async () => phaseFields('codex', 'idle') });
 
   assert.equal(result.handback, 'present');
   assert.deepEqual(result.changedFiles, [':(exclude)literal.txt', 'feature.txt']);
@@ -159,15 +202,37 @@ test('harvest commits reviewed changes, excludes provisions, and copies a matchi
   ], { encoding: 'utf8' }), /literal pathspec/);
 });
 
-test('harvest refuses an active turn before opening its journal', async (t) => {
+test('harvest refuses every phase that is not affirmatively quiescent', async (t) => {
   const fixture = managedLane(t, { state: 'active' });
   fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
-  await assert.rejects(() => harvestLane({
+  for (const observation of [
+    phaseFields('codex', 'executing'),
+    phaseFields('claude', 'waiting'),
+    phaseFields('codex', 'unknown'),
+    undefined,
+  ]) {
+    await assert.rejects(() => harvestLane({
+      repoRoot: fixture.repoRoot,
+      laneId: fixture.lane.laneId,
+      commit: false,
+    }, fixture.env, observation === undefined ? {} : {
+      observe: async () => observation,
+    }), (error) => error.code === 'TARGET_ACTIVE' &&
+      error.details.nextReadOnlyStep === `lane.js status --lane ${fixture.lane.laneId}`);
+  }
+  assert.equal(listOperations(fixture.repoRoot, fixture.env).filter((entry) => entry.type === 'harvest').length, 0);
+});
+
+test('harvest accepts an idle provider observation', async (t) => {
+  const fixture = managedLane(t);
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  const result = await harvestLane({
     repoRoot: fixture.repoRoot,
     laneId: fixture.lane.laneId,
     commit: false,
-  }, fixture.env, { observe: async () => ({ phase: 'executing' }) }), { code: 'TARGET_ACTIVE' });
-  assert.equal(listOperations(fixture.repoRoot, fixture.env).filter((entry) => entry.type === 'harvest').length, 0);
+    cleanupProvisioned: false,
+  }, fixture.env, { observe: async () => phaseFields('codex', 'idle') });
+  assert.equal(result.handback, 'present');
 });
 
 test('harvest recovers a commit completed before its journal and durable copy', async (t) => {
@@ -180,7 +245,7 @@ test('harvest recovers a commit completed before its journal and durable copy', 
     commit: true,
     cleanupProvisioned: false,
   }, fixture.env, {
-    observe: async () => ({ phase: 'idle' }),
+    observe: async () => phaseFields('codex', 'idle'),
     afterCommit: async () => { throw new Error('simulated operator crash'); },
   }), /simulated operator crash/);
   const pending = listOperations(fixture.repoRoot, fixture.env)
@@ -192,11 +257,123 @@ test('harvest recovers a commit completed before its journal and durable copy', 
     laneId: fixture.lane.laneId,
     commit: true,
     cleanupProvisioned: false,
-  }, fixture.env);
+  }, fixture.env, { observe: async () => phaseFields('codex', 'idle') });
   assert.equal(recovered.handback, 'present');
   assert.equal(execFileSync('git', ['-C', fixture.seat.path, 'rev-list', '--count', 'HEAD'], {
     encoding: 'utf8',
   }).trim(), '2');
   assert.equal(listOperations(fixture.repoRoot, fixture.env)
     .find((entry) => entry.operationId === pending.operationId).state, 'complete');
+});
+
+test('durable handback fsyncs before rename and fsyncs the directory', async (t) => {
+  const fixture = managedLane(t);
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  const calls = [];
+  const descriptorKinds = new Map();
+  const recordingFs = new Proxy(fs, {
+    get(target, property) {
+      if (property === 'openSync') return (file, flags, mode) => {
+        const descriptor = target.openSync(file, flags, mode);
+        descriptorKinds.set(descriptor, flags === 'r' ? 'directory' : 'file');
+        calls.push(`open:${descriptorKinds.get(descriptor)}`);
+        return descriptor;
+      };
+      if (property === 'writeFileSync') return (destination, ...args) => {
+        if (typeof destination === 'number') calls.push('write:file');
+        return target.writeFileSync(destination, ...args);
+      };
+      if (property === 'fsyncSync') return (descriptor) => {
+        calls.push(`fsync:${descriptorKinds.get(descriptor)}`);
+        return target.fsyncSync(descriptor);
+      };
+      if (property === 'closeSync') return (descriptor) => {
+        calls.push(`close:${descriptorKinds.get(descriptor)}`);
+        descriptorKinds.delete(descriptor);
+        return target.closeSync(descriptor);
+      };
+      if (property === 'renameSync') return (...args) => {
+        calls.push('rename');
+        return target.renameSync(...args);
+      };
+      const value = target[property];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+
+  await harvestLane({
+    repoRoot: fixture.repoRoot,
+    laneId: fixture.lane.laneId,
+    commit: false,
+    cleanupProvisioned: false,
+  }, fixture.env, {
+    observe: async () => phaseFields('codex', 'idle'),
+    fs: recordingFs,
+  });
+
+  assert.deepEqual(calls, [
+    'open:file', 'write:file', 'fsync:file', 'close:file',
+    'open:directory', 'fsync:directory', 'close:directory',
+    'open:file', 'write:file', 'fsync:file', 'close:file', 'rename',
+    'open:directory', 'fsync:directory', 'close:directory',
+  ]);
+});
+
+test('a copied harvest never advances after its durable copy changes', async (t) => {
+  const fixture = managedLane(t);
+  fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
+  await assert.rejects(() => harvestLane({
+    repoRoot: fixture.repoRoot,
+    laneId: fixture.lane.laneId,
+    commit: false,
+    cleanupProvisioned: false,
+  }, fixture.env, {
+    observe: async () => phaseFields('codex', 'idle'),
+    afterCopy: async () => { throw new Error('simulated operator crash after copy'); },
+  }), /simulated operator crash after copy/);
+  const operation = listOperations(fixture.repoRoot, fixture.env)
+    .find((entry) => entry.type === 'harvest');
+  assert.equal(operation.state, 'copied');
+  fs.writeFileSync(operation.details.durableHandback, 'changed after copy\n');
+
+  await assert.rejects(() => harvestLane({
+    repoRoot: fixture.repoRoot,
+    laneId: fixture.lane.laneId,
+    commit: false,
+    cleanupProvisioned: false,
+  }, fixture.env, { observe: async () => phaseFields('codex', 'idle') }), {
+    code: 'HARVEST_MISMATCH',
+  });
+  assert.equal(listOperations(fixture.repoRoot, fixture.env)
+    .find((entry) => entry.operationId === operation.operationId).state, 'copied');
+});
+
+test('a second harvest keeps the first immutable handback copy', async (t) => {
+  const fixture = managedLane(t);
+  const handbackFile = exchangePaths(fixture.seat.path).handback;
+  const firstText = handback({ title: 'Preserve first durable handback' });
+  fs.writeFileSync(handbackFile, firstText);
+  const first = await harvestLane({
+    repoRoot: fixture.repoRoot,
+    laneId: fixture.lane.laneId,
+    commit: false,
+    cleanupProvisioned: false,
+  }, fixture.env, { observe: async () => phaseFields('codex', 'idle') });
+  const firstCopy = immutableHandbackPath(fixture.lane.laneId, first.handbackSha256, fixture.env);
+  assert.equal(fs.readFileSync(firstCopy, 'utf8'), firstText);
+
+  const secondText = handback({ title: 'Preserve second durable handback' });
+  fs.writeFileSync(handbackFile, secondText);
+  const second = await harvestLane({
+    repoRoot: fixture.repoRoot,
+    laneId: fixture.lane.laneId,
+    commit: false,
+    cleanupProvisioned: false,
+  }, fixture.env, { observe: async () => phaseFields('codex', 'idle') });
+  const secondCopy = immutableHandbackPath(fixture.lane.laneId, second.handbackSha256, fixture.env);
+  const latest = path.join(fixture.stateDir, 'harvests', fixture.lane.laneId, 'handback.md');
+  assert.notEqual(firstCopy, secondCopy);
+  assert.equal(fs.readFileSync(firstCopy, 'utf8'), firstText);
+  assert.equal(fs.readFileSync(secondCopy, 'utf8'), secondText);
+  assert.equal(fs.readFileSync(latest, 'utf8'), secondText);
 });
