@@ -1,5 +1,7 @@
 'use strict';
 
+const { commandEventResult, verifyCommandParent } = require('./state');
+
 // Codex lane retirement: the harvest receipt, the archive and its verification
 // against the archived-thread census, managed seat cleanup, and the settlement
 // of an unresolved first turn that only exact retirement may close.
@@ -148,12 +150,14 @@ function prepareRetirementOperation(options, lane, env) {
 function finishRetiredCleanup(options, lane, operation, harvestReceipt, env) {
   if (lane.seat?.managed !== true) {
     completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+      expectedRevision: operation.revision ?? 0, parentContext: options.parentContext,
       state: 'complete',
     }, env);
     return lane;
   }
   if (options.cleanupWorktree === false) {
     updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+      expectedRevision: operation.revision ?? 0,
       state: 'providerRetiredCleanupDeferred',
     }, env);
     return lane;
@@ -172,12 +176,14 @@ function finishRetiredCleanup(options, lane, operation, harvestReceipt, env) {
   try {
     const removed = removeManagedSeat(options.repoRoot, lane.laneId, harvestReceipt, env).lane;
     completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+      expectedRevision: operation.revision ?? 0, parentContext: options.parentContext,
       state: 'complete',
     }, env);
     return removed;
   } catch (error) {
     if (!isPermanentCleanupError(error)) {
       updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+        expectedRevision: operation.revision ?? 0,
         state: 'providerRetiredCleanupDeferred',
         details: { ...operation.details, cleanupRetryable: true },
       }, env);
@@ -188,6 +194,7 @@ function finishRetiredCleanup(options, lane, operation, harvestReceipt, env) {
       );
     }
     updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+      expectedRevision: operation.revision ?? 0,
       state: 'providerRetiredCleanupBlocked',
       details: { ...operation.details, cleanupBlocked: true },
     }, env);
@@ -226,11 +233,13 @@ async function settleUnresolvedSpawnForRetirement(options, lane, pending, env) {
     const observedAt = new Date().toISOString();
     if (recoveredTurnId) {
       completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+        expectedRevision: pending.revision ?? 0, parentContext: options.parentContext,
         state: 'complete',
         details: { ...pending.details, recoveredTurnId, postconditionObservedAt: observedAt },
       }, env);
     } else {
       completeLaneOperation(options.repoRoot, lane.laneId, pending.operationId, {
+        expectedRevision: pending.revision ?? 0, parentContext: options.parentContext,
         state: 'failed',
         details: {
           ...pending.details,
@@ -254,6 +263,11 @@ async function settleUnresolvedSpawnForRetirement(options, lane, pending, env) {
 // once, and accepts only an exact archived-listing row whose cwd matches the
 // seat. An unverified archive leaves the lane in archiveUnknown for recovery.
 async function retire(options, env = process.env) {
+  verifyCommandParent(options, env);
+  return commandEventResult(options, await retireOperation(options, env), env);
+}
+
+async function retireOperation(options, env = process.env) {
   const initial = ownedLane(options, env, 'read');
   const existingRetirement = pendingOperationForLane(options.repoRoot, initial.laneId, env);
   if (initial.state === 'worktreeRemoved' && !existingRetirement) return alreadyRetiredResult(initial);
@@ -280,6 +294,7 @@ async function retire(options, env = process.env) {
         lastVerifiedAt: new Date().toISOString(),
       }, env);
       ctx.operation = updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+        expectedRevision: ctx.operation.revision ?? 0,
         state: 'providerRetired',
       }, env);
       ctx.lane = finishRetiredCleanup(options, ctx.lane, ctx.operation, ctx.harvestReceipt, env);
@@ -335,6 +350,7 @@ async function admitCodexRetirement(ctx) {
   if (!recoveringRemovedSeat && !manuallyRemovedBlockedSeat) assertSeatIdentity(options, ctx.lane, env);
   if (manuallyRemovedBlockedSeat && pending.details.manualSeatRemoval?.acknowledged !== true) {
     pending = updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, pending.operationId, {
+      expectedRevision: pending.revision ?? 0,
       state: pending.state,
       details: {
         ...pending.details,
@@ -351,7 +367,7 @@ async function admitCodexRetirement(ctx) {
 function settleRetiredLane(ctx) {
   const { options, env, harvestReceipt } = ctx;
   if (ctx.lane.state === 'worktreeRemoved') {
-    completeLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { state: 'complete' }, env);
+    completeLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { expectedRevision: ctx.operation.revision ?? 0, parentContext: options.parentContext, state: 'complete' }, env);
     return alreadyRetiredResult(ctx.lane, {
       operationId: ctx.operation.operationId,
       receipt: { harvestedOutputSha256: harvestReceipt.outputSha256 },
@@ -376,6 +392,7 @@ function archiveUnknown(ctx, phase, error) {
   const { options, env } = ctx;
   ctx.lane = updateLane(options.repoRoot, ctx.lane.laneId, { state: 'archiveUnknown' }, env);
   updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+    expectedRevision: ctx.operation.revision ?? 0,
     state: 'unknown',
     details: {
       ...ctx.operation.details,
@@ -396,7 +413,7 @@ async function archiveThread(ctx, client) {
   if (ctx.lane.state === 'retireRequested' || ctx.lane.state === 'archiveUnknown') {
     const reconciled = await verifyArchived(client, ctx.lane, options);
     if (!reconciled) {
-      updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { state: 'unknown' }, env);
+      updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { expectedRevision: ctx.operation.revision ?? 0,  state: 'unknown' }, env);
       throw new TransmogrifyError('DELIVERY_UNKNOWN', 'prior archive delivery remains unverified');
     }
     return reconciled;
@@ -406,22 +423,25 @@ async function archiveThread(ctx, client) {
     ({ turn } = await inspectThread(client, ctx.lane));
   } catch (error) {
     completeLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+      expectedRevision: ctx.operation.revision ?? 0, parentContext: options.parentContext,
       state: 'notDelivered',
       details: { ...ctx.operation.details, failedBeforeProviderDispatchAt: new Date().toISOString() },
     }, env);
     throw error;
   }
   if (turn?.status === 'inProgress') {
-    completeLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { state: 'notDelivered' }, env);
+    completeLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, { expectedRevision: ctx.operation.revision ?? 0, parentContext: options.parentContext, state: 'notDelivered' }, env);
     throw new TransmogrifyError('TARGET_ACTIVE', 'refusing to retire a lane with an active newest turn');
   }
   ctx.lane = updateLane(options.repoRoot, ctx.lane.laneId, { state: 'retireRequested' }, env);
   ctx.operation = updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+    expectedRevision: ctx.operation.revision ?? 0,
     state: 'providerRequestDispatched',
   }, env);
   try {
     await client.call('thread/archive', { threadId: ctx.lane.providerId });
     ctx.operation = updatePendingLaneOperation(options.repoRoot, ctx.lane.laneId, ctx.operation.operationId, {
+      expectedRevision: ctx.operation.revision ?? 0,
       state: 'providerAcknowledged',
     }, env);
   } catch (error) {

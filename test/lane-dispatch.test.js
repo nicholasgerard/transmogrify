@@ -1,5 +1,10 @@
 'use strict';
 
+function currentRevision(repoRoot, operationId, env) {
+  return require('../scripts/lib/state').listOperations(repoRoot, env)
+    .find((operation) => operation.operationId === operationId)?.revision ?? 0;
+}
+
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -106,7 +111,7 @@ test('parent wait observes every child each round so a busy child cannot starve 
     },
   }, fixture.env);
   updateLane(fixture.repoRoot, laneB, { state: 'failed' }, fixture.env);
-  completeLaneOperation(fixture.repoRoot, laneB, operationId, { state: 'notDelivered' }, fixture.env);
+  completeLaneOperation(fixture.repoRoot, laneB, operationId, { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),  state: 'notDelivered' }, fixture.env);
 
   const result = await main([
     'wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '10000',
@@ -219,14 +224,12 @@ test('an unresolved first-turn spawn wakes the parent once and can be retired wi
   assert.equal(operations.find((operation) => operation.type === 'retire').state, 'complete');
   assert.equal(pendingOperationForLane(fixture.repoRoot, lane.laneId, fixture.env), null);
 
-  // The retirement was the parent's own command: its observation is recorded
-  // already acknowledged, so nothing wakes the parent for what it just did.
-  const third = await main(['wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '3000'], fixture.env)
-    .catch((error) => error);
-  assert.equal(third.code, 'NO_EVENT');
+  // Command completion publishes a pending event even without parent context.
+  const third = await main(['wait', '--parent-context-file', parentContext.file, '--repo-root', fixture.repoRoot, '--timeout-ms', '3000'], fixture.env);
+  assert.ok(third.events.some((event) => event.type === 'child.retired'));
   const children = await main(['children', '--parent-context-file', parentContext.file], fixture.env);
   assert.equal(children.children[0].state, 'archivedVerified');
-  assert.equal(children.children[0].unacknowledgedEvents, 0);
+  assert.equal(children.children[0].unacknowledgedEvents, 1);
 });
 
 test('a verified spawn whose parent event cannot be recorded reports the provider effect as verified', async (t) => {

@@ -113,8 +113,8 @@ const SCHEMAS = Object.freeze({
     mode: true, observation: true, observedAtOffset: true, deliveryTokenSha256: true,
     expectedTurnId: true, turnId: true,
   }),
-  interrupt: laneShape({ reconciled: true }),
-  stop: laneShape({ mode: true, alreadyStopped: true }),
+  interrupt: laneShape({ reconciled: true, eventSequence: true, ackCommand: true }),
+  stop: laneShape({ mode: true, alreadyStopped: true, eventSequence: true, ackCommand: true }),
   recover: laneShape({
     acknowledgedBy: true, inputReceiptSource: true, sameSessionId: true, sameJobId: true,
     sameBridgeId: true, executionEpoch: true, presentation: true,
@@ -124,6 +124,7 @@ const SCHEMAS = Object.freeze({
     handback: true, changedFiles: true, head: true, handbackSha256: true, retireCommand: true,
   },
   retire: laneShape({
+    eventSequence: true, ackCommand: true,
     archived: true, alreadyRetired: true, worktreeRemoved: true, reconciled: true, retired: true,
     harvestedOutputSha256: true, remoteArchived: true, localJobRemoved: true, localRemovalDeferred: true,
     provider: { unbound: true, stop: true, archive: true, localRemoval: true },
@@ -167,6 +168,7 @@ const SCHEMAS = Object.freeze({
     version: true, ok: true, operation: true, until: true,
     events: {
       schemaVersion: true, sequence: true, parentRef: true, dispatchId: true, type: true, kind: true,
+      wakeSuppressed: { reason: true, parentRef: true },
       terminal: true, observationFingerprint: true, occurredAt: true, eventId: true,
       child: { provider: true, laneId: true, projectKey: true },
       data: { state: true, status: true },

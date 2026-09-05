@@ -173,6 +173,7 @@ async function finalizeSpawn(options, env, surface, runtime, lane, operation, jo
     bridgeReceipt: bridgeReceipt(discovery),
     epoch: epochFromDiscovery(discovery, operation.operationId),
   }, env);
+  operation = pendingOperationForLane(options.repoRoot, lane.laneId, env);
   lane = updateRunningLane(options.repoRoot, lane, candidate, env, {
     lastVerifiedAt: new Date().toISOString(),
   });

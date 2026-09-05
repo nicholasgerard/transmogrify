@@ -557,6 +557,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
       if (operation.state === 'planned') {
         const staged = stageChanges(seat, details.changedFiles);
         operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+          expectedRevision: operation.revision ?? 0,
           state: 'staged', details: { ...operation.details, expectedTree: staged.tree },
         }, env);
       }
@@ -568,6 +569,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
           }
           if (operation.state === 'staged') {
             operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+              expectedRevision: operation.revision ?? 0,
               state: 'commitDispatching', details: operation.details,
             }, env);
           }
@@ -577,6 +579,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
           observed = commitMatches(seat, operation.details);
         }
         operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+          expectedRevision: operation.revision ?? 0,
           state: 'committed', details: { ...operation.details, head: observed.head },
         }, env);
       }
@@ -590,6 +593,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
     if (['planned', 'committed', 'copying'].includes(operation.state)) {
       if (operation.state !== 'copying') {
         operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+          expectedRevision: operation.revision ?? 0,
           state: 'copying', details: operation.details,
         }, env);
       }
@@ -600,6 +604,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
         dependencies.fs || fs,
       );
       operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+        expectedRevision: operation.revision ?? 0,
         state: 'copied', details: { ...operation.details, copiedSha256 },
       }, env);
       if (dependencies.afterCopy) await dependencies.afterCopy(operation);
@@ -620,11 +625,13 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
         ['copied', 'cleanupDispatching'].includes(operation.state)) {
       if (operation.state === 'copied') {
         operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+          expectedRevision: operation.revision ?? 0,
           state: 'cleanupDispatching', details: operation.details,
         }, env);
       }
       removeProvisionedEntries(seat);
       operation = updatePendingLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+        expectedRevision: operation.revision ?? 0,
         state: 'cleanupComplete', details: operation.details,
       }, env);
     }
@@ -633,6 +640,7 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
       const head = gitText(seat.path, ['rev-parse', '--verify', 'HEAD']).toLowerCase();
       const census = cleanupStatus(seat.path, seat.provisioned);
       operation = completeLaneOperation(options.repoRoot, lane.laneId, operation.operationId, {
+        expectedRevision: operation.revision ?? 0,
         state: 'complete',
         details: { ...operation.details, head, statusSha256: census.sha256, clean: census.clean },
       }, env);

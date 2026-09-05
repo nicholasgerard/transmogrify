@@ -1013,6 +1013,7 @@ function recordEventLocked(paths, installation, dispatch, options, data) {
     type: options.type,
     observationFingerprint: fingerprint,
     data,
+    ...(options.wakeSuppressed ? { wakeSuppressed: options.wakeSuppressed } : {}),
     occurredAt: new Date().toISOString(),
   };
   const event = { ...content, eventId: deterministicEventId(dispatch, content) };
@@ -1034,7 +1035,7 @@ function validateEvent(event, parentRef, expectedId = null, dispatch = null) {
   assertExactKeys(event, [
     'schemaVersion', 'eventId', 'sequence', 'parentRef', 'dispatchId', 'child', 'type',
     'observationFingerprint', 'data', 'occurredAt',
-  ], [], 'dispatch event');
+  ], ['wakeSuppressed'], 'dispatch event');
   assertExactKeys(event.child, ['provider', 'laneId', 'projectKey'], [], 'dispatch event child');
   if (event.schemaVersion !== VERSION || !UUID_PATTERN.test(event.eventId || '') ||
       (expectedId !== null && event.eventId !== expectedId) || event.parentRef !== parentRef ||
@@ -1047,6 +1048,7 @@ function validateEvent(event, parentRef, expectedId = null, dispatch = null) {
     throw new DispatchError('INVALID_LOCAL_STATE', 'dispatch event is invalid');
   }
   validateEventData(event.data, true);
+  if (event.wakeSuppressed !== undefined) validateWakeSuppression(event.wakeSuppressed, parentRef);
   if (dispatch !== null && (
     event.dispatchId !== dispatch.dispatchId || event.parentRef !== dispatch.parentRef ||
     event.child.provider !== dispatch.child.targetProvider ||
@@ -1090,6 +1092,28 @@ function ownedDispatchLocked(paths, installation, dispatchId) {
   ), installation, paths, dispatchId);
 }
 
+// Suppression changes delivery scheduling only; the immutable event remains
+// pending. Only the command holding the parent's actual context file can ask.
+function validateWakeSuppression(value, parentRef) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).length !== 2 || value.reason !== 'own-command' || value.parentRef !== parentRef) {
+    throw new DispatchError('INVALID_LOCAL_STATE', 'event wake suppression does not match its parent');
+  }
+}
+
+function commandWakeSuppression(options, dispatch, env) {
+  if (options.wakeSuppressed === undefined) return;
+  validateWakeSuppression(options.wakeSuppressed, dispatch.parentRef);
+  if (!options.parentContext?.file) {
+    throw new DispatchError('NOT_OWNED', 'wake suppression requires the parent context file');
+  }
+  const loaded = loadParentContext(options.parentContext.file, env);
+  if (loaded.parent.parentRef !== dispatch.parentRef ||
+      !sameParentIdentity(loaded.parent, options.parentContext.parent)) {
+    throw new DispatchError('NOT_OWNED', 'command parent does not match the dispatch parent');
+  }
+}
+
 // Record one child event for a dispatch. The caller's fingerprint is what makes
 // a retry idempotent: the same type, fingerprint, and data returns the existing
 // event rather than notifying the parent twice.
@@ -1103,6 +1127,7 @@ function recordEvent(options, env = process.env) {
   return withInstallationLock(env, (paths) => {
     const installation = installationRecord(paths);
     const dispatch = ownedDispatchLocked(paths, installation, options.dispatchId);
+    commandWakeSuppression(options, dispatch, env);
     return recordEventLocked(paths, installation, dispatch, options, data);
   });
 }

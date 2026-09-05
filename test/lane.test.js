@@ -1,5 +1,10 @@
 'use strict';
 
+function currentRevision(repoRoot, operationId, env) {
+  return require('../scripts/lib/state').listOperations(repoRoot, env)
+    .find((operation) => operation.operationId === operationId)?.revision ?? 0;
+}
+
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const test = require('node:test');
@@ -242,7 +247,7 @@ test('parent wait observes later children after an earlier terminal child was ac
       fixture.repoRoot,
       laneId,
       operationId,
-      { state: 'notDelivered' },
+      { expectedRevision: currentRevision(fixture.repoRoot, operationId, fixture.env),  state: 'notDelivered' },
       fixture.env,
     );
   }

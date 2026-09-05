@@ -336,7 +336,7 @@ async function watchOnce(context, values, env, state, dependencies = {}) {
   }
   const round = await observe(context, { ...values, dispatches: outstanding }, env, Date.now() + OBSERVATION_ROUND_MS);
   const events = listEvents(context, {}, env);
-  const fresh = events.filter((event) => WAKE_KINDS.has(event.kind) && !state.wakedEventIds.includes(event.eventId));
+  const fresh = events.filter((event) => WAKE_KINDS.has(event.kind) && !event.wakeSuppressed && !state.wakedEventIds.includes(event.eventId));
   const results = [];
   const markWaked = (event) => { state.wakedEventIds.push(event.eventId); delete state.wakeAttempts[event.eventId]; };
   if (fresh.length > 0) {

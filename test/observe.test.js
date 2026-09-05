@@ -1,7 +1,7 @@
 'use strict';
 
 // scripts/lib/observe.js: which observations only confirm the parent's own
-// completed command and are therefore recorded already acknowledged.
+// completed interrupt. Terminal events are never acknowledged by observation.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -34,25 +34,25 @@ function completedJournal(fixture, lane, type, ageMs) {
   return operation;
 }
 
-test('a completed retirement confirms child.retired however late the observation lands', (t) => {
+test('a completed retirement never implies parent acknowledgement at any age', (t) => {
   const fixture = createStateFixture(t);
   const lane = settledLane(fixture, 'codex-retired-late', 'worktreeRemoved');
   const retire = completedJournal(fixture, lane, 'retire', 3 * OWN_COMMAND_WINDOW_MS);
 
   const own = recentOwnCommand(fixture.repoRoot, lane.laneId, fixture.env, Date.now(), 'child.retired');
-  assert.equal(own?.operationId, retire.operationId);
+  assert.equal(own, null);
   // Only the matching terminal event is confirmed by an old journal.
   assert.equal(recentOwnCommand(fixture.repoRoot, lane.laneId, fixture.env, Date.now(), 'child.turn-completed'), null);
   assert.equal(recentOwnCommand(fixture.repoRoot, lane.laneId, fixture.env, Date.now(), 'child.stopped'), null);
 });
 
-test('a completed stop confirms child.stopped of any age, and an old interrupt confirms nothing', (t) => {
+test('a completed stop never implies acknowledgement, and an old interrupt confirms nothing', (t) => {
   const fixture = createStateFixture(t);
   const stopped = settledLane(fixture, 'claude-stopped-late', 'stopped');
   const stop = completedJournal(fixture, stopped, 'stop', 3 * OWN_COMMAND_WINDOW_MS);
   assert.equal(
     recentOwnCommand(fixture.repoRoot, stopped.laneId, fixture.env, Date.now(), 'child.stopped')?.operationId,
-    stop.operationId,
+    undefined,
   );
 
   const interrupted = settledLane(fixture, 'codex-interrupted-late', 'archivedVerified');

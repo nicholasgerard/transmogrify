@@ -114,11 +114,11 @@ the steer was addressed to and the turn the runtime confirmed).
 
 ### `interrupt`
 
-Lane envelope. `receipt`: `reconciled`.
+Lane envelope. `receipt`: `reconciled`, `eventSequence`, `ackCommand`.
 
 ### `stop`
 
-Lane envelope. `receipt`: `mode`, `alreadyStopped`.
+Lane envelope. `receipt`: `mode`, `alreadyStopped`, `eventSequence`, `ackCommand`.
 
 ### `recover`
 
@@ -136,11 +136,17 @@ the private harvest store before the journal completes.
 
 ### `retire`
 
-Lane envelope. `receipt`: `archived`, `alreadyRetired`, `worktreeRemoved`,
+Lane envelope. `receipt`: `eventSequence`, `ackCommand`, `archived`, `alreadyRetired`, `worktreeRemoved`,
 `reconciled`, `retired`, `harvestedOutputSha256`, `remoteArchived`,
 `localJobRemoved`, `localRemovalDeferred`, `provider` (`unbound`, `stop`,
 `archive`, `localRemoval`), `worktree` (`attempted`, `removed`, `deferred`,
 `blocked`).
+
+For a completed retire, stop, or interrupt with dispatch lineage,
+`eventSequence` identifies the pending command event and `ackCommand` is the
+exact `ack --through` command. Supplying the matching parent context suppresses
+only the wake. It never acknowledges the event. Interrupt events use
+`data.state: interrupted` to distinguish turn cancellation from session stop.
 
 ### `reconcile`
 
@@ -188,7 +194,7 @@ never printed.
 `sequence`, `parentRef`, `dispatchId`, `type`, `kind` (`progress`,
 `complete`, `attention`, `terminal`), `terminal`, `observationFingerprint`,
 `occurredAt`, `eventId`, `child` (`provider`, `laneId`, `projectKey`),
-`data` (`state`, `status`). `observed`: `dispatchId`, `laneId`, `phase`,
+`data` (`state`, `status`), optional `wakeSuppressed` (`reason`, `parentRef`). `observed`: `dispatchId`, `laneId`, `phase`,
 `eventType` for every child this call observed. `observerErrors`:
 `dispatchId`, `code`.
 

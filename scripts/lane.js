@@ -147,8 +147,8 @@ const OPERATION_OPTIONS = {
   steer: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin', 'timeout-ms']),
   status: new Set(['repo-root', 'lane', 'url', 'claude-bin', 'timeout-ms']),
   abandon: new Set(['repo-root', 'lane', 'reason']),
-  interrupt: new Set(['repo-root', 'lane', 'url', 'timeout-ms']),
-  stop: new Set(['repo-root', 'lane', 'claude-bin', 'timeout-ms',
+  interrupt: new Set(['parent-context-file', 'repo-root', 'lane', 'url', 'timeout-ms']),
+  stop: new Set(['parent-context-file', 'repo-root', 'lane', 'claude-bin', 'timeout-ms',
   ]),
   recover: new Set(['repo-root', 'lane', 'input', 'input-file', 'url', 'claude-bin', 'timeout-ms',
   ]),
@@ -156,6 +156,7 @@ const OPERATION_OPTIONS = {
     'repo-root', 'lane', 'url', 'claude-bin', 'timeout-ms', 'commit', 'no-provisioned-cleanup',
   ]),
   retire: new Set([
+    'parent-context-file',
     'repo-root', 'lane', 'url', 'claude-bin', 'private-archive',
     'no-cleanup-worktree', 'accept-manual-seat-removal', 'harvested-output-sha256', 'timeout-ms',
   ]),
@@ -711,7 +712,7 @@ async function main(argv, env = process.env) {
     if (!TARGETS.includes(values.target)) usage('spawn requires --target codex|claude');
     rejectForeignFlags(providerForTarget(values.target), values, 'spawns');
   }
-  const needsParent = ['spawn', 'children', 'wait', 'ack'].includes(operation);
+  const needsParent = ['spawn', 'children', 'wait', 'ack'].includes(operation) || Boolean(values['parent-context-file']);
   const parentContext = needsParent
     ? loadParentContext(values['parent-context-file'], env)
     : null;

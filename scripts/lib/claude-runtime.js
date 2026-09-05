@@ -9,6 +9,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { readOwnedText } = require('./record-guards');
 const {
   beginLaneOperation, completeLaneOperation, observeLaneStopped, pendingOperationForLane,
   projectPaths, requireOwnedLane, updateLane, updateOperation, updatePendingLaneOperation,
@@ -432,11 +433,11 @@ function operationForType(repoRoot, lane, type, env, details) {
 }
 
 function updatePending(repoRoot, laneId, operation, patch, env) {
-  return updatePendingLaneOperation(repoRoot, laneId, operation.operationId, patch, env);
+  return updatePendingLaneOperation(repoRoot, laneId, operation.operationId, { ...patch, expectedRevision: operation.revision ?? 0 }, env);
 }
 
 function completePending(repoRoot, laneId, operation, patch, env) {
-  return completeLaneOperation(repoRoot, laneId, operation.operationId, patch, env);
+  return completeLaneOperation(repoRoot, laneId, operation.operationId, { ...patch, expectedRevision: operation.revision ?? 0 }, env);
 }
 
 // Whether this operation still owns the lane's pending pointer. An emergency
@@ -450,13 +451,13 @@ function operationUsesPendingPointer(repoRoot, laneId, operation, env) {
 function updateOperationJournal(repoRoot, laneId, operation, patch, env) {
   return operationUsesPendingPointer(repoRoot, laneId, operation, env)
     ? updatePending(repoRoot, laneId, operation, patch, env)
-    : updateOperation(repoRoot, operation.operationId, patch, env);
+    : updateOperation(repoRoot, operation.operationId, { ...patch, expectedRevision: operation.revision ?? 0 }, env);
 }
 
 function completeOperationJournal(repoRoot, laneId, operation, patch, env) {
   return operationUsesPendingPointer(repoRoot, laneId, operation, env)
     ? completePending(repoRoot, laneId, operation, patch, env)
-    : updateOperation(repoRoot, operation.operationId, { ...patch, state: patch.state || 'complete' }, env);
+    : updateOperation(repoRoot, operation.operationId, { ...patch, expectedRevision: operation.revision ?? 0, state: patch.state || 'complete' }, env);
 }
 
 // Record a durable stop observation, leaving an already-stopped lane unchanged
@@ -486,17 +487,12 @@ function readDurableSpawnReceipt(repoRoot, lane, env) {
   if (lane.ownership.spawnIntent.stdoutPath !== expected) {
     throw new ClaudeTransmogrifyError('SPAWN_UNCERTAIN', 'Claude spawn stdout receipt path does not match its operation');
   }
-  let stat;
-  try { stat = fs.lstatSync(expected); } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
-  if (stat.isSymbolicLink() || !stat.isFile() ||
-      (typeof process.getuid === 'function' && stat.uid !== process.getuid()) ||
-      (stat.mode & 0o022) !== 0 || stat.size > 64 * 1024) {
+  const read = readOwnedText(expected, { maxBytes: 64 * 1024, modeMask: 0o077 });
+  if (read.status === 'missing') return null;
+  if (read.status !== 'ok' || read.value.includes('\0')) {
     throw new ClaudeTransmogrifyError('SPAWN_UNCERTAIN', 'Claude spawn stdout receipt is unsafe');
   }
-  return { stdout: fs.readFileSync(expected, 'utf8'), modifiedAt: stat.mtimeMs };
+  return { stdout: read.value, modifiedAt: read.modifiedAt };
 }
 
 // Delete the stdout and stderr receipts once the spawn is bound or proven not

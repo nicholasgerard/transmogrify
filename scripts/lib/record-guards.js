@@ -28,17 +28,28 @@ function assertTimestamp(value, label) {
 // the permission bits that must be clear (0o077 for owner-only, 0o022 for
 // not group- or world-writable). The outcome is data; callers map it to their
 // own error classes.
-function readOwnedJson(file, { maxBytes, modeMask }) {
+function readOwnedText(file, { maxBytes, modeMask = 0o077 }) {
   let descriptor;
   try {
-    descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    // O_NONBLOCK makes a FIFO rejectable by fstat without waiting for a writer.
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     const stat = fs.fstatSync(descriptor);
     if (!stat.isFile() || stat.size > maxBytes ||
         (typeof process.getuid === 'function' && stat.uid !== process.getuid()) ||
-        (stat.mode & modeMask) !== 0) {
-      return { status: 'unsafe' };
+        (stat.mode & modeMask) !== 0) return { status: 'unsafe' };
+    const buffer = Buffer.alloc(stat.size + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, bytes, buffer.length - bytes, null);
+      if (!count) break;
+      bytes += count;
     }
-    return { status: 'ok', value: JSON.parse(fs.readFileSync(descriptor, 'utf8')) };
+    if (bytes > stat.size) return { status: 'unsafe' };
+    const after = fs.fstatSync(descriptor);
+    if (after.size !== bytes || after.mtimeMs !== stat.mtimeMs ||
+        after.uid !== stat.uid || after.mode !== stat.mode) return { status: 'unsafe' };
+    const value = new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytes));
+    return { status: 'ok', value, modifiedAt: stat.mtimeMs };
   } catch (error) {
     if (error.code === 'ENOENT') return { status: 'missing', cause: error.message };
     return { status: 'invalid', cause: error.message };
@@ -47,4 +58,11 @@ function readOwnedJson(file, { maxBytes, modeMask }) {
   }
 }
 
-module.exports = { SHA256_PATTERN, UUID_PATTERN, assertExactKeys, assertTimestamp, readOwnedJson };
+function readOwnedJson(file, options) {
+  const read = readOwnedText(file, options);
+  if (read.status !== 'ok') return read;
+  try { return { ...read, value: JSON.parse(read.value) }; }
+  catch (error) { return { status: 'invalid', cause: error.message }; }
+}
+
+module.exports = { SHA256_PATTERN, UUID_PATTERN, assertExactKeys, assertTimestamp, readOwnedJson, readOwnedText };

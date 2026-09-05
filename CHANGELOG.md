@@ -12,6 +12,11 @@
   Use the shared endpoint selector across runtime consumers, bind wake delivery
   to its discovery receipt, and subscribe to each outstanding child's runtime.
   Read watcher records safely and signal only an affirmatively matched process.
+- Enforce journal transition graphs, immutable terminal receipts, and revision
+  checks. Read private state through bounded owner-only descriptors. Publish
+  lifecycle command events before journal completion and repair missing events
+  after crashes. Verified parent context suppresses only redundant wakes;
+  acknowledgement remains explicit.
 
 - Add GPT-6 Astra to Codex execution guidance for `deep` and `max-quality`,
   with a receipted GPT-5.6 Sol fallback on older live catalogs, explicit model

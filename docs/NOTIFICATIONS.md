@@ -79,16 +79,20 @@ Every layer is observation-based: the watcher and the wake never trust a
 child's own claim of completion. A child that says "done" is still observed
 through the provider before any event exists.
 
-An observation that only confirms the parent's own completed command (the
-lane's newest journal is a `retire`, `stop`, or `interrupt` finished within
-the last two minutes, or a completed `retire` or `stop` of any age when the
-event is the matching `child.retired` or `child.stopped`, since those happen
-only through the parent's command) is recorded already acknowledged: the
-command's own result was the parent's receipt, and waking it again for the
-same fact would cost a model turn for nothing. Every other event waits for the
-parent's `ack`, one at a time or `--through` the highest sequence a wake
-named.
+Retire, stop, and interrupt publish their command event before completing the
+operation journal. Every event remains pending until the parent acknowledges
+it. A command may suppress the redundant wake only when it received
+`--parent-context-file` and that registered context matches the dispatch's
+parent. The event records `wakeSuppressed: { reason: 'own-command', parentRef }`.
+The watcher skips its wake, while `wait` continues to return it. The command
+result includes the event sequence and the exact acknowledgement command.
 
+A command that crashes before printing has not acknowledged anything. Another
+process completing a lane without the parent context leaves the wake enabled.
+Observation repairs a completed journal's missing event with the same operation
+fingerprint. The two-minute correlation window applies only to idle and
+turn-completed observations after interrupt. Correlation never acknowledges an
+event.
 Two guards keep a continuous observer from racing the parent's own commands.
 A spawn journal still in a pre-dispatch state (`planned`, `seatReady`,
 `dispatching`, `providerRequestDispatched`, `providerCreated`) is left alone
@@ -165,9 +169,8 @@ calls) about 0.5 s; one Claude census (`claude agents --json --all`) about
 0.3 s; one Codex read (a fresh loopback connection plus two calls) well
 under 0.1 s; one registry or journal read about 20 ms. The levers, all in
 place: one wake per round instead of one per event; the parent's own
-completed commands acknowledged at observation; polling only while a child
-is working, with idle children read on the parent's nudge; settled children
-skipped; a short idle exit; one runtime measurement and one census per
+completed commands suppressing redundant wakes when parent association is verified; polling only while a child
+is working, with idle children read on the parent's nudge; settled children skipped after their terminal events are recorded and acknowledged; a short idle exit; one runtime measurement and one census per
 round instead of per child (`lib/observer-cache.js`, the memo follows the
 CLI file and ages out after ten minutes), and one shared loopback
 connection per round for Codex reads; a subscription to the app-server's
