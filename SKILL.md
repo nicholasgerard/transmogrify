@@ -8,7 +8,7 @@ metadata:
   verified_date: "2026-09-04"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server >=0.151.0"
-  verified_codex_desktop: "26.901.22334 (7746)"
+  verified_codex_desktop: "none; exact-build verification required"
   verified_codex_mobile: "ChatGPT for iOS 1.2026.230 (32543289983)"
   verified_claude_cli: "2.1.258"
   supported_claude_cli: ">=2.1.258"
@@ -86,7 +86,8 @@ node "$SKILL_ROOT/scripts/doctor.js" \
   --repo-root "$REPO_ROOT" --target all --explain
 ```
 
-The doctor is a read-only provider probe: it may create the empty registry,
+The doctor is a read-only provider probe with an attachment safety rollback:
+it may restore obsolete persisted login settings and create the empty registry,
 initialize a short-lived Codex client, test required methods against the nil
 thread ID, measure a Claude CLI build, and list Claude agents. It never starts,
 kills, restarts, steers a real turn, archives a real thread, removes, or adopts
@@ -146,16 +147,21 @@ mutations; a changed Desktop build disables private archival only.
 
 ### Attach Codex Desktop (macOS)
 
-Codex lanes stream live in Codex Desktop only while the app is a client of
-the runtime the lanes run on.
+Protocol-only lanes are the safe default. Live streaming in Codex Desktop is
+conditional on a verified app version and build, with attachment and thread
+resume through the relay measured on that exact build. The app must also be
+a client of the runtime the lanes run on.
 
 ```bash
 node "$SKILL_ROOT/scripts/desktop-attach.js" check
 node "$SKILL_ROOT/scripts/desktop-attach.js" ensure
 ```
 
-`check` is read-only and exits 0 only with a live attachment receipt.
-`ensure` reuses an existing attachment and can open Desktop after ensuring the
+`check` exits 0 only with a live attachment receipt on a verified build. It
+automatically rolls back obsolete persistence when the app changes. It never
+launches or quits the app. Reopen the app after rollback to restore its own runtime.
+`ensure` refuses unverified builds before any login change. On a verified build
+it reuses an existing attachment and can open Desktop after ensuring the
 selected runtime. A running unattached app must be restarted, which ends what
 it is doing; let the setup plan explain that and obtain explicit consent. If
 the owner declines, say live app updates will not work and use
@@ -163,10 +169,22 @@ the owner declines, say live app updates will not work and use
 Codex collaboration, Claude lanes, or attach from outside the app. If Desktop
 is attached elsewhere, select that reported endpoint and rerun the doctor.
 
-To persist attachment across Dock launches and updates, inspect `persist
+To persist attachment across Dock launches on the same verified build, inspect `persist
 --dry-run`, then let guided setup request consent for `--persist-attach`.
 `unpersist --authorize` reverses the marked login environment and LaunchAgent.
-Persistence never relaunches Desktop.
+Persistence never relaunches Desktop. Every check and login application compares
+the installed app with the receipt's app version and build. Changes pause live
+streaming, remove persistence, and restore the receipt's rollback value.
+Doctor and setup keep lanes ready with limitations and offer no persistence
+step for an unverified app. After a manual check of relay attachment and thread
+resume, record the exact installed pair with `desktop-attach.js persist
+--authorize --verified-build <version> <build>`. This records the owner's
+verification; it does not perform the manual check. A fresh exact-build
+verification can supersede a historical broken result.
+
+If the app reports `invalid transport in mcp_servers.codex_app` on resume, run
+`desktop-attach.js unpersist --authorize`, then reopen the app. Do not edit the
+user's configuration to fix the app's injected placeholder.
 
 Runtime selection is `--url`, `TRANSMOGRIFY_URL`, the live relay record, then
 legacy port 8843. A relay receipt includes its daemon socket as well as the

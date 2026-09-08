@@ -44,6 +44,7 @@ const ACTIONS = Object.freeze({
   openApp: 'open-app',
   relaunchApp: 'relaunch-app',
   persistAttach: 'persist-attach',
+  attachmentPaused: 'attachment-paused',
 });
 const KNOWN_ACTIONS = new Set(PLAN_ACTIONS);
 
@@ -278,6 +279,11 @@ async function runSetup(options, env = process.env, dependencies = {}) {
     const step = report?.setup?.plan?.steps?.[0];
     if (!step) return setupResult(report, options, completed);
     const action = step?.action;
+    if (action === 'attachment-paused') {
+      narration(step.what);
+      narration(step.why);
+      return setupResult(report, options, completed);
+    }
     if (!KNOWN_ACTIONS.has(action)) {
       return setupResult(report, options, completed, {
         ok: false,

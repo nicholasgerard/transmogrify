@@ -339,7 +339,9 @@ node "$SKILL_ROOT/scripts/desktop-attach.js" check
 node "$SKILL_ROOT/scripts/desktop-attach.js" ensure
 ```
 
-`check` is read-only and exits 0 only with a live attachment receipt. `ensure`
+`check` exits 0 only with a live attachment receipt on a verified app build.
+It rolls back obsolete persistence automatically without launching or quitting
+the app. `ensure`
 reuses an existing attachment as is, including one another operator set up;
 launches Desktop attached when it is not running; and quits and relaunches a
 running unattached Desktop only after the owner authorizes it. A relaunch ends
@@ -354,6 +356,17 @@ Desktop connection to the relay port and the live relay record's daemon socket.
 command, so an active relay on 8844 cannot be mistaken for the legacy endpoint
 on 8843.
 
+| Symptom | Meaning | Repair |
+| --- | --- | --- |
+| The app cannot resume a thread and reports `invalid transport in mcp_servers.codex_app` | App version `26.901.51231`, build `8109`, rejects its own disabled remote app-tools placeholder. The user's config file need not contain that entry. | Run `node "$SKILL_ROOT/scripts/desktop-attach.js" unpersist --authorize`, then reopen the app to use its own runtime. |
+| The Codex app updated and live streaming is paused | The installed version or build differs from the persistence receipt. The next check or login application restores the saved login setting and removes persistence. | Reopen the app. Continue lanes in protocol-only mode. Manually verify attachment and thread resume through the relay, then run `desktop-attach.js persist --authorize --verified-build <version> <build>` with the exact installed pair. |
+| Attachment refuses an untested or broken app build | A live connection alone cannot prove thread resume works. Older streaming-only observations are not sufficient verification. | Keep protocol-only lanes, or record a manual relay attachment and thread-resume check with `--verified-build <version> <build>`. |
+
+The rescue command never rewrites `config.toml`. If a check already rolled back
+persistence, simply reopen the app. An unpersist refusal for absent ownership
+means there is no completed owned persistence transaction for it to reverse.
+The owner's exact-build attestation can supersede a recorded broken result.
+
 **Live-verified, 2026-09-04, Desktop 26.901.22334 (7746).** Launching Desktop
 with `CODEX_APP_SERVER_WS_URL` pointed at a relay port that had no listener did
 not produce an attachment, and bringing the relay up afterward did not turn
@@ -362,7 +375,7 @@ listening attached normally. `ensure` therefore delegates to `runtime-up`
 before it launches or, with owner approval, relaunches Desktop; it never starts
 the daemon or relay by itself.
 
-To keep Dock launches attached across logins and Desktop updates, inspect and
+To keep Dock launches attached across logins on the same verified app build, inspect and
 then authorize the reversible per-user setup:
 
 ```bash

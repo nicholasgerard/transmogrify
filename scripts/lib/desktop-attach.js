@@ -49,17 +49,23 @@ const MAX_ELSEWHERE_PORTS = 8;
 const LAUNCH_AGENT_LABEL = 'sh.transmogrify.attach';
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`;
 const LAUNCH_AGENT_MARKER = 'Managed by Transmogrify desktop-attach.js';
-const PERSISTENCE_RECEIPT_VERSION = 1;
+const PERSISTENCE_RECEIPT_VERSION = 2;
 const PERSISTENCE_PHASES = new Set(['prepared', 'plistWritten', 'settingEnvironment', 'applied']);
 
-// Desktop builds on which an attached launch was observed to render and stream
-// Transmogrify lanes live. Documentation for the operator, not a gate: the
-// receipt is measured on every check.
+// Exact app builds with recorded attachment outcomes. A live connection alone
+// cannot prove that the app can resume a thread on its remote runtime path.
 const TESTED_DESKTOP_BUILDS = Object.freeze([
-  Object.freeze({ version: '26.825.51511', build: '7377', observedOn: '2026-09-01' }),
-  Object.freeze({ version: '26.901.20858', build: '7658', observedOn: '2026-09-02' }),
-  Object.freeze({ version: '26.901.22334', build: '7746', observedOn: '2026-09-04' }),
+  Object.freeze({ version: '26.825.51511', build: '7377', attachStatus: 'untested', reason: 'Historical streaming observation; relay thread resume needs verification.', observedOn: '2026-09-01' }),
+  Object.freeze({ version: '26.901.20858', build: '7658', attachStatus: 'untested', reason: 'Historical streaming observation; relay thread resume needs verification.', observedOn: '2026-09-02' }),
+  Object.freeze({ version: '26.901.22334', build: '7746', attachStatus: 'untested', reason: 'Historical streaming observation; relay thread resume needs verification.', observedOn: '2026-09-04' }),
+  Object.freeze({ version: '26.901.51231', build: '8109', attachStatus: 'broken',
+    observedOn: '2026-09-08',
+    reason: 'The app rejects its disabled codex_app remote placeholder on thread resume. The daemon accepts the same override.' }),
 ]);
+
+const BUILD_REFUSAL = 'This Codex app version has not been verified with a shared runtime; lanes still work, they just do not stream in the app.';
+const RESCUE_COMMAND = 'node "$SKILL_ROOT/scripts/desktop-attach.js" unpersist --authorize';
+const VERIFY_ACTION = 'Manually verify attachment and thread resume through the relay, then re-enable with desktop-attach.js persist --authorize --verified-build <version> <build> for the exact installed app.';
 
 // Attachment failure carrying a stable code. Every code names the Desktop state
 // that was observed, so a refusal tells the operator what to fix.
@@ -369,11 +375,108 @@ async function attachedElsewhere(run, pids, port, env) {
   return found;
 }
 
-// Whether this Desktop version and build are among the tested pair. Reported for
-// the operator; the attachment receipt itself is always measured.
-function buildTested(app) {
-  return TESTED_DESKTOP_BUILDS.some((tested) =>
-    tested.version === app.version && tested.build === app.build);
+function sameBuild(left, right) {
+  return !!left?.version && !!left?.build && left.version === right?.version && left.build === right?.build;
+}
+
+function attachmentBuildStatus(app, verification = null) {
+  if (sameBuild(verification?.desktop, app) && verification?.attachStatus === 'verified') return 'verified';
+  return TESTED_DESKTOP_BUILDS.find((entry) => sameBuild(entry, app))?.attachStatus || 'untested';
+}
+
+function attachmentRecordPath(name, env, dependencies) {
+  return path.join(path.dirname(persistenceReceiptPath(env, dependencies)), `${name}.json`);
+}
+
+function readAttachmentRecord(name, env, dependencies) {
+  const injected = dependencies.attachmentRecordReader?.(name);
+  if (injected !== undefined) return injected;
+  const file = attachmentRecordPath(name, env, dependencies);
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 ||
+        (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+      throw new DesktopAttachError('the Desktop attachment record is unsafe', 'PERSISTENCE_NOT_OWNED');
+    }
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function writeAttachmentRecord(name, record, env, dependencies) {
+  await (dependencies.receiptWriter || atomicWriteJson)(attachmentRecordPath(name, env, dependencies), record);
+}
+
+function effectiveBuildStatus(app, env, dependencies) {
+  const verification = readAttachmentRecord('verification', env, dependencies);
+  return attachmentBuildStatus(app, verification);
+}
+
+async function requireVerifiedBuild(app, options, env, dependencies) {
+  if (!app) throw new DesktopAttachError('Codex Desktop is not installed', 'DESKTOP_NOT_INSTALLED');
+  if (options.verifiedBuild && !sameBuild(options.verifiedBuild, app)) {
+    usage('--verified-build must name the exact installed app version and build');
+  }
+  const status = effectiveBuildStatus(app, env, dependencies);
+  if (status !== 'verified' && !options.verifiedBuild) {
+    throw new DesktopAttachError(BUILD_REFUSAL, 'POLICY_REFUSAL', { attachStatus: status });
+  }
+  if (options.verifiedBuild && !options.dryRun) {
+    await writeAttachmentRecord('verification', {
+      desktop: { version: app.version, build: app.build }, attachStatus: 'verified',
+      evidence: 'owner-attested-attachment-and-thread-resume-through-relay',
+    }, env, dependencies);
+  }
+}
+
+async function installedDesktop(env, dependencies) {
+  return resolveDesktopApp(dependencies.execFileResult || execFileResult, env, dependencies);
+}
+
+// Persist the pause before restoring anything, retaining the authority receipt
+// until cleanup finishes so a failed rollback can be retried on the next check.
+async function pauseChangedAttachment(app, env, dependencies, observeOnly = false) {
+  const file = persistencePath(env, dependencies);
+  const receipt = readPersistenceReceipt(env, dependencies, file);
+  if (!receipt) return readAttachmentRecord('paused', env, dependencies)?.attachment?.paused || null;
+  const currentBuild = app ? { version: app.version, build: app.build } : null;
+  const status = effectiveBuildStatus(app, env, dependencies);
+  if (sameBuild(receipt.desktop, app) && status === 'verified') return null;
+  if (observeOnly) {
+    throw new DesktopAttachError('Run desktop-attach.js check to pause obsolete persistence before attaching this app.',
+      'POLICY_REFUSAL', { reason: 'attachment-needs-check' });
+  }
+  const paused = {
+    reason: !sameBuild(receipt.desktop, app) ? 'app-updated' : `app-build-${status}`,
+    previousBuild: receipt.desktop || null,
+    currentBuild,
+  };
+  // Ownership checks happen before writing the pause or restoring the login value.
+  assertManagedLaunchAgent(file);
+  const currentValue = await launchEnvironmentValue(env, dependencies);
+  if (currentValue && currentValue !== receipt.appliedValue && currentValue !== (receipt.rollbackValue || '')) {
+    throw new DesktopAttachError('the login-session setting is no longer owned', 'FOREIGN_LOGIN_SETTING');
+  }
+  await writeAttachmentRecord('paused', { attachment: { state: 'paused', paused } }, env, dependencies);
+  // At login the environment may be empty even though persistence was applied
+  // in the previous session. Restore a saved nonempty rollback value there too.
+  if (!currentValue && receipt.rollbackValue !== null) {
+    await launchctl(['setenv', ATTACH_ENV, receipt.rollbackValue], env, dependencies);
+  } else {
+    await restoreEnvironmentValue(receipt, currentValue, receipt.rollbackValue, env, dependencies);
+  }
+  const remove = dependencies.plistRemover || dependencies.plistWriter?.remove || removeLaunchAgent;
+  await remove(file);
+  await removePersistenceReceipt(env, dependencies);
+  return paused;
+}
+
+async function clearPausedAttachment(env, dependencies) {
+  try { fs.unlinkSync(attachmentRecordPath('paused', env, dependencies)); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
 }
 
 // Persistence is a two-part receipt: the login launch environment names the
@@ -397,10 +500,9 @@ async function attachmentPersisted(target, run, env, dependencies) {
   }
 }
 
-// Read-only attachment receipt. It reports exactly one state: attached with the
-// observed connection, or disabled, unsupportedPlatform, notInstalled,
-// notRunning, attachedElsewhere, unattached, or toolUnavailable when inspection
-// itself failed. It launches nothing, quits nothing, and touches no runtime.
+// Measure attachment and roll back obsolete persistence. A connection on an
+// unverified build is unverifiedBuild, never attached. A completed safety
+// rollback is paused. This function launches and quits nothing.
 async function check(options = {}, env = process.env, dependencies = {}) {
   const run = dependencies.execFileResult || execFileResult;
   const platform = dependencies.platform || process.platform;
@@ -428,6 +530,25 @@ async function check(options = {}, env = process.env, dependencies = {}) {
   const unattached = (desktop, attachment, nextAction) => ({
     ...base, ok: false, desktop, attachment, nextAction,
   });
+  let installed;
+  let paused;
+  try {
+    const needsInventory = platform === 'darwin' && (env[DISABLE_ENV] !== 'off' ||
+      readPersistenceReceipt(env, dependencies, persistencePath(env, dependencies)));
+    installed = needsInventory ? await installedDesktop(env, dependencies) : null;
+    paused = needsInventory ? await pauseChangedAttachment(installed, env, dependencies, options.observeOnly === true) : null;
+  } catch (error) {
+    if (options.observeOnly) throw error;
+    return unattached(null, { state: 'toolUnavailable', evidence: error.message,
+      ...(error.details?.tool ? { tool: error.details.tool } : {}) },
+    'restore-system-tools-or-use-allow-protocol-only');
+  }
+  if (paused) {
+    base.persisted = false;
+    if (!options.ignorePaused) return { ...base, ok: false,
+      desktop: installed ? { installed: true, ...installed, attachStatus: effectiveBuildStatus(installed, env, dependencies), buildTested: effectiveBuildStatus(installed, env, dependencies) === 'verified' } : { installed: false },
+      attachment: { state: 'paused', paused }, nextAction: `Reopen the Codex app. ${VERIFY_ACTION}` };
+  }
   if (env[DISABLE_ENV] === 'off') {
     return unattached(null, { state: 'disabled', evidence: `${DISABLE_ENV}=off` }, 'use-allow-protocol-only');
   }
@@ -442,7 +563,7 @@ async function check(options = {}, env = process.env, dependencies = {}) {
   let clients;
   let desktopHostsSession = false;
   try {
-    app = await resolveDesktopApp(run, env, dependencies);
+    app = installed;
     if (!app) {
       return unattached({ installed: false }, {
         state: 'notInstalled',
@@ -468,22 +589,24 @@ async function check(options = {}, env = process.env, dependencies = {}) {
   const desktop = {
     installed: true,
     ...app,
-    buildTested: buildTested(app),
+    attachStatus: effectiveBuildStatus(app, env, dependencies),
+    buildTested: effectiveBuildStatus(app, env, dependencies) === 'verified',
     running: pids.length > 0,
     pids,
     hostedByDesktop: desktopHostsSession,
   };
+  const safeNextAction = desktop.attachStatus === 'verified' ? 'run-desktop-attach-ensure' : BUILD_REFUSAL;
   if (!pids.length) {
-    return unattached(desktop, { state: 'notRunning', evidence: 'no-desktop-process' }, 'run-desktop-attach-ensure');
+    return unattached(desktop, { state: 'notRunning', evidence: 'no-desktop-process' }, safeNextAction);
   }
   const match = clients.find((connection) => pids.includes(connection.pid));
   if (match) {
     return {
       ...base,
-      ok: true,
+      ok: desktop.attachStatus === 'verified',
       desktop,
       attachment: {
-        state: 'attached',
+        state: desktop.attachStatus === 'verified' ? 'attached' : 'unverifiedBuild',
         evidence: 'lsof-established-loopback-connection',
         clientPid: match.pid,
         connection: `${match.local.host}:${match.local.port}->${match.remote.host}:${match.remote.port}`,
@@ -495,7 +618,7 @@ async function check(options = {}, env = process.env, dependencies = {}) {
           },
         } : {}),
       },
-      nextAction: 'none',
+      nextAction: desktop.attachStatus === 'verified' ? 'none' : RESCUE_COMMAND,
     };
   }
   let elsewhere = [];
@@ -509,12 +632,12 @@ async function check(options = {}, env = process.env, dependencies = {}) {
       state: 'attachedElsewhere',
       evidence: 'desktop-connected-to-another-loopback-codex-listener',
       elsewhere,
-    }, `reuse-attached-runtime:${elsewhere[0].url}`);
+    }, desktop.attachStatus === 'verified' ? `reuse-attached-runtime:${elsewhere[0].url}` : RESCUE_COMMAND);
   }
   return unattached(desktop, {
     state: 'unattached',
     evidence: 'no-established-connection-to-runtime',
-  }, 'run-desktop-attach-ensure');
+  }, safeNextAction);
 }
 
 // Quit Desktop through the application's own quit and wait for its processes to
@@ -602,23 +725,29 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
   const authorization = options.relaunch === true
     ? 'flag'
     : env[RELAUNCH_ENV] === 'auto' ? 'standing-env' : 'none';
+  if ((dependencies.platform || process.platform) === 'darwin' && env[DISABLE_ENV] !== 'off') {
+    await requireVerifiedBuild(await installedDesktop(env, dependencies), options, env, dependencies);
+  }
   if (options.launchOnly === true && !resolveRuntimeTarget(options, env, dependencies).relay) {
     throw new DesktopAttachError(
       'the selected relay must already have a live record for a launch-only attachment',
       'RELAY_UNAVAILABLE',
     );
   }
-  let selectedOptions = options;
+  let selectedOptions = { ...options, ignorePaused: true, observeOnly: true };
   let initial = await check(selectedOptions, env, dependencies);
-  const finished = (action, receipt, warnings = []) => ({
-    version: 1,
-    ok: receipt.attachment.state === 'attached',
-    operation: 'ensure',
-    action,
-    relaunchAuthorization: authorization,
-    ...(warnings.length ? { warnings } : {}),
-    receipt,
-  });
+  const finished = async (action, receipt, warnings = []) => {
+    if (receipt.ok) await clearPausedAttachment(env, dependencies);
+    return {
+      version: 1,
+      ok: receipt.ok,
+      operation: 'ensure',
+      action,
+      relaunchAuthorization: authorization,
+      ...(warnings.length ? { warnings } : {}),
+      receipt,
+    };
+  };
   const state = initial.attachment.state;
   if (state === 'attached') return finished('reused', initial);
   if (state === 'disabled') {
@@ -680,7 +809,7 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
       );
     }
     const runtime = await runtimeUp({ url: options.url || env.TRANSMOGRIFY_URL || initial.runtimeUrl }, env, dependencies);
-    selectedOptions = { ...options, url: runtime.url };
+    selectedOptions = { ...selectedOptions, url: runtime.url };
     initial = await check(selectedOptions, env, dependencies);
     if (initial.attachment.state === 'attached') return finished('reused', initial, warnings);
     if (!(await runtimeListeners(run, initial.runtimeUrl, env, dependencies)).length) {
@@ -690,6 +819,7 @@ async function ensure(options = {}, env = process.env, dependencies = {}) {
       );
     }
   }
+  await requireVerifiedBuild(await installedDesktop(env, dependencies), {}, env, dependencies);
   if (action === 'relaunched') await quitDesktop(run, initial.desktop, env, dependencies);
   await launchDesktopAttached(run, initial.desktop, initial.runtimeUrl, env);
   const deadline = clock() + timeoutMs;
@@ -857,9 +987,12 @@ function validatePersistenceReceipt(receipt, file) {
     ? Object.keys(receipt).sort() : [];
   const expected = [
     'appliedValue', 'phase', 'plistPath', 'previousValue', 'rollbackValue', 'version',
+    ...(receipt?.version === 2 ? ['desktop', 'daemonVersion'] : []),
   ].sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index]) ||
-      receipt.version !== PERSISTENCE_RECEIPT_VERSION ||
+      ![1, PERSISTENCE_RECEIPT_VERSION].includes(receipt.version) ||
+      (receipt.version === 2 && (!sameBuild(receipt.desktop, receipt.desktop) ||
+        typeof receipt.daemonVersion !== 'string' || !receipt.daemonVersion)) ||
       !PERSISTENCE_PHASES.has(receipt.phase) ||
       (receipt.previousValue !== null && typeof receipt.previousValue !== 'string') ||
       (receipt.rollbackValue !== null && typeof receipt.rollbackValue !== 'string') ||
@@ -959,6 +1092,8 @@ async function persist(options = {}, env = process.env, dependencies = {}) {
     throw new DesktopAttachError('Codex Desktop attachment persistence is available on macOS only', 'UNSUPPORTED_PLATFORM');
   }
   requireAuthorizedPersistence(options);
+  const app = await installedDesktop(env, dependencies);
+  await requireVerifiedBuild(app, options, env, dependencies);
   if (options.dryRun === true) {
     const plan = persistencePlan(plannedPersistentUrl(options, env, dependencies), env, dependencies);
     return { version: 1, ok: true, operation: 'persist', dryRun: true, ...plan };
@@ -981,12 +1116,22 @@ async function persist(options = {}, env = process.env, dependencies = {}) {
   if (runtime.url !== plannedUrl) {
     throw new DesktopAttachError('runtime-up selected a different persistence endpoint', 'RUNTIME_MISMATCH');
   }
+  const currentApp = await installedDesktop(env, dependencies);
+  if (!sameBuild(app, currentApp)) {
+    throw new DesktopAttachError('the Codex app changed during attachment setup', 'POLICY_REFUSAL',
+      { attachStatus: 'untested' });
+  }
+  if (typeof runtime.daemonVersion !== 'string' || !runtime.daemonVersion) {
+    throw new DesktopAttachError('the shared daemon version could not be measured', 'UNVERIFIED_RUNTIME');
+  }
   const previousValue = existingReceipt?.phase === 'applied'
     ? existingReceipt.previousValue : (currentValue || null);
   let receipt = {
     version: PERSISTENCE_RECEIPT_VERSION,
     previousValue,
-    rollbackValue: currentValue || null,
+    rollbackValue: existingReceipt?.rollbackValue ?? previousValue,
+    desktop: { version: app.version, build: app.build },
+    daemonVersion: runtime.daemonVersion,
     appliedValue: runtime.url,
     plistPath: plan.launchAgent.path,
     phase: 'prepared',
@@ -1007,7 +1152,7 @@ async function persist(options = {}, env = process.env, dependencies = {}) {
     if (transactionStarted) {
       try {
         const observed = await launchEnvironmentValue(env, dependencies);
-        await restoreEnvironmentValue(receipt, observed, receipt.rollbackValue, env, dependencies);
+        await restoreEnvironmentValue(receipt, observed, currentValue || null, env, dependencies);
         const remove = dependencies.plistRemover || dependencies.plistWriter?.remove || removeLaunchAgent;
         await remove(plan.launchAgent.path);
         await removePersistenceReceipt(env, dependencies);
@@ -1020,6 +1165,7 @@ async function persist(options = {}, env = process.env, dependencies = {}) {
     }
     throw error;
   }
+  await clearPausedAttachment(env, dependencies);
   return {
     version: 1,
     ok: true,
@@ -1028,7 +1174,7 @@ async function persist(options = {}, env = process.env, dependencies = {}) {
     runtimeUrl: runtime.url,
     launchctl: plan.launchctl,
     launchAgent: { path: plan.launchAgent.path, written: true },
-    persistence: { phase: receipt.phase },
+    persistence: { phase: receipt.phase, desktop: receipt.desktop, daemonVersion: receipt.daemonVersion },
   };
 }
 
@@ -1087,6 +1233,13 @@ async function unpersist(options = {}, env = process.env, dependencies = {}) {
 // Private LaunchAgent entrypoint. Its order is the contract: the runtime and
 // relay are verified before the still-owned login environment is reapplied.
 async function applyPersisted(options = {}, env = process.env, dependencies = {}) {
+  if ((dependencies.platform || process.platform) !== 'darwin') {
+    throw new DesktopAttachError('Codex Desktop attachment is available on macOS only', 'UNSUPPORTED_PLATFORM');
+  }
+  const app = await installedDesktop(env, dependencies);
+  const paused = await pauseChangedAttachment(app, env, dependencies);
+  if (paused) return { version: 1, ok: false, operation: 'apply-persisted',
+    attachment: { state: 'paused', paused }, nextAction: VERIFY_ACTION };
   const selected = resolveRuntimeUrl(options, env, dependencies);
   const file = persistencePath(env, dependencies);
   if (!assertManagedLaunchAgent(file)) {
@@ -1121,6 +1274,9 @@ async function applyPersisted(options = {}, env = process.env, dependencies = {}
 
 module.exports = {
   ATTACH_ENV,
+  BUILD_REFUSAL,
+  RESCUE_COMMAND,
+  VERIFY_ACTION,
   BUNDLE_ENV,
   DEFAULT_ATTACH_TIMEOUT_MS,
   DISABLE_ENV,
@@ -1128,6 +1284,7 @@ module.exports = {
   RELAUNCH_ENV,
   TESTED_DESKTOP_BUILDS,
   applyPersisted,
+  attachmentBuildStatus,
   check,
   clientConnections,
   ensure,

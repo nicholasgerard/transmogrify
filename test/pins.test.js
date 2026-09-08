@@ -21,6 +21,7 @@ function pin(key) {
 test('SKILL.md pins agree with the enforced constants', () => {
   assert.equal(pin('version'), VERSION);
   assert.equal(pin('verified_claude_cli'), PINNED_CLI_VERSION);
-  const newest = TESTED_DESKTOP_BUILDS[TESTED_DESKTOP_BUILDS.length - 1];
-  assert.equal(pin('verified_codex_desktop'), `${newest.version} (${newest.build})`);
+  const newest = TESTED_DESKTOP_BUILDS.filter((entry) => entry.attachStatus === 'verified').at(-1);
+  assert.equal(pin('verified_codex_desktop'), newest
+    ? `${newest.version} (${newest.build})` : 'none; exact-build verification required');
 });

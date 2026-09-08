@@ -23,117 +23,7 @@ const {
 } = require('../scripts/lib/desktop-attach');
 const { cliFailure, main, parseCli } = require('../scripts/desktop-attach');
 
-const APP = '/Applications/ChatGPT.app';
-const DESKTOP_PID = 96049;
-const SELF_PID = 4242;
-
-function scenario(overrides = {}) {
-  const state = {
-    installed: true,
-    launchServices: true,
-    diskInstalled: false,
-    running: true,
-    attached: false,
-    attachOnLaunch: true,
-    runtimeListening: true,
-    runtimePort: 8843,
-    relayRecord: null,
-    elsewherePort: null,
-    hostedByDesktop: false,
-    quitRequested: false,
-    quitIgnoredPolls: 0,
-    launches: [],
-    ...overrides,
-  };
-  const calls = [];
-  const ok = (stdout) => ({ code: 0, stdout, stderr: '' });
-  const fail = (stderr = '', code = 1) => ({ code, stdout: '', stderr });
-  async function run(executable, args) {
-    calls.push([executable, ...args]);
-    if (executable === 'osascript' && args[1].startsWith('POSIX path')) {
-      return state.installed && state.launchServices && args[1].includes('com.openai.codex')
-        ? ok(`${APP}\n`) : fail('not found');
-    }
-    if (executable === 'osascript' && args[1].endsWith('to quit')) {
-      state.quitRequested = true;
-      return ok('');
-    }
-    if (executable === 'defaults') {
-      return ok(args[2] === 'CFBundleShortVersionString' ? '26.901.20858\n' : '7658\n');
-    }
-    if (executable === 'plutil') {
-      if (args[1] === 'CFBundleIdentifier') return ok('com.openai.codex\n');
-      return ok(args[1] === 'CFBundleShortVersionString' ? '26.901.22334\n' : '7746\n');
-    }
-    if (executable === 'ps' && args[0] === '-axo') {
-      if (state.quitRequested) {
-        if (state.quitIgnoredPolls > 0) state.quitIgnoredPolls -= 1;
-        else state.running = false;
-      }
-      return ok(state.running
-        ? `${DESKTOP_PID} ${APP}/Contents/MacOS/ChatGPT\n    1 /sbin/launchd\n 500 ${APP}/Contents/Frameworks/Helper.app/Contents/MacOS/Helper\n`
-        : '    1 /sbin/launchd\n');
-    }
-    if (executable === 'ps' && args[0] === '-o') {
-      const pid = Number(args[3]);
-      if (pid === SELF_PID) return ok(`${state.hostedByDesktop ? DESKTOP_PID : 1}\n`);
-      return ok('1\n');
-    }
-    if (executable === 'open') {
-      state.launches.push(args);
-      state.running = true;
-      state.quitRequested = false;
-      state.attached = state.attachOnLaunch;
-      return ok('');
-    }
-    if (executable === 'lsof') {
-      if (args.includes('-a')) {
-        return state.elsewherePort
-          ? ok(`p${DESKTOP_PID}\ncChatGPT\nn127.0.0.1:50001->127.0.0.1:${state.elsewherePort}\n`)
-          : fail();
-      }
-      if (args.includes('-iTCP') && args.includes('-sTCP:LISTEN')) {
-        return ok(`p777\nccodex\nn127.0.0.1:${state.elsewherePort}\np778\ncnode\nn127.0.0.1:3000\n`);
-      }
-      const portOption = args.find((argument) => argument.startsWith('-iTCP:'));
-      const selectedPort = Number(portOption?.slice('-iTCP:'.length));
-      if (selectedPort && args.includes('-sTCP:LISTEN')) {
-        return state.runtimeListening && selectedPort === state.runtimePort
-          ? ok(`p83538\nccodex\nn127.0.0.1:${selectedPort}\n`) : fail();
-      }
-      if (selectedPort && args.includes('-sTCP:ESTABLISHED')) {
-        return state.attached && selectedPort === state.runtimePort
-          ? ok(`p${DESKTOP_PID}\ncChatGPT\nn127.0.0.1:53519->127.0.0.1:${selectedPort}\np83538\nccodex\nn127.0.0.1:${selectedPort}->127.0.0.1:53519\n`)
-          : fail();
-      }
-    }
-    throw new Error(`unexpected ${executable} ${args.join(' ')}`);
-  }
-  let clock = 1_000_000;
-  const dependencies = {
-    execFileResult: run,
-    platform: 'darwin',
-    pid: SELF_PID,
-    now: () => '2026-09-02T22:00:00.000Z',
-    sleep: async (milliseconds) => { clock += milliseconds; },
-    clock: () => clock,
-    existsSync: () => state.diskInstalled,
-    runningRelay: () => state.relayRecord,
-    launchctlGetenv: async () => state.persistedUrl || '',
-    plistExists: () => state.plistExists === true,
-    runtimeUp: async () => {
-      calls.push(['runtime-up']);
-      state.runtimeListening = true;
-      state.runtimePort = 8844;
-      state.relayRecord = {
-        url: 'ws://127.0.0.1:8844/',
-        socketPath: '/private/tmp/codex-daemon.sock',
-      };
-      return { runtime: 'managed-daemon', url: state.relayRecord.url };
-    },
-  };
-  return { state, calls, dependencies };
-}
+const { scenario, APP, DESKTOP_PID, SELF_PID } = require('./helpers/desktop-attachment-fixture');
 
 const ENV = { TRANSMOGRIFY_PORT: '8843' };
 
@@ -478,6 +368,7 @@ test('the CLI parses operations strictly and reports the disabled state with exi
 test('persist dry-run prints the exact LaunchAgent and launchctl setting without mutation', async () => {
   const calls = [];
   const dependencies = {
+    ...scenario().dependencies,
     platform: 'darwin',
     home: '/Users/tester',
     nodePath: '/opt/node/bin/node',
@@ -507,12 +398,28 @@ function persistenceFixture(t, overrides = {}) {
   const home = path.join(root, 'home');
   const persistenceStateRoot = path.join(root, 'state');
   fs.mkdirSync(home, { mode: 0o700 });
+  fs.mkdirSync(path.join(persistenceStateRoot, 'desktop-attach'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(persistenceStateRoot, 'desktop-attach', 'verification.json'), JSON.stringify({
+    desktop: { version: '26.901.20858', build: '7658' }, attachStatus: 'verified',
+  }), { mode: 0o600 });
   const state = { currentValue: '', runtimeUrl: 'ws://127.0.0.1:8844/', ...overrides };
   const calls = [];
   const dependencies = {
+    ...scenario().dependencies,
     platform: 'darwin',
     home,
     persistenceStateRoot,
+    attachmentRecordReader: undefined,
+    plistExists: fs.existsSync,
+    plistWriter: (file, contents) => {
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(file, contents, { mode: 0o600 });
+    },
+    plistRemover: (file) => {
+      if (!fs.existsSync(file)) return false;
+      fs.unlinkSync(file);
+      return true;
+    },
     nodePath: '/opt/node/bin/node',
     scriptPath: '/opt/transmogrify/scripts/desktop-attach.js',
     runningRelay: () => ({
@@ -527,7 +434,7 @@ function persistenceFixture(t, overrides = {}) {
     },
     runtimeUp: async (options) => {
       calls.push('runtime-up');
-      return { runtime: 'managed-daemon', url: options.url };
+      return { runtime: 'managed-daemon', url: options.url, daemonVersion: '0.153.4' };
     },
   };
   return { env: { HOME: home }, state, calls, dependencies };
@@ -705,3 +612,359 @@ for (const selection of ['relay only', 'relay and environment', 'neither']) {
     assert.deepEqual(mocked.state.launches, []);
   });
 }
+
+const { attachmentBuildStatus, BUILD_REFUSAL, RESCUE_COMMAND } = require('../scripts/lib/desktop-attach');
+const BROKEN_BUILD = { version: '26.901.51231', build: '8109' };
+const UNTESTED_BUILD = { version: '26.999.1', build: '9999' };
+
+function replaceInventory(fixture, build, extra = {}) {
+  const fake = scenario({ ...build, ...extra, runtimePort: 8844 });
+  fixture.dependencies.execFileResult = fake.dependencies.execFileResult;
+  return fake;
+}
+
+function savedReceipt(fixture) {
+  return JSON.parse(fs.readFileSync(persistenceReceiptPath(fixture.env, fixture.dependencies), 'utf8'));
+}
+
+function pauseRecord(fixture) {
+  return JSON.parse(fs.readFileSync(path.join(fixture.dependencies.persistenceStateRoot,
+    'desktop-attach', 'paused.json'), 'utf8'));
+}
+
+test('attachment build lookup distinguishes exact verified, broken, and untested pairs', () => {
+  const historical = { version: '26.901.20858', build: '7658' };
+  assert.equal(attachmentBuildStatus(historical), 'untested');
+  assert.equal(attachmentBuildStatus(historical, { desktop: historical, attachStatus: 'verified' }), 'verified');
+  assert.equal(attachmentBuildStatus(BROKEN_BUILD), 'broken');
+  assert.equal(attachmentBuildStatus(UNTESTED_BUILD), 'untested');
+  assert.equal(attachmentBuildStatus({ ...BROKEN_BUILD, build: '8110' }), 'untested');
+  assert.equal(attachmentBuildStatus(null), 'untested');
+  assert.match(TESTED_DESKTOP_BUILDS.find((entry) => entry.attachStatus === 'broken').reason, /placeholder/);
+});
+
+for (const [status, build] of [['broken', BROKEN_BUILD], ['untested', UNTESTED_BUILD]]) {
+  for (const options of [{}, { launchOnly: true }, { relaunch: true }]) {
+    test(`ensure refuses ${status} builds before any login change: ${JSON.stringify(options)}`, async (t) => {
+      const fixture = persistenceFixture(t);
+      // An old owned setting must remain untouched on a refused ensure.
+      await persist({ authorize: true }, fixture.env, fixture.dependencies);
+      const before = savedReceipt(fixture);
+      const fake = replaceInventory(fixture, build, { attached: true });
+      fixture.calls.length = 0;
+      await assert.rejects(() => ensure(options, fixture.env, fixture.dependencies), (error) => {
+        assert.equal(error.code, 'POLICY_REFUSAL');
+        assert.equal(error.details.attachStatus, status);
+        assert.equal(cliFailure(error).message, BUILD_REFUSAL);
+        return true;
+      });
+      assert.deepEqual(fixture.calls, []);
+      assert.deepEqual(fake.state.launches, []);
+      assert.equal(fake.state.quitRequested, false);
+      assert.deepEqual(savedReceipt(fixture), before);
+    });
+  }
+  test(`persist refuses ${status} builds including dry-run before any login change`, async (t) => {
+    const fixture = persistenceFixture(t);
+    replaceInventory(fixture, build);
+    for (const options of [{ authorize: true }, { dryRun: true }]) {
+      await assert.rejects(() => persist(options, fixture.env, fixture.dependencies),
+        (error) => error.code === 'POLICY_REFUSAL' && error.details.attachStatus === status);
+    }
+    assert.deepEqual(fixture.calls, []);
+    assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), false);
+  });
+  test(`an attached ${status} app reports rescue and cannot supply a verified attachment state`, async (t) => {
+    const fixture = persistenceFixture(t);
+    replaceInventory(fixture, build, { attached: true });
+    const result = await main(['check'], fixture.env, fixture.dependencies);
+    assert.equal(result.ok, false);
+    assert.equal(result.desktop.attachStatus, status);
+    assert.equal(result.desktop.buildTested, false);
+    assert.equal(result.attachment.state, 'unverifiedBuild');
+    assert.equal(result.nextAction, RESCUE_COMMAND);
+    assert.deepEqual(fixture.calls, []);
+  });
+  test(`exact owner verification permits ${status} builds and survives a later check`, async (t) => {
+    const fixture = persistenceFixture(t);
+    replaceInventory(fixture, build, { attached: true });
+    await assert.rejects(() => persist({ authorize: true, verifiedBuild: { ...build, build: '1' } },
+      fixture.env, fixture.dependencies), (error) => error.code === 'USAGE_ERROR');
+    assert.deepEqual(fixture.calls, []);
+    const result = await main(['persist', '--authorize', '--verified-build', build.version, build.build],
+      fixture.env, fixture.dependencies);
+    assert.equal(result.persistence.phase, 'applied');
+    assert.deepEqual(savedReceipt(fixture).desktop, build);
+    assert.equal(savedReceipt(fixture).daemonVersion, '0.153.4');
+    const checked = await check({}, fixture.env, fixture.dependencies);
+    assert.equal(checked.desktop.attachStatus, 'verified');
+    assert.equal(checked.attachment.state, 'attached');
+    assert.equal(checked.ok, true);
+    assert.equal(checked.persisted, true);
+  });
+}
+
+test('verified-build parsing rejects incomplete, mismatched, or misplaced assertions', () => {
+  for (const args of [
+    ['persist', '--verified-build', '26.1'],
+    ['check', '--verified-build', '26.1', '1'],
+    ['unpersist', '--verified-build', '26.1', '1'],
+    ['ensure', '--verified-build', '26.1', 'invalid'],
+    ['persist', '--verified-build', '26.1', '1', 'extra'],
+  ]) assert.throws(() => parseCli(args));
+});
+
+for (const operation of ['check', 'apply-persisted']) {
+  for (const rollback of [null, 'ws://127.0.0.1:8844/']) {
+    test(`${operation} pauses a changed build and restores the receipt rollback value ${rollback}`, async (t) => {
+      const fixture = persistenceFixture(t, { currentValue: rollback || '' });
+      await persist({ authorize: true }, fixture.env, fixture.dependencies);
+      const previousBuild = savedReceipt(fixture).desktop;
+      fixture.state.runtimeUrl = 'ws://127.0.0.1:8845/';
+      // Re-persisting must not overwrite the original rollback with our own setting.
+      await persist({ authorize: true }, fixture.env, fixture.dependencies);
+      assert.equal(savedReceipt(fixture).rollbackValue, rollback);
+      replaceInventory(fixture, BROKEN_BUILD, { attached: true });
+      fixture.calls.length = 0;
+      if (operation === 'apply-persisted') fixture.state.currentValue = '';
+      const result = await main([operation], fixture.env, fixture.dependencies);
+      assert.equal(result.attachment.state, 'paused');
+      assert.deepEqual(result.attachment.paused, {
+        reason: 'app-updated', previousBuild, currentBuild: BROKEN_BUILD,
+      });
+      assert.equal(fixture.state.currentValue, rollback || '');
+      assert.equal(fixture.calls.includes('runtime-up'), false);
+      assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), false);
+      assert.equal(fs.existsSync(path.join(fixture.env.HOME, 'Library/LaunchAgents/sh.transmogrify.attach.plist')), false);
+      assert.deepEqual(pauseRecord(fixture).attachment, result.attachment);
+      const checkedAgain = await check({}, fixture.env, fixture.dependencies);
+      assert.equal(checkedAgain.attachment.state, 'paused');
+      assert.equal(checkedAgain.persisted, false);
+    });
+  }
+}
+
+test('changed build rollback retries after a failed removal without losing authority', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, BROKEN_BUILD);
+  fixture.dependencies.plistRemover = () => { throw new Error('injected removal failure'); };
+  await assert.rejects(() => applyPersisted({}, fixture.env, fixture.dependencies), /injected removal failure/);
+  assert.equal(savedReceipt(fixture).phase, 'applied');
+  assert.equal(fixture.state.currentValue, '');
+  delete fixture.dependencies.plistRemover;
+  const result = await applyPersisted({}, fixture.env, fixture.dependencies);
+  assert.equal(result.attachment.state, 'paused');
+  assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), false);
+});
+
+test('changed build never overwrites a foreign login value', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, BROKEN_BUILD);
+  fixture.state.currentValue = 'foreign-value';
+  fixture.calls.length = 0;
+  await assert.rejects(() => applyPersisted({}, fixture.env, fixture.dependencies),
+    (error) => error.code === 'FOREIGN_LOGIN_SETTING');
+  assert.deepEqual(fixture.calls, []);
+  assert.equal(savedReceipt(fixture).phase, 'applied');
+});
+
+test('legacy receipts without app pins pause safely instead of accepting a new app by inference', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  const receipt = savedReceipt(fixture);
+  receipt.version = 1;
+  delete receipt.desktop;
+  delete receipt.daemonVersion;
+  fs.writeFileSync(persistenceReceiptPath(fixture.env, fixture.dependencies), JSON.stringify(receipt));
+  const result = await applyPersisted({}, fixture.env, fixture.dependencies);
+  assert.equal(result.attachment.state, 'paused');
+  assert.equal(result.attachment.paused.previousBuild, null);
+  assert.equal(fixture.state.currentValue, '');
+});
+
+test('a paused attachment flows through the real doctor, plan, and setup without offering persistence', async (t) => {
+  const { doctorReport } = require('./helpers/onboarding-fixture');
+  const { runSetup } = require('../scripts/setup');
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, BROKEN_BUILD);
+  const report = await doctorReport(t, {
+    desktopAttachment: () => check({}, fixture.env, fixture.dependencies),
+  });
+  assert.equal(report.providers.codex.desktop.attachStatus, 'broken');
+  assert.equal(report.providers.codex.attachment.state, 'paused');
+  assert.equal(report.providers.codex.nativeVisibility.verified, false);
+  assert.equal(report.setup.outcome, 'ready-with-limitations');
+  assert.equal(report.setup.plan.steps.length, 1);
+  assert.equal(report.setup.plan.steps[0].action, 'attachment-paused');
+  assert.equal(report.setup.plan.steps[0].consent, 'none');
+  assert.match(report.setup.plan.steps[0].what, /app changed.*streaming is paused/);
+  assert.match(report.setup.plan.steps[0].command, /--verified-build <version> <build>/);
+  for (const dryRun of [true, false]) {
+    const result = await runSetup({ dryRun }, {}, { runDoctor: async () => report,
+      hostContext: {}, narrate() {}, runProcess() { throw new Error('must not execute a pause notice'); } });
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, 'ready-with-limitations');
+    assert.deepEqual(result.completed, []);
+    assert.deepEqual(result.plan, report.setup.plan);
+  }
+});
+
+test('current-machine fixture: broken app with no persistence keeps protocol lanes ready', async (t) => {
+  const { doctorReport } = require('./helpers/onboarding-fixture');
+  const { renderSetupSummary } = require('../scripts/doctor');
+  const { runSetup } = require('../scripts/setup');
+  const fixture = persistenceFixture(t);
+  replaceInventory(fixture, BROKEN_BUILD);
+  const checked = await main(['check'], fixture.env, fixture.dependencies);
+  assert.equal(checked.desktop.attachStatus, 'broken');
+  assert.equal(checked.persisted, false);
+  assert.equal(checked.attachment.state, 'unattached');
+  assert.equal(checked.ok, false);
+  assert.equal(checked.nextAction, BUILD_REFUSAL);
+  const report = await doctorReport(t, {
+    codexVersion: '0.153.4',
+    desktopAttachment: () => check({}, fixture.env, fixture.dependencies),
+  });
+  assert.equal(report.setup.ready, true);
+  assert.equal(report.setup.outcome, 'ready-with-limitations');
+  assert.deepEqual(report.setup.plan.steps, []);
+  assert.match(renderSetupSummary(report), /Needed: This Codex app version has not been verified/);
+  const setup = await runSetup({ dryRun: true }, {}, { runDoctor: async () => report });
+  assert.equal(setup.outcome, 'ready-with-limitations');
+  assert.deepEqual(setup.providers, { claude: 'ready', codex: 'ready-with-limitations' });
+  assert.deepEqual(setup.plan.steps, []);
+  assert.deepEqual(fixture.calls, []);
+  if (process.env.ATTACHMENT_FIXTURE_OUTPUT) {
+    fs.writeFileSync(process.env.ATTACHMENT_FIXTURE_OUTPUT, JSON.stringify({
+      check: checked, doctor: report, doctorExplain: renderSetupSummary(report), setup,
+    }, null, 2));
+  }
+});
+
+test('a broken status pauses an unchanged pinned build after its attestation is withdrawn', async (t) => {
+  const fixture = persistenceFixture(t);
+  replaceInventory(fixture, BROKEN_BUILD);
+  await persist({ authorize: true, verifiedBuild: BROKEN_BUILD }, fixture.env, fixture.dependencies);
+  fs.unlinkSync(path.join(fixture.dependencies.persistenceStateRoot, 'desktop-attach/verification.json'));
+  const result = await check({}, fixture.env, fixture.dependencies);
+  assert.equal(result.attachment.state, 'paused');
+  assert.equal(result.attachment.paused.reason, 'app-build-broken');
+  assert.deepEqual(result.attachment.paused.previousBuild, BROKEN_BUILD);
+  assert.deepEqual(result.attachment.paused.currentBuild, BROKEN_BUILD);
+  assert.equal(fixture.state.currentValue, '');
+});
+
+test('a verified new build still pauses the old persistence pin', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, UNTESTED_BUILD);
+  fs.writeFileSync(path.join(fixture.dependencies.persistenceStateRoot, 'desktop-attach/verification.json'),
+    JSON.stringify({ desktop: UNTESTED_BUILD, attachStatus: 'verified' }));
+  const result = await check({}, fixture.env, fixture.dependencies);
+  assert.equal(result.desktop.attachStatus, 'verified');
+  assert.equal(result.attachment.state, 'paused');
+  assert.equal(fixture.state.currentValue, '');
+});
+
+test('the disable switch cannot preserve obsolete login persistence', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, BROKEN_BUILD);
+  const result = await check({}, { ...fixture.env, TRANSMOGRIFY_DESKTOP_ATTACH: 'off' }, fixture.dependencies);
+  assert.equal(result.attachment.state, 'paused');
+  assert.equal(fixture.state.currentValue, '');
+});
+
+test('a dry-run owner assertion never writes verification or clears a pause', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, BROKEN_BUILD);
+  await check({}, fixture.env, fixture.dependencies);
+  fixture.calls.length = 0;
+  const result = await persist({ dryRun: true, verifiedBuild: BROKEN_BUILD }, fixture.env, fixture.dependencies);
+  assert.equal(result.dryRun, true);
+  const after = await check({}, fixture.env, fixture.dependencies);
+  assert.equal(after.desktop.attachStatus, 'broken');
+  assert.equal(after.attachment.state, 'paused');
+  assert.deepEqual(fixture.calls, []);
+});
+
+test('ensure with exact owner verification re-enables a paused build without login persistence', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, BROKEN_BUILD);
+  await check({}, fixture.env, fixture.dependencies);
+  const fake = replaceInventory(fixture, BROKEN_BUILD, { running: false });
+  fixture.calls.length = 0;
+  const result = await main(['ensure', '--launch-only', '--verified-build', BROKEN_BUILD.version, BROKEN_BUILD.build],
+    fixture.env, fixture.dependencies);
+  assert.equal(result.ok, true);
+  assert.equal(result.action, 'launched');
+  assert.equal(fake.state.launches.length, 1);
+  assert.equal(fs.existsSync(path.join(fixture.dependencies.persistenceStateRoot, 'desktop-attach/paused.json')), false);
+  assert.deepEqual(fixture.calls, []);
+  assert.equal(fixture.state.currentValue, '');
+});
+
+test('persistence refuses an unmeasured daemon version before any login or plist write', async (t) => {
+  const fixture = persistenceFixture(t);
+  fixture.dependencies.runtimeUp = async (options) => ({ url: options.url });
+  await assert.rejects(() => persist({ authorize: true }, fixture.env, fixture.dependencies),
+    (error) => error.code === 'UNVERIFIED_RUNTIME');
+  assert.deepEqual(fixture.calls, []);
+  assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), false);
+});
+
+test('attachment docs retain exact-build gating, pause fields, and resume-error rescue', () => {
+  const root = path.join(__dirname, '..');
+  const output = fs.readFileSync(path.join(root, 'docs/OUTPUT.md'), 'utf8');
+  for (const field of ['desktop.attachStatus', 'unverifiedBuild', 'attachment.paused', 'previousBuild', 'currentBuild', 'daemonVersion']) {
+    assert.ok(output.includes(field), field);
+  }
+  for (const file of ['README.md', 'SKILL.md', 'SECURITY.md', 'docs/TROUBLESHOOTING.md']) {
+    const contents = fs.readFileSync(path.join(root, file), 'utf8');
+    assert.match(contents, /--verified-build <version> <build>/, file);
+    assert.match(contents, /resume/, file);
+  }
+  assert.ok(fs.readFileSync(path.join(root, 'docs/TROUBLESHOOTING.md'), 'utf8').includes(RESCUE_COMMAND));
+});
+
+test('ensure on a newly verified build refuses stale persistence without changing the login environment', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, BROKEN_BUILD, { attached: true });
+  fixture.calls.length = 0;
+  await assert.rejects(() => ensure({ verifiedBuild: BROKEN_BUILD }, fixture.env, fixture.dependencies),
+    (error) => error.code === 'POLICY_REFUSAL' && /desktop-attach.js check/.test(cliFailure(error).message));
+  assert.deepEqual(fixture.calls, []);
+  assert.equal(fixture.state.currentValue, 'ws://127.0.0.1:8844/');
+  assert.equal(savedReceipt(fixture).phase, 'applied');
+});
+
+test('the plan never offers open, relaunch, or persistence for unverified builds', async (t) => {
+  const { doctorReport } = require('./helpers/onboarding-fixture');
+  for (const build of [BROKEN_BUILD, UNTESTED_BUILD]) {
+    for (const desktopState of ['attached', 'unattached', 'notRunning']) {
+      const report = await doctorReport(t, { target: 'codex', persisted: false, desktopState, desktopOptions: build });
+      assert.equal(report.setup.outcome, 'ready-with-limitations');
+      assert.deepEqual(report.setup.plan.steps, []);
+    }
+  }
+});
+
+test('persist with a fresh exact owner verification clears the durable pause', async (t) => {
+  const fixture = persistenceFixture(t);
+  await persist({ authorize: true }, fixture.env, fixture.dependencies);
+  replaceInventory(fixture, BROKEN_BUILD, { attached: true });
+  await check({}, fixture.env, fixture.dependencies);
+  const result = await persist({ authorize: true, verifiedBuild: BROKEN_BUILD }, fixture.env, fixture.dependencies);
+  assert.equal(result.ok, true);
+  const checked = await check({}, fixture.env, fixture.dependencies);
+  assert.equal(checked.desktop.attachStatus, 'verified');
+  assert.equal(checked.attachment.state, 'attached');
+  assert.equal(checked.persisted, true);
+  assert.equal(fs.existsSync(path.join(fixture.dependencies.persistenceStateRoot, 'desktop-attach/paused.json')), false);
+});

@@ -55,6 +55,8 @@ const CLAUDE_SETUP_FALLBACK = 'Run \`claude --version\` and \`claude auth status
 // withhold native visibility, because a Codex lane can still be spawned
 // protocol-only with --allow-protocol-only.
 const CODEX_SETUP_ACTIONS = new Map([
+  ['desktop-attachment-paused', { blocking: false, ownerAction: 'The Codex app changed. Live streaming is paused. Reopen the app to use its own runtime, then manually verify attachment and thread resume before re-enabling streaming.' }],
+  ['desktop-build-unverified', { blocking: false, ownerAction: 'This Codex app version has not been verified with a shared runtime; lanes still work, they just do not stream in the app.' }],
   ['cli-not-found', { blocking: true, ownerAction: 'Install a supported Codex command-line tool, then rerun the doctor.' }],
   ['codex-not-logged-in', { blocking: true, ownerAction: 'Sign in to Codex, then rerun the doctor.' }],
   ['runtime-unavailable', { blocking: true, ownerAction: 'Reuse an existing Codex app-server runtime through TRANSMOGRIFY_URL, or authorize this installation to start one with \`runtime-up.sh\`, then rerun the doctor.' }],
@@ -176,6 +178,7 @@ function codexLoginStatus(cliBinaries, env = process.env, dependencies = {}) {
 }
 function attachmentSetupReason(attachment) {
   return new Map([
+    ['paused', 'desktop-attachment-paused'],
     ['unattached', 'desktop-unattached'],
     ['notRunning', 'desktop-not-running'],
     ['notInstalled', 'desktop-not-installed'],
@@ -323,8 +326,9 @@ function notRequested(provider, pinned, probe) {
   };
 }
 
-// Read-only Desktop attachment receipt: the app process's established
-// loopback connection to the selected runtime. Never launches or quits.
+// Desktop attachment receipt: the app process's established
+// loopback connection to the selected runtime. Obsolete persistence rolls back.
+// Never launches or quits.
 async function inspectDesktopAttachment(options, env, dependencies) {
   const inspect = dependencies.desktopAttachment || desktopAttachCheck;
   try {
@@ -342,13 +346,11 @@ async function inspectDesktopAttachment(options, env, dependencies) {
   }
 }
 
-// Turn the attachment receipt into the doctor's nativeVisibility block. Verified
-// only when Desktop holds a live connection to the selected runtime; an
-// attached but untested Desktop build is still verified, with a next action to
-// run a disposable app-visibility check.
+// A TCP connection proves attachment only on an exact verified app build.
 function nativeVisibilityFor(receipt) {
   const attachment = receipt?.attachment || { state: 'unknown' };
-  if (attachment.state === 'attached') {
+  const attachStatus = receipt?.desktop?.attachStatus || 'untested';
+  if (attachment.state === 'attached' && attachStatus === 'verified') {
     const buildTested = receipt.desktop?.buildTested === true;
     return {
       verified: true,
@@ -365,9 +367,7 @@ function nativeVisibilityFor(receipt) {
         buildTested,
         hostedByDesktop: receipt.desktop?.hostedByDesktop === true,
       },
-      nextAction: buildTested
-        ? 'none'
-        : 'run-disposable-exact-owned-app-visibility-check-on-this-untested-desktop-build',
+      nextAction: 'none',
     };
   }
   return {
@@ -446,8 +446,12 @@ async function probeCodex(options, env, dependencies) {
     const compatibilitySetup = reusable ? null : codexSetup('runtime-unsupported', {
       failingMethod: compatibility.failingMethod || 'minimum-version',
     });
-    const attachmentSetup = compatibilitySetup || (attachment?.attachment?.state === 'attached'
-      ? null : codexSetup(attachmentSetupReason(attachment?.attachment)));
+    const attachmentSetup = compatibilitySetup || (attachment?.attachment?.state === 'paused'
+      ? codexSetup('desktop-attachment-paused')
+      : attachment?.desktop?.installed && attachment.desktop.attachStatus !== 'verified'
+        ? codexSetup('desktop-build-unverified')
+        : attachment?.attachment?.state === 'attached'
+          ? null : codexSetup(attachmentSetupReason(attachment?.attachment)));
     return {
       provider: 'codex',
       requested: true,
@@ -459,6 +463,8 @@ async function probeCodex(options, env, dependencies) {
       runtime: reusable
         ? { state: 'reusable' }
         : { state: 'unsupported', failingMethod: compatibility.failingMethod || 'minimum-version' },
+      desktop: attachment.desktop,
+      attachment: attachment.attachment,
       nativeVisibility: nativeVisibilityFor(attachment),
       ...(attachmentSetup ? { setup: attachmentSetup } : {}),
       pinned: {
@@ -661,10 +667,12 @@ function renderSetupSummary(result) {
     .map(([provider]) => provider === 'claude' ? 'Claude lanes' : 'Codex lanes');
   const supportedCount = Object.values(result.setup?.providers || {})
     .filter((status) => !['unsupported', 'not-requested'].includes(status)).length;
+  const attachmentNotice = result.providers?.codex?.setup?.reason === 'desktop-build-unverified'
+    ? result.providers.codex.setup.ownerAction : null;
   const neededText = plan.steps.length === 0
     ? (unsupported.length > 0
       ? `${unsupported.join(' and ')} are unavailable on this machine; ${supportedCount > 0 ? 'no setup changes are needed for the supported provider.' : 'no requested provider can run here.'}`
-      : 'No setup changes are needed.')
+      : attachmentNotice || 'No setup changes are needed.')
     : plan.steps.map((entry) => entry.what).join(' ');
   const nextAction = plan.steps[0]?.what || 'You can start lanes now.';
   const nextText = plan.context ? `${plan.context} ${nextAction}` : nextAction;

@@ -100,6 +100,38 @@ No GUI automation is part of the control plane. Native deep links may present an
 already-owned session, but session identity and lifecycle control come from
 provider or measured local interfaces.
 
+### 2026-09-08: attachment resilience incident
+
+The owner updated Codex Desktop from 26.901.41600 to 26.901.51231, build 8109.
+The bundled CLI remained 0.153.4, matching the managed daemon. Persisted login
+environment and LaunchAgent attachment kept the updated app on the relay path.
+Most threads then opened blank or reported that config.toml could not load,
+with `invalid transport in mcp_servers.codex_app`.
+
+The user's config.toml had no `mcp_servers.codex_app` entry. Desktop injects
+its bundled app-tools command for a local Core, and the placeholder
+`mcp_servers.codex_app={command="",enabled=false}` when app tools are unavailable
+on the remote runtime path. Disposable-home probes showed app-server 0.153.4
+accepted that placeholder both as a launch override and a per-thread override.
+The daemon log showed no config error. The updated app's
+`localTaskRow.resumeConfigError` validation rejected its own remote placeholder.
+This was an app-build plus remote-runtime failure, not a CLI version mismatch.
+
+The attachment check reported `buildTested:false`, but no component acted on
+it. The owner recovered by running `desktop-attach.js unpersist --authorize`
+and reopening the app, restoring the vendor runtime. The app bug was reported
+to OpenAI separately.
+
+The release-blocking response gates attachment on exact-build verification of
+relay attachment and thread resume. Older streaming-only observations remain
+untested under this stronger rule. Build 8109 is recorded broken. Persistence
+pins app and daemon versions. Login application and every attachment check
+restore the saved rollback value and pause streaming when the app changes.
+Doctor and setup retain protocol readiness with limitations and do not offer
+persistence for an unverified build. An owner can record a new exact-build
+verification after a manual check. Losing live streaming is acceptable;
+breaking the app is not.
+
 ### Historical run records (2026-09-03 through 2026-09-04)
 
 These dated observations describe the releases tested, not additional current

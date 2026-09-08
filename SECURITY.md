@@ -76,11 +76,33 @@ seat identity, runtime/account identity, and pending-operation journal.
   reject FIFOs without waiting for a writer. Limits also apply while reading,
   so a file that grows after inspection cannot bypass the bound.
 
+### Desktop attachment
+
 Desktop persistence records its previous and applied login values in an
 owner-only receipt before writing the LaunchAgent or changing the environment.
 It never replaces a foreign setting or plist. Removal requires both the receipt
 and the still-matching applied value, and restores rather than erases a value
 that existed before the transaction.
+
+Transmogrify never leaves the Codex app on a non-default path without
+verification for the exact app version and build. An app change restores the
+saved login setting automatically at the next check or login application and
+pauses live streaming until re-verified. Reopen an already-running app to
+restore its vendor runtime. Losing live streaming is acceptable; breaking the
+app is not.
+
+Attachment requires measured relay attachment and thread resume. Older
+streaming-only observations remain untested. Broken and untested builds refuse
+attachment and persistence before changing the login environment. The owner
+can record a manual verification using `--verified-build <version> <build>`
+only when both values match the installed app. This owner attestation can
+supersede a historical broken result for that exact build.
+
+Persistence pins the app version, build, and daemon version. Automatic rollback
+uses the receipt's rollback value, preserves foreign login changes, and records
+`attachment.paused` before removing persistence. A prior receipt without app
+pins is paused rather than treated as verification. Doctor never offers
+persistence for an unverified build.
 
 ## Credentials and private Claude archive
 
