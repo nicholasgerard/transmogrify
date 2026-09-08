@@ -152,7 +152,9 @@ describe('the real repository', () => {
   test('extracts every compatibility pin', () => {
     assert.match(facts.pins.verifiedDate, /^\d{4}-\d{2}-\d{2}$/);
     assert.match(facts.pins.supportedCodexRuntime, /app-server/);
-    assert.match(facts.pins.verifiedCodexDesktop, /^\d/);
+    // No Codex Desktop build is verified for shared-runtime attachment since 0.6.1;
+    // the pin then reads 'none; exact-build verification required'.
+    assert.match(facts.pins.verifiedCodexDesktop, /^(?:\d|none; exact-build verification required$)/);
     assert.match(facts.pins.verifiedCodexMobile, /^ChatGPT for iOS\s+\d/);
     assert.match(facts.pins.verifiedClaudeCli, /^\d+\.\d+\.\d+$/);
     assert.match(facts.pins.verifiedClaudeDesktop, /^\d/);
