@@ -67,8 +67,6 @@ test('the roadmap preserves the dated release exceptions and fresh-machine gate'
 // Read the shipped documents themselves so these checks catch cross-tree drift.
 const documentationContracts = [
   ['docs/PROTOCOL.md', 'normal launches may inherit persistence', /Persistence can supply this environment on a normal launch/],
-  ['site/src/content/sections/04-install.md', 'Desktop-host example measures attachment without relaunch', /node "\$SKILL_ROOT\/scripts\/desktop-attach\.js" check/],
-  ['site/src/content/sections/04-install.md', 'attachment setup runs outside the Desktop host', /Connecting an unattached app requires guided setup from outside a Codex Desktop host/],
   ['SKILL.md', 'restart attachment is remeasured', /After a Desktop restart, run a fresh `desktop-attach\.js check`/],
   ['SKILL.md', 'command events require ack', /Retire, stop, and interrupt events remain pending until `ack`/],
   ['SKILL.md', 'parent context suppresses only wakes', /matching `--parent-context-file` suppresses only the redundant wake/],
@@ -111,21 +109,55 @@ const documentationContracts = [
   ['examples/mailbox.md', 'external mailbox paths may be unreadable', /external mailbox path alone may be unreadable to a restricted child/],
   ['site/README.md', 'site build imports root setup narration', /build reads root metadata and imports `scripts\/lib\/setup-plan\.js`/],
   ['site/README.md', 'both workflows filter the setup-plan input', /Both `\.github\/workflows\/site\.yml` and `\.github\/workflows\/site-deploy\.yml` filter on[^\n]+`scripts\/lib\/setup-plan\.js`/],
-  ['site/src/content/sections/01-definition.md', 'managed jobs have separate clones', /term: A separate clone per job/],
-  ['site/src/content/sections/01-definition.md', 'removal lists the harvest guards', /Removal requires a seat clean at harvest and cleanup, matching provision receipts, verified provider retirement, and unchanged commits preserved in the operator repository/],
-  ['site/src/content/sections/01-definition.md', 'native visibility is conditional', /measured attachment connects it to their runtime; protocol-only lanes also work/],
-  ['site/src/content/sections/01-definition.md', 'telemetry claim is scoped to Transmogrify', /Transmogrify itself collects no telemetry[^\n]+Provider tools still use their own services and accounts/],
-  ['site/src/content/sections/01-definition.md', 'definition uses clone seat terminology', /gives it a managed Git clone seat/],
-  ['site/src/content/sections/03-matrix.md', 'matrix qualifies app visibility', /Codex app visibility requires measured Desktop attachment to the lane's runtime/],
-  ['site/src/content/sections/04-install.md', 'setup checks prerequisites before writes', /Check prerequisites before creating directories; stop with a visible error if repository-root resolution fails/],
-  ['site/src/content/sections/04-install.md', 'default install covers both hosts', /default install covers both Codex and Claude Code personal skill directories/],
-  ['site/src/content/sections/04-install.md', 'doctor uses nil-id probes and local receipts', /probes methods against a nil thread ID[^\n]+write local compatibility receipts/],
-  ['site/src/content/sections/04-install.md', 'Claude spawn prompt is positional', /Claude background spawn forwards its prompt as a positional argument/],
-  ['site/src/content/sections/04-install.md', 'parent-init supplies repository root', /parent-init \\ --repo-root "\$REPO_ROOT"/],
-  ['site/src/content/sections/04-install.md', 'site development minimum is separate', /Node\.js 22\.18 or newer is needed only for site development/],
-  ['site/src/content/sections/04-install.md', 'Claude requires Apple Silicon macOS', /Claude lanes require Apple Silicon macOS/],
+  ['site/src/content/sections/01-definition.md', 'every job has its own clone', /term: A separate checkout for every job/],
+  ['site/src/content/sections/01-definition.md', 'jobs commit and hand the commit back', /A job commits its work and hands the commit back/],
+  ['site/src/content/sections/01-definition.md', 'app visibility is conditional on the shared runtime', /Codex jobs show up in the ChatGPT app when it is connected to the same runtime/],
+  ['site/src/content/sections/01-definition.md', 'telemetry claim is scoped to Transmogrify', /Transmogrify collects nothing and needs no account or server of its own\. Your Claude and ChatGPT accounts work as they already do/],
+  ['site/src/content/sections/01-definition.md', 'definition explains the clone in plain words', /gives each job a name and its own clone of your repository/],
+  ['site/src/content/sections/03-matrix.md', 'matrix qualifies app visibility', /the ChatGPT app can show them live once it is connected to that server/],
+  ['site/src/content/sections/03-matrix.md', 'requirements name the platforms and the Claude host', /macOS or Linux with Node\.js \d+ or newer\. Claude jobs need an Apple Silicon Mac/],
+  ['site/src/content/sections/03-matrix.md', 'the loopback server has no authentication', /accepts connections from any program running there/],
   ['scripts/lib/exchange.js', 'exchange comment allows own Git metadata', /clone seat grants exactly its own \.git for child commits/],
+  ['CONTRIBUTING.md', 'release checklist covers the website refresh', /### Release checklist[\s\S]*site\/package\.json[\s\S]*05-read\.md[\s\S]*Site deploy[\s\S]*transmogrify\.sh\/start/],
+  ['site/README.md', 'site README points at the release refresh', /### Release refresh[\s\S]*same version as the root package/],
 ];
+
+// Semantic-version order for the changelog discipline below.
+function compareVersions(left, right) {
+  const parse = (version) => version.split('.').map(Number);
+  const [a, b] = [parse(left), parse(right)];
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return 0;
+}
+
+// A release turns `## <version> (in progress)` into `## <version>` in the same
+// commit that sets the version everywhere else; the top heading is the only
+// one allowed to carry the suffix, and only for a version newer than the
+// package.
+test('the changelog headings follow the package version', () => {
+  const version = JSON.parse(read('package.json')).version;
+  const headings = [...read('CHANGELOG.md').matchAll(/^## (\d+\.\d+\.\d+)(.*)$/gm)]
+    .map((match) => ({ version: match[1], suffix: match[2].trim() }));
+  assert.ok(headings.length > 0, 'CHANGELOG.md has no version headings');
+  assert.ok(headings.some((entry) => entry.version === version && entry.suffix === ''),
+    `CHANGELOG.md has no released heading for ${version}`);
+  const [top, ...rest] = headings;
+  if (top.version === version) {
+    assert.equal(top.suffix, '', 'the released heading carries no suffix');
+  } else {
+    assert.equal(top.suffix, '(in progress)', 'an unreleased top heading reads "(in progress)"');
+    assert.ok(compareVersions(top.version, version) > 0, 'the in-progress version must be newer than the package version');
+  }
+  for (const entry of rest) {
+    assert.doesNotMatch(entry.suffix, /in progress|unreleased/i, `${entry.version} still reads as unreleased`);
+  }
+});
+
+test('the site package version tracks the root package version', () => {
+  assert.equal(JSON.parse(read('site/package.json')).version, JSON.parse(read('package.json')).version);
+});
 
 for (const [file, contract, pattern] of documentationContracts) {
   test(`public documentation: ${contract}`, () => {
@@ -140,17 +172,16 @@ test('protocol Claude compatibility links resolve to the real heading', () => {
   assert.doesNotMatch(protocol, /CLAUDE-CODE\.md#measured-compatibility-tuple/);
 });
 
-test('site install runtime minimum agrees with the root package', () => {
+test('site runtime minimum agrees with the root package', () => {
   const minimum = JSON.parse(read('package.json')).engines.node.replace('>=', '');
-  assert.ok(read('site/src/content/sections/04-install.md').includes(`Node.js ${minimum} or newer`));
+  assert.ok(read('site/src/content/sections/03-matrix.md').includes(`Node.js ${minimum} or newer`));
 });
 
-test('site setup example refuses failed prerequisites before creating directories', () => {
-  const install = read('site/src/content/sections/04-install.md');
-  const firstWrite = install.indexOf('install -d');
-  for (const check of ['command -v git', 'command -v node', 'command -v npm', 'git rev-parse --verify HEAD',
-    'TRANSMOGRIFY_RESOLVED_REPO_ROOT="$(git rev-parse --show-toplevel)" && test -n "$TRANSMOGRIFY_RESOLVED_REPO_ROOT" || {']) {
-    assert.ok(install.indexOf(check) >= 0 && install.indexOf(check) < firstWrite, check);
+test('the README links every public document', () => {
+  const readme = read('README.md');
+  const documents = fs.readdirSync(path.join(root, 'docs')).filter((name) => name.endsWith('.md'));
+  for (const name of documents) assert.ok(readme.includes(`docs/${name}`), `README.md does not link docs/${name}`);
+  for (const file of ['SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'ROADMAP.md', 'examples/README.md']) {
+    assert.ok(readme.includes(file), `README.md does not link ${file}`);
   }
-  assert.match(install.slice(0, firstWrite), /repository root could not be resolved[^\n]+>&2\n\s+exit 1/);
 });

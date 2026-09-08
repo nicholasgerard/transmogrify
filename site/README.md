@@ -59,11 +59,13 @@ Other commands:
 Substantive copy lives in Markdown under `src/content/`, validated by the typed
 schemas in `src/content.config.ts`.
 
-- **`sections/*.md`** — the landing page. Prose is the Markdown body; anything
-  the page renders as *structure* (ledger rows, install steps, document cards,
-  the "not claimed yet" list) is typed frontmatter, so a copy edit cannot
-  silently break a layout. `order` controls sequence; `module` selects which
-  structural component renders after the prose.
+- **`sections/*.md`** — the landing page: what it is, how it works, and the
+  docs. Prose is the Markdown body; anything the page renders as *structure*
+  (ledger rows, the support matrix, the six document cards) is typed
+  frontmatter, so a copy edit cannot silently break a layout. `order` controls
+  sequence; `module` selects which structural component renders after the
+  prose. The only call to action on the page is the start prompt in the hero;
+  the page explains, it does not walk through an install.
 - **`legal/*.md`** — the Terms of Service and Privacy Policy, rendered by
   `src/pages/[slug].astro`. Both must declare the same `effectiveDate` as
   `LEGAL_EFFECTIVE_DATE` in `src/lib/site.ts`; the page throws at build time if
@@ -93,6 +95,20 @@ thing that tells you.
 Wire-level details, security boundaries, and full dated receipts link to their
 canonical documents on GitHub. The landing page carries only enough summary to
 explain current support; it is not a second protocol manual.
+
+### Release refresh
+
+Every release refreshes this site; the ordered checklist is in
+[CONTRIBUTING.md](../CONTRIBUTING.md#release-checklist). The header version
+and the `/start` handoff come from the root package at build time, so they
+update on their own once the deploy runs. Two things are not automatic, and
+`npm test` fails when either drifts: `package.json` in this directory carries
+the same version as the root package (`npm version <version>
+--no-git-tag-version` here updates the lockfile too), and the Docs section in
+`src/content/sections/05-read.md` keeps exactly six cards, each pointing at a
+document that exists; changing the set means changing the test that names it.
+The copy in `src/content/sections/*.md` is read against the release's changelog
+entries by hand; nothing checks prose for staleness.
 
 ### Remote start prompt
 
@@ -293,7 +309,9 @@ and output audits before rebuilding the default artifact. CI asserts there is
 no analytics code or source map in the uploaded `dist/`.
 
 The root `ci.yml` independently verifies the lifecycle tools with their own
-dependency set and test suite.
+dependency set and test suite. The deploy workflow's runtime gate runs that
+same root suite on Linux before the credentialed job, so a root test that
+passes only on the maintainer's machine blocks every deploy.
 
 ## Cloudflare deployment
 

@@ -6,11 +6,11 @@ import { docUrl } from '../lib/site.ts';
 const facts = getRepoFacts();
 
 const destinations = [
-  { label: 'Home', detail: 'The start prompt and what it installs.', href: '/' },
-  { label: 'Get started', detail: 'What the prompt actually runs.', href: '/#start' },
+  { label: 'Home', detail: 'The start prompt, what it does, and how it works.', href: '/' },
+  { label: 'Docs', detail: 'The six documents worth reading first.', href: '/#docs' },
   {
-    label: 'Operator skill',
-    detail: 'SKILL.md, the policy an agent loads.',
+    label: 'The skill',
+    detail: 'SKILL.md, the rules your agent loads.',
     href: docUrl(facts.repositoryUrl, 'SKILL.md'),
     external: true,
   },
@@ -25,15 +25,15 @@ const destinations = [
 
 <BaseLayout
   title="Page not found"
-  description="That address does not resolve on transmogrify.sh. Jump to the start prompt, the install steps, the operator skill, or the source repository."
+  description="That address does not exist on transmogrify.sh. Jump to the start prompt, the docs, the skill, or the source repository."
   noindex
 >
   <section class="shell notfound" aria-labelledby="nf-title">
     <p class="code" aria-hidden="true">404</p>
-    <h1 id="nf-title">No lane at that address.</h1>
+    <h1 id="nf-title">Nothing at that address.</h1>
     <p class="lede">
-      That page does not exist here. Nothing has been mutated and nothing was
-      adopted by name — the URL simply did not resolve.
+      That page does not exist here. Nothing was changed; the address just did
+      not resolve. Try one of these instead.
     </p>
 
     <ul class="destinations">

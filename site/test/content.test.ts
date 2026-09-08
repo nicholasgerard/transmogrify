@@ -5,7 +5,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { START_PROMPT } from '../src/lib/start-prompt.ts';
@@ -107,48 +107,6 @@ describe('the start prompt', () => {
   });
 });
 
-describe('the rendered install sequence', () => {
-  const source = readFileSync(
-    resolve(siteRoot, 'src/content/sections/04-install.md'),
-    'utf8',
-  );
-
-  test('defines target and seat roots before the release-pinned handoff', () => {
-    const target = source.indexOf('export REPO_ROOT=');
-    const seats = source.indexOf('export WORKTREES=');
-    const handoff = source.indexOf('Fetch https://transmogrify.sh/start');
-    assert.ok(target >= 0 && seats >= 0 && handoff >= 0);
-    assert.ok(target < handoff);
-    assert.ok(seats < handoff);
-    assert.match(source, /createHash\("sha256"\)/);
-    assert.match(source, /WORKTREES="\$TRANSMOGRIFY_DATA_ROOT\/worktrees\/\$TRANSMOGRIFY_REPO_KEY"/);
-    assert.match(source, /install -d -m 700 "\$WORKTREES"/);
-  });
-
-  test('does not present a mutable branch checkout as the automated install path', () => {
-    assert.doesNotMatch(source, /git clone|origin main|--branch\s+main/);
-    assert.match(source, /one exact[\s\S]*commit/);
-    assert.match(source, /refuses branch fallback/);
-  });
-
-  test('uses the defined roots in doctor and spawn commands', () => {
-    assert.match(source, /scripts\/doctor\.js[\s\S]*--repo-root "\$REPO_ROOT"/);
-    assert.match(source, /scripts\/lane\.js[\s\S]*--repo-root "\$REPO_ROOT"/);
-    assert.match(source, /--worktrees "\$WORKTREES"/);
-  });
-
-  test('creates a durable parent and dispatches with lineage and an execution intent', () => {
-    assert.match(source, /lane\.js" parent-init/);
-    assert.match(source, /HOST_PROVIDER=codex/);
-    assert.match(source, /HOST_APP=codex-desktop/);
-    assert.match(source, /--host-provider "\$HOST_PROVIDER"/);
-    assert.match(source, /--host-app "\$HOST_APP"/);
-    assert.match(source, /--parent-context-file "\$PARENT_CONTEXT"/);
-    assert.match(source, /--intent balanced/);
-    assert.match(source, /persist those exact handles and keep listening until the child returns/i);
-  });
-});
-
 describe('parseInline', () => {
   test('splits backticked code out of plain text', () => {
     assert.deepEqual(parseInline('run `npm ci` now'), [
@@ -232,5 +190,43 @@ describe('legal documents', () => {
     assert.match(source, /default is no analytics/i);
     assert.match(source, /Global Privacy Control/);
     assert.match(source, /Do Not Track/);
+  });
+});
+
+/**
+ * The release refresh has two manual parts, and a test fails when either is
+ * forgotten: the site package version tracks the root package, and the Docs
+ * section keeps its six reviewed cards pointing at documents that exist.
+ */
+describe('the release refresh', () => {
+  const repoRoot = resolve(siteRoot, '..');
+
+  test('the site package version tracks the root package version', () => {
+    const rootVersion = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8')).version;
+    const siteVersion = JSON.parse(readFileSync(resolve(siteRoot, 'package.json'), 'utf8')).version;
+    assert.equal(siteVersion, rootVersion, 'run `npm version <version> --no-git-tag-version` in site/');
+  });
+
+  describe('the documentation cards', () => {
+    const source = readFileSync(resolve(siteRoot, 'src/content/sections/05-read.md'), 'utf8');
+    const carded = [...source.matchAll(/^\s+path:\s*(\S+)\s*$/gm)].map((match) => match[1]);
+
+    test('the Docs section keeps six cards, each pointing at a document that exists', () => {
+      assert.equal(carded.length, 6, 'the landing page shows exactly six documents; change this test to change the set');
+      for (const path of carded) {
+        assert.ok(existsSync(resolve(repoRoot, path)), `${path} does not exist in the repository`);
+      }
+    });
+
+    test('the cards are the documents a first reader needs, in reading order', () => {
+      assert.deepEqual(carded, [
+        'SKILL.md',
+        'examples/README.md',
+        'docs/PROTOCOL.md',
+        'docs/CLAUDE-CODE.md',
+        'SECURITY.md',
+        'docs/TROUBLESHOOTING.md',
+      ]);
+    });
   });
 });

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.2 (in progress)
+
+- Make the website part of the release: the site package version tracks the
+  root version, the Docs section keeps six reviewed cards, the changelog
+  heading discipline is tested, the README must link every public document,
+  and CONTRIBUTING carries the ordered release checklist.
+- Rewrite the landing page in plain language: a new headline, a shorter "what
+  it is" and "how it works", no install walkthrough (the start prompt is the
+  only call to action), six document cards, a changelog link and a shorter
+  project list in the footer, and a regenerated social card.
+- Protect `main` with a repository ruleset (no deletion, no force pushes, the
+  six CI checks required on the exact commit) and remove the merged wave
+  branches; `main` is the only long-lived branch.
+- Make the doctor tests independent of the maintainer's machine: the bundled
+  Codex app tool and the host platform are injected, so the CI and site deploy
+  gates pass on GitHub runners without the apps installed. Both gates had been
+  red since 0.6.0, which kept the site at 0.5.0.
+
 ## 0.6.1
 
 - Gate Desktop attachment on exact-build relay attachment and thread-resume

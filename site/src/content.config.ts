@@ -6,8 +6,8 @@ import { glob } from 'astro/loaders';
  * Landing-page sections.
  *
  * Prose lives in the Markdown body. Anything the page renders as structure —
- * ledgers, steps, document cards — lives in typed frontmatter so a content edit
- * cannot silently break the layout.
+ * ledger rows, the support matrix, document cards — lives in typed frontmatter
+ * so a content edit cannot silently break the layout.
  *
  * Facts with a canonical home in the repository root are NOT stored here. The
  * compatibility matrix and version pins are read from README.md and SKILL.md at
@@ -28,22 +28,13 @@ const sections = defineCollection({
     title: z.string().min(4),
     lede: z.string().optional(),
     /** Which structural module renders after the prose body. */
-    module: z.enum(['prose', 'ledger', 'matrix', 'steps', 'docs']).default('prose'),
+    module: z.enum(['prose', 'ledger', 'matrix', 'docs']).default('prose'),
     ledger: z
       .array(
         z.object({
           term: z.string(),
           detail: z.string(),
           tone: z.enum(['affirm', 'deny']).default('affirm'),
-        }),
-      )
-      .optional(),
-    steps: z
-      .array(
-        z.object({
-          title: z.string(),
-          body: z.string(),
-          code: z.string().optional(),
         }),
       )
       .optional(),
@@ -57,9 +48,6 @@ const sections = defineCollection({
         }),
       )
       .optional(),
-    /** Release-gate items that are explicitly not yet claimed as supported. */
-    gated: z.array(z.string()).optional(),
-    footnote: z.string().optional(),
   }),
 });
 

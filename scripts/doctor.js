@@ -101,6 +101,10 @@ function parseCodexCliVersion(raw) {
   return match ? match[1] : null;
 }
 
+// The Codex command-line tool bundled inside the Codex app. Tests inject a
+// stand-in so the inventory is measured on machines without the app.
+const CODEX_DESKTOP_CLI = '/Applications/ChatGPT.app/Contents/Resources/codex';
+
 // Inventory each distinct executable from the three discovery surfaces.
 // Discovery never starts an app-server; unavailable runtimes add one
 // read-only login-status call against the selected supported executable.
@@ -111,7 +115,7 @@ function codexCliBinaries(env = process.env, dependencies = {}) {
       if (directory && path.isAbsolute(directory)) discovered.push({ path: path.join(directory, 'codex'), source: 'PATH' });
     }
     discovered.push({
-      path: '/Applications/ChatGPT.app/Contents/Resources/codex',
+      path: dependencies.codexDesktopCli || CODEX_DESKTOP_CLI,
       source: 'codex-desktop',
     });
     if (env.TRANSMOGRIFY_BIN && path.isAbsolute(env.TRANSMOGRIFY_BIN)) {

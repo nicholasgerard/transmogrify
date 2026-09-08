@@ -1,6 +1,6 @@
 {
   "name": "transmogrify-site",
-  "version": "0.2.0",
+  "version": "0.6.1",
   "private": true,
   "type": "module",
   "description": "Static marketing and documentation site for transmogrify.sh.",

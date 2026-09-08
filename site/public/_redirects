@@ -11,5 +11,5 @@
 
 # In-site conveniences.
 /docs      /#docs     301
-/install   /#start    301
+/install   /          301
 /home      /          301

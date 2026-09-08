@@ -47,10 +47,10 @@ recovery, retirement, and cleanup semantics.
 
 ## Support matrix
 
-| Orchestrator | Codex target | Claude Code target |
+| Host app | Codex jobs | Claude Code jobs |
 | --- | --- | --- |
-| Codex | Shared app-server protocol; live app visibility by measured Codex Desktop attachment receipt | Claude Code Remote Control adapter |
-| Claude Code | Shared app-server protocol; live app visibility by measured Codex Desktop attachment receipt | Claude Code Remote Control adapter |
+| Codex | Yes. They run on the shared Codex server and show live in the ChatGPT app once the app is connected to that server. | Yes. They run as named Remote Control sessions and show in the Claude app. |
+| Claude Code | Yes. They run on the shared Codex server and show live in the ChatGPT app once the app is connected to that server. | Yes. They run as named Remote Control sessions and show in the Claude app. |
 
 Provider-native host tools can accelerate bounded internal delegation or exact
 waiting when they expose a suitable receipt. A Transmogrify-managed app-visible
@@ -538,7 +538,9 @@ local record removal then continues.
   start prompt that works wherever it lands.
 - [Troubleshooting](docs/TROUBLESHOOTING.md): setup failures, runtime safety,
   upgrade/rollback, and cleanup recovery.
-- [Roadmap](ROADMAP.md): launch gate and forward priorities.
+- [Roadmap](ROADMAP.md): launch gate, dated run records, and forward
+  priorities.
+- [Changelog](CHANGELOG.md): what each release changed, newest first.
 - [Examples](examples/README.md): runnable packet, mailbox, handback, and
   retirement lifecycle.
 - [Contributing](CONTRIBUTING.md): development, receipt, review, and release

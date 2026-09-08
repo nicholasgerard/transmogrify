@@ -353,6 +353,9 @@ test('doctor maintenance command reuses PATH discovery without an undeclared Cla
     '--repo-root', fixture.repoRoot,
     '--target', 'claude',
   ], { ...fixture.env, PATH: '/opt/homebrew/bin:/usr/bin' }, {
+    // The measured Claude host tuple, so the test means the same thing on a
+    // Linux runner as on the maintainer's Mac.
+    hostContextDependencies: { platform: 'darwin', arch: 'arm64' },
     claudeSurface: fakeClaudeSurface(claudeCalls, [{
       sessionId: CLAUDE_SESSION,
       id: '11111111',
@@ -568,6 +571,9 @@ test('doctor names the owner action for every unmet setup precondition', async (
       desktop: { running: true },
       nextAction: 'run-desktop-attach-ensure',
     }),
+    // On a non-macOS host Claude is unsupported rather than blocked, which
+    // would make the report ready; pin the measured host tuple instead.
+    hostContextDependencies: { platform: 'darwin', arch: 'arm64' },
   });
   assert.equal(blocked.ok, false);
   assert.deepEqual(blocked.providers.claude.error, { code: 'UNSUPPORTED_ENVIRONMENT' });
@@ -713,15 +719,22 @@ test('doctor inventories every distinct Codex CLI candidate using only --version
   const secondDir = `${root}/second`;
   fs.mkdirSync(firstDir);
   fs.mkdirSync(secondDir);
+  const desktopDir = `${root}/desktop`;
+  fs.mkdirSync(desktopDir);
   const first = `${firstDir}/codex`;
   const second = `${secondDir}/codex`;
+  // A stand-in for the tool bundled in the Codex app, so the inventory is
+  // measured the same way on a runner without the app installed.
+  const desktop = `${desktopDir}/codex`;
   fs.writeFileSync(first, '#!/bin/sh\n', { mode: 0o700 });
   fs.writeFileSync(second, '#!/bin/sh\n', { mode: 0o700 });
+  fs.writeFileSync(desktop, '#!/bin/sh\n', { mode: 0o700 });
   const calls = [];
   const binaries = codexCliBinaries({
     PATH: `${firstDir}:${secondDir}`,
     TRANSMOGRIFY_BIN: second,
   }, {
+    codexDesktopCli: desktop,
     execFileSync(executable, args) {
       calls.push([executable, args]);
       return executable === fs.realpathSync(first) ? 'codex-cli 0.148.0\n' : 'codex-cli 0.153.0\n';
@@ -730,6 +743,7 @@ test('doctor inventories every distinct Codex CLI candidate using only --version
   assert.deepEqual(binaries.filter((binary) => binary.path.startsWith(fs.realpathSync(root))), [
     { path: fs.realpathSync(first), sources: ['PATH'], version: '0.148.0', supported: false },
     { path: fs.realpathSync(second), sources: ['PATH', 'TRANSMOGRIFY_BIN'], version: '0.153.0', supported: true },
+    { path: fs.realpathSync(desktop), sources: ['codex-desktop'], version: '0.153.0', supported: true },
   ]);
   assert.equal(binaries.some((binary) => binary.sources.includes('codex-desktop')), true);
   assert.equal(calls.every((call) => JSON.stringify(call[1]) === '["--version"]'), true);

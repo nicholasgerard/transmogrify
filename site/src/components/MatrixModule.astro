@@ -3,11 +3,6 @@ import Inline from './Inline.astro';
 import { getRepoFacts } from '../lib/repo-facts.node.ts';
 import { docUrl } from '../lib/site.ts';
 
-interface Props {
-  gated?: string[];
-}
-const { gated = [] } = Astro.props;
-
 const facts = getRepoFacts();
 const { headers, rows } = facts.supportMatrix;
 const [rowHeader, ...columnHeaders] = headers;
@@ -49,22 +44,6 @@ const [rowHeader, ...columnHeaders] = headers;
     <a href={docUrl(facts.repositoryUrl, 'README.md')} rel="noopener noreferrer external">
       README.md<span class="sr-only"> (opens on github.com)</span></a> when the site builds.
   </p>
-
-  {
-    gated.length > 0 && (
-      <section class="gated" aria-labelledby="gated-title">
-        <h3 id="gated-title">
-          <span class="gate-pip" aria-hidden="true" />
-          Not claimed yet
-        </h3>
-        <ul>
-          {gated.map((item) => (
-            <li><Inline text={item} /></li>
-          ))}
-        </ul>
-      </section>
-    )
-  }
 </div>
 
 <style>
@@ -152,55 +131,6 @@ const [rowHeader, ...columnHeaders] = headers;
 
   .source a {
     color: var(--muted);
-  }
-
-  .gated {
-    margin-block-start: var(--s-6);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius);
-    background: var(--warn-wash);
-    padding: var(--s-5);
-  }
-
-  .gated h3 {
-    display: flex;
-    align-items: center;
-    gap: 0.55rem;
-    font-size: var(--step--2);
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--warn);
-    margin-block-end: var(--s-4);
-  }
-
-  .gate-pip {
-    inline-size: 7px;
-    block-size: 7px;
-    border-radius: 2px;
-    background: var(--warn);
-    flex: none;
-  }
-
-  .gated ul {
-    display: grid;
-    gap: var(--s-3);
-    padding-inline-start: 1.1em;
-    color: var(--muted);
-    font-size: var(--step--1);
-    line-height: 1.65;
-  }
-
-  .gated :global(code) {
-    background: var(--bg-inset);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-    padding: 0.05em 0.32em;
-    color: var(--text);
-    overflow-wrap: anywhere;
-  }
-
-  .gated :global(strong) {
-    color: var(--text);
   }
 
   /* Below the table's natural width, the grid becomes stacked records so the
