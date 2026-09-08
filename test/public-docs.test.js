@@ -55,10 +55,11 @@ test('current support docs separate measured minimums from the private archive p
   assert.doesNotMatch(read('.github/ISSUE_TEMPLATE/bug.yml'), /0\.2\.6/);
 });
 
-test('the roadmap preserves the dated release exception and fresh-machine gate', () => {
+test('the roadmap preserves the dated release exceptions and fresh-machine gate', () => {
   const roadmap = read('ROADMAP.md');
   assert.ok(roadmap.includes('2026-09-04 exception: 0.6.0 shipped without the fresh-machine acceptance pass.'));
-  assert.match(roadmap, /0\.6\.1 release gate still requires[\s\S]*machine that has never seen Transmogrify/);
+  assert.match(roadmap, /2026-09-08 exception: 0\.6\.1 shipped on the owner's decision/);
+  assert.match(roadmap, /The gate is retained\. The next release requires[\s\S]*machine that has never seen\nTransmogrify, with exact builds and outcomes recorded before release/);
   assert.match(roadmap, /Persistence across login, mobile[\s\S]*remain unverified live/);
   assert.doesNotMatch(roadmap, /queued for a Codex worker/);
 });

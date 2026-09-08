@@ -3,8 +3,9 @@
 The onboarding flow shipped in 0.6.0 and was hardened for 0.6.1. The current
 contract below describes the merged code. The original problem and plan are
 retained as dated history; they do not claim current support. The fresh-machine
-live acceptance pass is still outstanding; see the recorded 0.6.0 exception
-and the 0.6.1 release gate in [ROADMAP.md](../ROADMAP.md#release-gate-and-recorded-exception).
+live acceptance pass is still outstanding; see the recorded 0.6.0 and 0.6.1
+exceptions and the retained release gate in
+[ROADMAP.md](../ROADMAP.md#release-gate-and-recorded-exceptions).
 
 ## Historical problem report (2026-09-03)
 

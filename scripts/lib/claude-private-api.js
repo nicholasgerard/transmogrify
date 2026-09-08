@@ -19,11 +19,11 @@ const {
 // rather than configuration: changing one without a fresh live acceptance run
 // removes the basis for using the private API at all.
 const API_ORIGIN = 'https://api.anthropic.com';
-const DESKTOP_BUILD = '1.40609.1';
+const DESKTOP_BUILD = '1.46388.4';
 const DESKTOP_BUNDLE_ID = 'com.anthropic.claudefordesktop';
 const DESKTOP_APP_ASAR = '/Applications/Claude.app/Contents/Resources/app.asar';
-const DESKTOP_APP_ASAR_SHA256 = '0fcf5499f5eee77bb769362a3603a4278b5ba9a8ae2620395146afc60c13861f';
-const DESKTOP_BUNDLE_VERSION = '1.40609.1';
+const DESKTOP_APP_ASAR_SHA256 = 'c48a2abd9aeba23843a09f2d5e1ce9207f2bebe9af014ff9ccd70862b136e9d7';
+const DESKTOP_BUNDLE_VERSION = '1.46388.4';
 const DESKTOP_INFO_PLIST = '/Applications/Claude.app/Contents/Info.plist';
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const MAX_PRIVATE_RESPONSE_BYTES = 64 * 1024;

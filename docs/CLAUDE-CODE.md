@@ -292,9 +292,9 @@ invocations, but it is not required for the current lifecycle contract.
 | Claude Code CLI public lifecycle | `2.1.258` or newer after measurement |
 | Pre-measured CLI SHA-256 | `b63136194160791c27cfa7b0403060d85eb0752991625fde8c09f9acacb17c78` |
 | Prior CLI SHA-256, runtime-transition receipt only, not accepted for mutation | `64590d7d9d9c189d33fb3dfa58c5408eaf2a10fe556bd84155d95efaab46b60e` |
-| Claude Desktop | `1.40609.1` |
+| Claude Desktop | `1.46388.4` (re-measured 2026-09-08; the prior `1.40609.1` pin is no longer accepted) |
 | Desktop bundle ID | `com.anthropic.claudefordesktop` |
-| Desktop `app.asar` SHA-256 | `0fcf5499f5eee77bb769362a3603a4278b5ba9a8ae2620395146afc60c13861f` |
+| Desktop `app.asar` SHA-256 | `c48a2abd9aeba23843a09f2d5e1ce9207f2bebe9af014ff9ccd70862b136e9d7` |
 | Claude for iOS | `1.260828.1` (`33349478298`) |
 
 The public lifecycle adapter requires the minimum version, then observes an

@@ -308,20 +308,48 @@ Desktop host, terminal, IDE, and unsupported platforms. Not exercised live:
 `persist --authorize` (an owner decision), a machine that has never seen
 Transmogrify, and mobile reattachment after a Desktop restart.
 
-## Release gate and recorded exception
+2026-09-08, release 0.6.1, unattended maintainer run after the owner
+reinstalled both hosts from the release candidate. Live on the maintainer host
+with the merged tree: the installed doctor reported both providers ready with
+one limitation (this Codex app version has not been verified with a shared
+runtime; lanes work but do not stream in the app), `setup --dry-run` reported
+`ready-with-limitations` with no steps, the attachment check reported Codex
+Desktop 26.901.51231 as `broken`, unattached, and not persisted, and
+`runtime-up.sh` reused the managed daemon 0.153.4 and the relay. Two
+disposable probe lanes, one Codex (recorded protocol-only under
+`--allow-protocol-only`) and one Claude Code, ran the clone exchange end to
+end: each committed on its own seat and reported the SHA, the parent was woken
+for both completions, `harvest` fetched each child commit without the
+`--commit` fallback, and both retired with clean cleanup. Found during the run:
+the owner's Claude Desktop update to 1.46388.4 made the private archive refuse
+with `UNVERIFIED_PRIVATE_VERSION`, as designed; the bundle was re-measured
+(bundle id, version, `app.asar` digest, and the private route and header
+strings present), the pin moved to 1.46388.4, and the Claude probe's
+retirement then archived live through the re-pinned surface. Not exercised
+live: Codex Desktop streaming (no verified build on 26.901.51231), `persist
+--authorize`, a machine that has never seen Transmogrify, and mobile
+reattachment after a Desktop restart.
+
+## Release gate and recorded exceptions
 
 2026-09-04 exception: 0.6.0 shipped without the fresh-machine acceptance pass.
-The 0.6.1 release gate still requires the onboarding acceptance matrix on the
-maintainer host and a machine that has never seen Transmogrify. Record exact
-builds and outcomes before release. Persistence across login, mobile
-reattachment after a Desktop restart, and seeded same-name foreign sessions
+
+2026-09-08 exception: 0.6.1 shipped on the owner's decision with every
+acceptance row that can run on the maintainer host exercised (the 0.6.1 record
+above) and without the pass on a machine that has never seen Transmogrify.
+
+The gate is retained. The next release requires the onboarding acceptance
+matrix on the maintainer host and on a machine that has never seen
+Transmogrify, with exact builds and outcomes recorded before release.
+Persistence across login, mobile reattachment after a Desktop restart, Codex
+Desktop streaming on a verified build, and seeded same-name foreign sessions
 remain unverified live unless a later dated receipt closes them.
 
 ## Historical 0.6.0 plan (2026-09-04)
 
 This plan records the intended release gate and the original operator-commit
-exchange. The current clone exchange is described above. The exception above
-records the gate that the 0.6.0 release did not meet.
+exchange. The current clone exchange is described above. The exceptions above
+record the gate that the 0.6.0 and 0.6.1 releases did not meet.
 
 Goal: a runtime that survives relaunches, app updates, and logins, and an
 onboarding that works from any first entry point. Seven lane packets, each
@@ -359,7 +387,8 @@ and one machine that has never seen Transmogrify.
 - Complete the live onboarding acceptance for the implemented compatibility
   measurements, host detection, explaining doctor, guided setup, and start
   handoff in [docs/ONBOARDING.md](docs/ONBOARDING.md). Fresh-machine behavior is
-  covered with fakes; the fresh-machine live pass is still required for 0.6.1.
+  covered with fakes; the fresh-machine live pass is still required for the
+  next release.
 
 - Claude resume lineage. On CLI `2.1.258` a background resume of a stopped
   job forks a new session; the adapter stops that fork and leaves the lane

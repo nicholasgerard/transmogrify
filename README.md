@@ -89,7 +89,7 @@ verified builds and receipts are in the
   Known executable hashes use pre-measured evidence; other builds must pass
   vendor observations and option checks. Failed measurements block mutations.
   Private archive separately requires the exact CLI hash and Claude Desktop
-  `1.40609.1` build in the archive compatibility tuple. Native mobile behavior
+  `1.46388.4` build in the archive compatibility tuple. Native mobile behavior
   was verified with Claude for iOS `1.260828.1` (`33349478298`). Run
   `claude auth login` and `claude auth status` after installation; see
   [Claude compatibility](docs/CLAUDE-CODE.md#compatibility-receipts).

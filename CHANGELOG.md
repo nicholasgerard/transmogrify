@@ -1,12 +1,16 @@
 # Changelog
 
-## 0.6.1 (in progress)
+## 0.6.1
 
 - Gate Desktop attachment on exact-build relay attachment and thread-resume
   verification. Record app build 8109 as broken, pause persisted streaming on
   app updates, restore the saved login setting, and keep protocol lanes ready
   with limitations. Add resume-error rescue guidance and exact-build owner
-  verification. The fresh-environment acceptance pass remains required.
+  verification. Released on a recorded owner exception for the acceptance pass
+  on a machine that has never seen Transmogrify (see ROADMAP).
+- Move the private Claude archive pin to Claude Desktop `1.46388.4` after
+  re-measuring the bundle and archiving a live probe lane through it; the
+  `1.40609.1` pin is no longer accepted.
 
 - The completion wake says a child "finished its turn" rather than "completed its
   task", because an interrupted turn also completes; task success is never
