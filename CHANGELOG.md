@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.6.1 (unreleased: awaiting the fresh-environment acceptance pass)
+## 0.6.1 (in progress)
+
+- Gate Desktop attachment on exact-build relay attachment and thread-resume
+  verification. Record app build 8109 as broken, pause persisted streaming on
+  app updates, restore the saved login setting, and keep protocol lanes ready
+  with limitations. Add resume-error rescue guidance and exact-build owner
+  verification. The fresh-environment acceptance pass remains required.
 
 - The completion wake says a child "finished its turn" rather than "completed its
   task", because an interrupted turn also completes; task success is never

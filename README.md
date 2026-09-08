@@ -76,9 +76,10 @@ verified builds and receipts are in the
 - Git, Bash, `ps`, and `lsof`. Confirm them with `node --version`,
   `npm --version`, `git --version`, and `lsof -v`.
 - Codex CLI/app-server `0.151.0` or newer for Codex targets, verified with `0.151.0`.
-  Attached live visibility is verified with Codex Desktop `26.901.22334`
-  (`7746`), `26.901.20858` (`7658`), and `26.825.51511` (`7377`), and mobile
-  visibility with ChatGPT for iOS `1.2026.230` (`32543289983`). Install and sign in using the
+  Historical streaming observations cover Codex Desktop `26.901.22334`
+  (`7746`), `26.901.20858` (`7658`), and `26.825.51511` (`7377`). These builds
+  need relay thread-resume verification before attachment is enabled. Mobile
+  visibility was measured with ChatGPT for iOS `1.2026.230` (`32543289983`). Install and sign in using the
   [official Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
 - Standalone Codex tools are CI-tested on macOS and Linux; Windows is not a
   supported host in this release.
@@ -213,7 +214,7 @@ protocol contract. `nativeVisibility` is a separate measured receipt:
 that runtime, with the client pid, the connection, the app version, and
 whether that build is on the tested list; otherwise the Desktop state that was
 observed and the next action, normally `desktop-attach.js ensure`. After a
-Desktop restart or update, rerun the doctor: attachment must be measured again, including when persistence is configured.
+Desktop restart or update, rerun the doctor: attachment must be measured again, including when persistence is configured. An app update pauses persisted attachment and restores the saved login setting.
 Exact-owned recovery and retirement on a surviving runtime remain available.
 Runtime selection is the same here and in `desktop-attach.js`: explicit
 `--url`, `TRANSMOGRIFY_URL`, the live relay record, `TRANSMOGRIFY_PORT`, then legacy port 8843.
@@ -264,9 +265,16 @@ bounded non-secret environment (`HOME`, `CODEX_HOME`, and the like), relying on
 the existing file-backed Codex login. Never use the launcher to replace or
 reconfigure a runtime owned by another program.
 
+Protocol-only lanes are the safe default. Live streaming in the Codex app is
+conditional on a verified app version and build. Verification must cover both
+attachment and thread resume through the relay. Historical streaming-only
+observations do not meet that requirement. App `26.901.51231` build `8109` is
+recorded broken because its remote runtime path rejects its own app-tools
+placeholder when resuming threads.
+
 Codex Desktop adopts that runtime when the app is launched with
 `CODEX_APP_SERVER_WS_URL` set to the endpoint, and
-`scripts/desktop-attach.js ensure` does that for you: it reuses an existing
+`scripts/desktop-attach.js ensure` does that on a verified build: it reuses an existing
 attachment, including one another operator set up, launches Desktop attached
 when it is not running, and quits and relaunches a running unattached Desktop
 only after the owner agrees (`--relaunch-desktop` for one run, or the standing
@@ -281,8 +289,14 @@ daemon/proxy surface is the roadmap candidate to replace this mechanism.
 `desktop-attach.js persist --dry-run` shows the exact login environment and
 per-user LaunchAgent it would install. After owner review,
 `persist --authorize` sets the login-session URL and writes
-`~/Library/LaunchAgents/sh.transmogrify.attach.plist`; the agent ensures the
-daemon and relay before reapplying the URL at login. `unpersist --authorize`
+`~/Library/LaunchAgents/sh.transmogrify.attach.plist`; the agent checks the
+installed app against the receipt before ensuring the daemon and relay and
+reapplying the URL at login. A changed or unverified build rolls back the saved
+login setting and removes persistence. Every attachment check performs the
+same safety check. Reopen the app to return an already-running session to its
+vendor runtime. After manually checking relay attachment and thread resume,
+record the exact installed pair with `desktop-attach.js persist --authorize
+--verified-build <version> <build>`. `unpersist --authorize`
 restores the receipted prior login value and removes only its matching owned
 LaunchAgent. Persistence refuses foreign values or files and rolls back partial
 writes. It never relaunches a running Desktop app. Login persistence and mobile

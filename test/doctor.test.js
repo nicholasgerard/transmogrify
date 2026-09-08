@@ -241,80 +241,33 @@ test('doctor turns real missing Claude discovery into the install plan', async (
   assert.match(result.setup.plan.steps[0].command, /--install-claude-cli$/);
 });
 
-test('doctor turns a measured Desktop attachment into the native-visibility receipt', async (t) => {
-  const fixture = createRepoWithSeat(t);
-  const server = await startMockAppServer();
-  t.after(() => server.close());
-  const probes = [];
-  const attached = await main([
-    '--repo-root', fixture.repoRoot,
-    '--target', 'codex',
-    '--url', server.url,
-  ], fixture.env, {
-    desktopAttachment: async (probe) => {
-      probes.push(probe.url);
-      return {
-        attachment: {
-          state: 'attached',
-          evidence: 'lsof-established-loopback-connection',
-          clientPid: 96049,
-          connection: '127.0.0.1:53519->127.0.0.1:8843',
-          observedAt: '2026-09-02T22:00:00.000Z',
-        },
-        desktop: {
-          bundleId: 'com.openai.codex', version: '26.999.1', build: '9999', buildTested: false, hostedByDesktop: false,
-        },
-        nextAction: 'none',
-      };
-    },
-  });
-  assert.equal(attached.ok, true);
-  assert.deepEqual(probes, [new URL(server.url).href]);
+test('doctor requires a verified app build as well as a live attachment', async (t) => {
+  const { doctorReport } = require('./helpers/onboarding-fixture');
+  const attached = await doctorReport(t, { target: 'codex', persisted: false });
+  assert.equal(attached.providers.codex.nativeVisibility.verified, true);
+  assert.equal(attached.providers.codex.desktop.attachStatus, 'verified');
   assert.deepEqual(attached.providers.codex.nativeVisibility, {
-    verified: true,
-    nativeDispatchReady: true,
-    persisted: false,
+    verified: true, nativeDispatchReady: true, persisted: false,
     evidence: 'codex-desktop-attached-to-selected-runtime',
-    receipt: {
-      clientPid: 96049,
-      connection: '127.0.0.1:53519->127.0.0.1:8843',
-      observedAt: '2026-09-02T22:00:00.000Z',
-      bundleId: 'com.openai.codex',
-      desktopVersion: '26.999.1',
-      desktopBuild: '9999',
-      buildTested: false,
-      hostedByDesktop: false,
-    },
-    nextAction: 'run-disposable-exact-owned-app-visibility-check-on-this-untested-desktop-build',
+    receipt: { clientPid: 96049, connection: '127.0.0.1:53519->127.0.0.1:8844',
+      observedAt: '2026-09-02T22:00:00.000Z', bundleId: 'com.openai.codex',
+      desktopVersion: '26.901.20858', desktopBuild: '7658', buildTested: true, hostedByDesktop: false },
+    nextAction: 'none',
   });
-
-  const unattached = await main([
-    '--repo-root', fixture.repoRoot,
-    '--target', 'codex',
-    '--url', server.url,
-  ], fixture.env, {
-    desktopAttachment: async () => ({
-      attachment: { state: 'unattached', evidence: 'no-established-connection-to-runtime' },
-      desktop: { running: true },
-      nextAction: 'run-desktop-attach-ensure',
-    }),
-  });
-  assert.equal(unattached.ok, true);
+  const unattached = await doctorReport(t, { target: 'codex', persisted: false, desktopState: 'unattached' });
   assert.deepEqual(unattached.providers.codex.nativeVisibility, {
-    verified: false,
-    nativeDispatchReady: false,
-    persisted: false,
-    evidence: 'desktop-attachment:unattached',
-    nextAction: 'run-desktop-attach-ensure',
+    verified: false, nativeDispatchReady: false, persisted: false,
+    evidence: 'desktop-attachment:unattached', nextAction: 'run-desktop-attach-ensure',
   });
-
-  const failing = await main([
-    '--repo-root', fixture.repoRoot,
-    '--target', 'codex',
-    '--url', server.url,
-  ], fixture.env, {
-    desktopAttachment: async () => { throw new Error('lsof exploded'); },
+  const untested = await doctorReport(t, {
+    target: 'codex', persisted: false, desktopOptions: { version: '26.999.1', build: '9999' },
   });
+  assert.equal(untested.providers.codex.nativeVisibility.verified, false);
+  assert.equal(untested.providers.codex.nativeVisibility.nativeDispatchReady, false);
+  assert.equal(untested.providers.codex.setup.reason, 'desktop-build-unverified');
+  assert.equal(untested.setup.outcome, 'ready-with-limitations');
+  assert.match(untested.providers.codex.nativeVisibility.nextAction, /unpersist --authorize/);
+  const failing = await doctorReport(t, { target: 'codex', desktopState: 'toolUnavailable' });
   assert.equal(failing.providers.codex.nativeVisibility.evidence, 'desktop-attachment:toolUnavailable');
   assert.equal(failing.providers.codex.reusable, true);
 });
@@ -342,21 +295,11 @@ test('doctor selects the live relay record for both its protocol and attachment 
     measureCodexCompatibility: async () => ({ result: 'good', probes: [] }),
     desktopAttachment: async (options) => {
       probes.push(['desktop', options.url]);
-      return {
-        persisted: true,
-        attachment: {
-          state: 'attached',
-          evidence: 'lsof-established-loopback-connection',
-          clientPid: 96049,
-          connection: '127.0.0.1:53519->127.0.0.1:8844',
-          observedAt: '2026-09-04T12:00:00.000Z',
-          relay,
-        },
-        desktop: {
-          bundleId: 'com.openai.codex', version: '26.901.20858', build: '7658', buildTested: true,
-        },
-        nextAction: 'none',
-      };
+      return require('../scripts/lib/desktop-attach').check(options, {},
+        require('./helpers/desktop-attachment-fixture').scenario({
+          attached: true, runtimePort: 8844, relayRecord: relay,
+          persistedUrl: relay.url, plistExists: true,
+        }).dependencies);
     },
   });
   assert.equal(result.ok, true);
@@ -577,15 +520,10 @@ test('doctor explain attaches a plan and renders the four-line TTY summary', asy
       async connect() { return { userAgent: 'codex_cli_rs/0.151.0' }; },
       close() {},
     }),
-    desktopAttachment: async () => ({
-      attachment: {
-        state: 'attached', evidence: 'lsof-established-loopback-connection', clientPid: 1,
-        connection: '127.0.0.1:1->127.0.0.1:2', observedAt: '2026-09-03T10:00:00.000Z',
-      },
-      desktop: { bundleId: 'com.openai.codex', version: '26.901.20858', build: '7658', buildTested: true },
-      persisted: true,
-      nextAction: 'none',
-    }),
+    desktopAttachment: () => require('../scripts/lib/desktop-attach').check({}, {},
+      require('./helpers/desktop-attachment-fixture').scenario({ attached: true, runtimePort: 8844,
+        relayRecord: { url: 'ws://127.0.0.1:8844/', socketPath: '/tmp/daemon.sock' },
+        persistedUrl: 'ws://127.0.0.1:8844/', plistExists: true }).dependencies),
     detectHostContext: () => ({
       app: 'codex-tui', surface: 'terminal',
       platform: { os: 'darwin', arch: 'arm64', claudeLanesSupported: true },
@@ -694,14 +632,8 @@ test('doctor names the owner action for every unmet setup precondition', async (
     '--url', server.url,
   ], fixture.env, {
     claudeSurface: fakeClaudeSurface(claudeCalls, []),
-    desktopAttachment: async () => ({
-      attachment: {
-        state: 'attached', evidence: 'lsof-established-loopback-connection', clientPid: 1,
-        connection: '127.0.0.1:1->127.0.0.1:2', observedAt: '2026-09-02T22:00:00.000Z',
-      },
-      desktop: { bundleId: 'com.openai.codex', version: '26.901.20858', build: '7658', buildTested: true },
-      nextAction: 'none',
-    }),
+    desktopAttachment: () => require('../scripts/lib/desktop-attach').check({}, {},
+      require('./helpers/desktop-attachment-fixture').scenario({ attached: true }).dependencies),
   });
   assert.equal(ready.ok, true);
   assert.deepEqual(ready.setup, {

@@ -50,27 +50,20 @@ function claudeSurface(reason, measurement = {}) {
   };
 }
 
-function attachment(state = 'attached', persisted = true) {
-  if (state === 'attached') {
-    return {
-      persisted,
-      attachment: {
-        state: 'attached', clientPid: 1,
-        connection: '127.0.0.1:1->127.0.0.1:2', observedAt: '2026-09-05T12:00:00.000Z',
-      },
-      desktop: {
-        installed: true, running: true, bundleId: 'com.openai.codex',
-        version: '26.901.22334', build: '7746', buildTested: true,
-      },
-      nextAction: 'none',
-    };
-  }
-  return {
-    persisted,
-    attachment: { state },
-    desktop: { installed: state !== 'notInstalled', running: state !== 'notRunning' && state !== 'notInstalled' },
-    nextAction: state === 'notRunning' ? 'run-desktop-attach-ensure' : 'repair-desktop-attachment',
-  };
+async function attachment(state = 'attached', persisted = true, options = {}) {
+  const { check } = require('../../scripts/lib/desktop-attach');
+  const { scenario } = require('./desktop-attachment-fixture');
+  const fake = scenario({
+    attached: state === 'attached', running: state !== 'notRunning',
+    installed: state !== 'notInstalled', ...options,
+    runtimePort: 8844,
+    relayRecord: { url: 'ws://127.0.0.1:8844/', socketPath: '/tmp/fixture-daemon.sock' },
+    persistedUrl: persisted ? 'ws://127.0.0.1:8844/' : '', plistExists: persisted,
+    elsewherePort: state === 'attachedElsewhere' ? 9999 : null,
+  });
+  if (state === 'unsupportedPlatform') fake.dependencies.platform = 'linux';
+  if (state === 'toolUnavailable') fake.dependencies.execFileResult = async () => ({ code: null, failure: 'missing' });
+  return check({}, state === 'disabled' ? { TRANSMOGRIFY_DESKTOP_ATTACH: 'off' } : {}, fake.dependencies);
 }
 
 async function doctorReport(t, scenario = {}) {
@@ -104,7 +97,7 @@ async function doctorReport(t, scenario = {}) {
             error.code = 'EPERM';
             throw error;
           }
-          return { userAgent: runtimeState === 'unsupported' ? 'codex_cli_rs/0.148.0' : 'codex_cli_rs/0.155.0' };
+          return { userAgent: runtimeState === 'unsupported' ? 'codex_cli_rs/0.148.0' : `codex_cli_rs/${scenario.codexVersion || '0.155.0'}` };
         },
         close() {},
       };
@@ -112,7 +105,7 @@ async function doctorReport(t, scenario = {}) {
     measureCodexCompatibility: async () => runtimeState === 'unsupported'
       ? { result: 'failed', failingMethod: 'minimum-version', private: 'hidden' }
       : { result: 'good', private: 'hidden' },
-    desktopAttachment: async () => attachment(scenario.desktopState, scenario.persisted ?? true),
+    desktopAttachment: scenario.desktopAttachment || (async () => attachment(scenario.desktopState, scenario.persisted ?? true, scenario.desktopOptions)),
     claudeSurface: claudeSurface(scenario.claudeReason, scenario.claudeMeasurement),
   };
   return doctor({

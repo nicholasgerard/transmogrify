@@ -53,7 +53,7 @@ Every lane-bound operation (`spawn`, `status`, `steer`, `interrupt`, `stop`,
   with `runtimeUrl`, `evidence`, `connection`, `observedAt`, `bundleId`,
   `desktopVersion`, `desktopBuild`, `buildTested`, `clientPid`.
 
-The read-only `desktop-attach.js check` receipt includes `runtimeUrl`,
+The `desktop-attach.js check` receipt includes `runtimeUrl`,
 `runtimeSource`, and the explicit boolean `persisted`. `persisted:true` means
 the selected endpoint is a live relay, `launchctl getenv
 CODEX_APP_SERVER_WS_URL` equals that relay URL, and
@@ -64,10 +64,44 @@ unreadable evidence is `false`. An attached relay receipt also includes
 
 Relay helper records include `origin`, either `launched` or `adopted`; a legacy
 record may omit it and is interpreted as adopted. A successful `persist` result
-adds `persistence.phase: applied`. `apply-persisted` adds
+adds `persistence.phase: applied`, `persistence.desktop.version`,
+`persistence.desktop.build`, and `persistence.daemonVersion`. `apply-persisted` adds
 `environmentChanged`, which is true only when it set a previously unset login
 value. Persistence refusals may report `currentValue`, `plannedValue`, and
 `appliedValue` so the owner can see what would be replaced.
+
+Attachment receipts expose `desktop.attachStatus`: `verified`, `broken`, or
+`untested`. `desktop.buildTested` remains a compatibility boolean and is true
+only for `verified`. Historical streaming-only table entries are `untested`.
+An exact owner attestation from `--verified-build <version> <build>` records
+relay attachment and thread-resume verification and can supersede a broken
+historical result. The flag applies only to `ensure` and `persist`; dry runs do
+not save an attestation. Refusals use `POLICY_REFUSAL` and plain build guidance.
+
+A live connection on an unverified build returns `ok:false`,
+`attachment.state: unverifiedBuild`, and the rescue command
+`node "$SKILL_ROOT/scripts/desktop-attach.js" unpersist --authorize` as
+`nextAction`. This state cannot supply native dispatch evidence. An unattached
+unverified app returns build guidance rather than an attachment action.
+
+`check` and login `apply-persisted` compare the app with the private version-2
+persistence receipt, which pins `desktop.version`, `desktop.build`, and
+`daemonVersion`. An app change, an unverified status, or a legacy receipt
+without app pins rolls back through `rollbackValue` and removes persistence.
+A failed rollback retains authority for retry. Successful rollback returns
+`attachment.state: paused` and `attachment.paused: {reason, previousBuild,
+currentBuild}`. Build values contain `version` and `build`, or are `null` when
+unknown. Reasons are `app-updated`, `app-build-broken`, and `app-build-untested`.
+The private receipt directory retains this object in `paused.json`.
+`check` reports `persisted:false` while paused. Reopening the app restores its
+runtime; a check does not relaunch an already-running app.
+
+The doctor exposes the same `desktop` and `attachment` under `providers.codex`.
+Its native visibility requires both `attachStatus: verified` and a live
+connection. Paused attachments remain `ready-with-limitations` when the
+protocol runtime is reusable. Their plan has one `attachment-paused` notice,
+with consent `none`, explaining reopening, verification, and re-enabling.
+Setup displays this notice without executing its command or asking for consent.
 
 ## Operations
 
@@ -248,7 +282,7 @@ ordered `steps`. Every step has a typed `action`, plus `what`, `why`,
 `consent`, and `command`. A `start-runtime` step also has `binary`, the exact
 supported executable selected from the doctor's observation. `action` is one
 of `install-claude`, `install-codex`, `sign-in-claude`, `sign-in-codex`,
-`start-runtime`, `open-app`, `relaunch-app`, or `persist-attach`.
+`start-runtime`, `open-app`, `relaunch-app`, `persist-attach`, or `attachment-paused`.
 `consent` is one of `none`, `install`, `sign-in`, `start-runtime`,
 `relaunch-desktop`, or `persist-attach`. The existing `setup.ownerActions`
 remain unchanged beside the plan. On a terminal, `--explain` prints only the
@@ -256,12 +290,13 @@ four-line `Found`, `Ready`, `Needed`, `Next` summary. Pass `--json` to print
 the JSON document instead. When stdout is not a terminal, JSON is always
 printed, including with `--explain`.
 The doctor adds `persist-attach` only after Codex Desktop attachment is
-verified and `nativeVisibility.persisted` explicitly reports `false`. Older or
+verified, `providers.codex.desktop.attachStatus` is `verified`, and
+`nativeVisibility.persisted` explicitly reports `false`. Older or
 partial receipts with no `persisted` field do not imply that action.
 
 ### `doctor`
 
-The doctor is a separate read-only JSON report rather than a lane output-schema
+The doctor is a separate provider-probe JSON report rather than a lane output-schema
 operation. Its top level carries `version`, `ok`, `mode`,
 `providerMutationsAttempted`, `registry`, `providers`, `setup`, and
 `nextSafeMaintenanceCommands`.

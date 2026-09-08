@@ -11,6 +11,7 @@
 const { parseArgs } = require('node:util');
 const { exitCodeForError, failureBody, publicErrorMessage } = require('./lib/public-error');
 const {
+  BUILD_REFUSAL,
   DEFAULT_ATTACH_TIMEOUT_MS,
   DISABLE_ENV,
   DesktopAttachError,
@@ -25,7 +26,7 @@ const {
 const HELP = `usage: desktop-attach.js <check|ensure|persist|unpersist> [options]
 
 operations:
-  check     read-only: report whether Codex Desktop holds a live connection to
+  check     roll back obsolete persistence and report a live connection to
             the runtime (exit 0 attached, 3 otherwise)
   ensure    reuse an existing attachment; launch Desktop attached when it is
             not running; relaunch it only with authorization
@@ -40,6 +41,9 @@ options:
                             for this run (or set ${RELAUNCH_ENV}=auto)
   --launch-only             launch a stopped Desktop against an already-live
                             relay without starting a runtime or relay
+  --verified-build <version> <build>
+                            record your manual relay attachment and thread
+                            resume verification for this exact app build
   --timeout-ms <ms>         attachment wait after a launch
                             (default ${DEFAULT_ATTACH_TIMEOUT_MS})
   --dry-run                 show the exact persistence write and environment
@@ -48,7 +52,7 @@ options:
                             unpersist operation
 
 environment:
-  ${DISABLE_ENV}=off   report the check as disabled without probing
+  ${DISABLE_ENV}=off   disable attachment; obsolete persistence still rolls back
   ${RELAUNCH_ENV}=auto standing owner authorization to relaunch
 
 exit codes (shared by every Transmogrify command):
@@ -63,7 +67,7 @@ function usage(message) {
 }
 
 // Parses the operation and its options, refusing --relaunch-desktop and
-// --timeout-ms on check so a read-only invocation can never authorize a quit.
+// --timeout-ms on check so an inspection can never authorize an app quit.
 // A bare invocation or a lone --help returns help text instead of an operation.
 function parseCli(argv) {
   if (argv.length === 0 || (argv.length === 1 && ['--help', '-h'].includes(argv[0]))) {
@@ -75,6 +79,7 @@ function parseCli(argv) {
     strict: true,
     options: {
       url: { type: 'string' },
+      'verified-build': { type: 'string' },
       'relaunch-desktop': { type: 'boolean' },
       'launch-only': { type: 'boolean' },
       'timeout-ms': { type: 'string' },
@@ -83,10 +88,15 @@ function parseCli(argv) {
     },
   });
   const operations = ['check', 'ensure', 'persist', 'unpersist', 'apply-persisted'];
-  if (parsed.positionals.length !== 1 || !operations.includes(parsed.positionals[0])) {
+  const verifiedVersion = parsed.values['verified-build'];
+  if (parsed.positionals.length !== (verifiedVersion === undefined ? 1 : 2) || !operations.includes(parsed.positionals[0])) {
     usage('the operation must be check, ensure, persist, or unpersist');
   }
   const operation = parsed.positionals[0];
+  if (verifiedVersion !== undefined && (!['ensure', 'persist'].includes(operation) ||
+      !/^\d+(?:\.\d+)+$/.test(verifiedVersion) || !/^\d+$/.test(parsed.positionals[1]))) {
+    usage('--verified-build <version> <build> applies to ensure and persist only');
+  }
   if (operation !== 'ensure' &&
       (parsed.values['relaunch-desktop'] !== undefined || parsed.values['launch-only'] !== undefined ||
         parsed.values['timeout-ms'] !== undefined)) {
@@ -111,6 +121,7 @@ function parseCli(argv) {
   }
   return {
     operation,
+    ...(verifiedVersion === undefined ? {} : { verifiedBuild: { version: verifiedVersion, build: parsed.positionals[1] } }),
     url: parsed.values.url,
     relaunch: parsed.values['relaunch-desktop'] === true,
     launchOnly: parsed.values['launch-only'] === true,
@@ -138,7 +149,11 @@ function cliFailure(error) {
     version: failure.version,
     ok: failure.ok,
     code: failure.code,
-    message: publicErrorMessage(failure.code),
+    message: error instanceof DesktopAttachError && error.code === 'POLICY_REFUSAL' &&
+      ['broken', 'untested'].includes(error.details?.attachStatus) ? BUILD_REFUSAL
+      : error instanceof DesktopAttachError && error.code === 'POLICY_REFUSAL' && error.details?.reason === 'attachment-needs-check'
+        ? 'Run desktop-attach.js check to pause obsolete persistence before attaching this app.'
+        : publicErrorMessage(failure.code),
   };
 }
 

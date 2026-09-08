@@ -17,6 +17,7 @@ const ACTIONS = Object.freeze([
   'open-app',
   'relaunch-app',
   'persist-attach',
+  'attachment-paused',
 ]);
 
 const COMMANDS = Object.freeze({
@@ -129,6 +130,7 @@ function codexSteps(action, doctorResult, hostContext) {
       'This gives Codex lanes a measured local runtime; declining leaves Claude lanes available.',
       'start-runtime', COMMANDS.startRuntime, { binary: binary.path })];
   }
+  if (doctorResult?.providers?.codex?.desktop?.attachStatus !== 'verified') return [];
   if (action.reason === 'desktop-unattached' && hostContext?.app !== 'codex-desktop') {
     return [step(70, 'relaunch-app', 'Reconnect the Codex app to the shared runtime by relaunching it.',
       'This makes live lane updates appear in the app; declining leaves Codex lanes available in protocol-only mode.',
@@ -161,6 +163,14 @@ function attachmentAction(doctorResult) {
 }
 
 function computeSetupPlan(doctorResult, hostContext) {
+  const codex = doctorResult?.providers?.codex;
+  if (codex?.attachment?.state === 'paused') {
+    return { context: contextSentence(hostContext), steps: [step(0, 'attachment-paused',
+      'The Codex app changed. Live streaming is paused.',
+      'Reopen the app to use its own runtime. Lanes remain available in protocol-only mode. Manually verify attachment and thread resume through the relay before re-enabling streaming.',
+      'none', 'desktop-attach.js persist --authorize --verified-build <version> <build>')]
+      .map(({ order, ...entry }) => entry) };
+  }
   const actions = [...(doctorResult?.setup?.ownerActions || [])];
   const measuredAttachment = attachmentAction(doctorResult);
   if (measuredAttachment && !actions.some((action) =>
@@ -177,7 +187,7 @@ function computeSetupPlan(doctorResult, hostContext) {
     return [];
   });
   const visibility = doctorResult?.providers?.codex?.nativeVisibility;
-  if (hostAllowsDesktopActions && visibility?.verified === true && visibility.persisted === false) {
+  if (hostAllowsDesktopActions && codex?.desktop?.attachStatus === 'verified' && visibility?.verified === true && visibility.persisted === false) {
     steps.push(step(80, 'persist-attach', 'Keep the Codex app connected to the shared runtime after login.',
       'This makes future app sessions reuse the shared runtime; declining leaves the current attachment and protocol-only lanes available.',
       'persist-attach', COMMANDS.persistAttach));
