@@ -302,9 +302,11 @@ The design lives in the markup inside that script, not in the PNGs.
 
 Both `.github/workflows/site.yml` and `.github/workflows/site-deploy.yml`
 filter on `site/`, `README.md`, `SKILL.md`, the root `package.json`, and
-`scripts/lib/setup-plan.js`, because the build consumes these inputs. On Node
-22 and 24 it installs from the lockfile and checks the default, analytics-free
-build. Node 24 also builds a fake-ID analytics variant and applies the consent
+`scripts/lib/setup-plan.js`, because the build consumes these inputs. The Site
+workflow runs on every branch push that touches them, so a release branch gets
+its site checks before it reaches `main`; the deploy workflow runs on `main`
+only. On Node 22 and 24 it installs from the lockfile and checks the default,
+analytics-free build. Node 24 also builds a fake-ID analytics variant and applies the consent
 and output audits before rebuilding the default artifact. CI asserts there is
 no analytics code or source map in the uploaded `dist/`.
 

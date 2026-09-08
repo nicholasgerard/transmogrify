@@ -1,10 +1,10 @@
 name: Site
 
 # Covers site sources and imported root build inputs. Lifecycle tests retain
-# their independent root workflow (ci.yml).
+# their independent root workflow (ci.yml). Runs on every branch so a release
+# branch gets its site checks before it reaches main.
 on:
   push:
-    branches: [main]
     paths:
       - 'site/**'
       - '.github/workflows/site.yml'
