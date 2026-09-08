@@ -640,6 +640,7 @@ test('doctor names the owner action for every unmet setup precondition', async (
     claudeSurface: fakeClaudeSurface(claudeCalls, []),
     desktopAttachment: () => require('../scripts/lib/desktop-attach').check({}, {},
       require('./helpers/desktop-attachment-fixture').scenario({ attached: true }).dependencies),
+    hostContextDependencies: { platform: 'darwin', arch: 'arm64' },
   });
   assert.equal(ready.ok, true);
   assert.deepEqual(ready.setup, {
