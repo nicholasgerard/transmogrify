@@ -347,40 +347,16 @@ remain unverified live unless a later dated receipt closes them.
 
 ## Historical 0.6.0 plan (2026-09-04)
 
-This plan records the intended release gate and the original operator-commit
-exchange. The current clone exchange is described above. The exceptions above
-record the gate that the 0.6.0 and 0.6.1 releases did not meet.
-
-Goal: a runtime that survives relaunches, app updates, and logins, and an
-onboarding that works from any first entry point. Seven lane packets, each
-with disjoint files, dispatched to Codex lanes on the managed daemon and
-reviewed before merge into `wave/0.6`:
-
-1. Runtime daemon: the managed daemon as the shared runtime, reached over
-   its unix socket by Transmogrify and over a loopback relay by Codex
-   Desktop; `runtime-up.sh` ensures both and falls back to today's
-   standalone launch.
-2. Desktop attach through the daemon: attachment measured against the
-   relay, a Codex host inside an attached app counted as attached, and an
-   owner-consented, reversible `persist` that keeps Dock launches attached
-   across logins.
-3. Compatibility by range and measurement (docs/ONBOARDING.md, section 1).
-4. Host context detection and the explaining doctor (sections 2 and 3).
-5. Guided setup with consent and one install for both hosts (sections 4
-   and 5).
-6. The start handoff and skill bootstrap rewritten around the above
-   (sections 6 and 7).
-7. Lane exchange under the default sandbox: the child hands back inside
-   its own worktree, the operator commits with the handed-back title and
-   body (`harvest --commit`), and seat provisioning (dependencies, the
-   exchange directory) is recorded so retirement cleanup stays clean by
-   construction.
-
-Already on the branch: the Codex runtime is accepted by version (0.151.0
-or newer) whatever product name it reports, and the client's handshake
-offers no per-message deflate, both required by the daemon. Release when
-the live acceptance matrix in docs/ONBOARDING.md passes on the test host
-and one machine that has never seen Transmogrify.
+The 0.6.0 goal was a runtime that survives relaunches, app updates, and
+logins, and an onboarding that works from any first entry point. It shipped
+as seven lane packets on the managed daemon: the managed daemon and loopback
+relay as the shared runtime, Desktop attachment measured against the relay
+with reversible persistence, compatibility by range and measurement, host
+context detection with the explaining doctor, guided setup with one install
+for both hosts, the rewritten start handoff, and the lane exchange under the
+default sandbox (then operator-committed through `harvest --commit`, since
+replaced by the clone exchange described above). The exceptions above record
+the gate that the 0.6.0 and 0.6.1 releases did not meet.
 
 ## Priority 1: compatibility and acceptance hardening
 

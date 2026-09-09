@@ -13,6 +13,17 @@
 - Protect `main` with a repository ruleset (no deletion, no force pushes, the
   six CI checks required on the exact commit) and remove the merged wave
   branches; `main` is the only long-lived branch.
+- Rework the landing page from owner feedback: a plain hero subhead, a feature
+  grid in place of the does/does-not ledger, "How it works" split into Claude
+  and ChatGPT blocks with a diagram each, a balanced set of six document cards,
+  a shorter footer with a verified-date pill, and a tagline shared with the
+  social card. The site no longer parses the README support matrix, so the
+  README is no longer a site build input.
+- Shorten the README to a front door (support, requirements, install, the
+  runtime and the app, a quick start, tools, and the document index), fold the
+  onboarding document's historical sections into one short history, compress
+  the roadmap's superseded 0.6.0 plan, and drop unused site styles and budget
+  headroom that no longer reflected the page.
 - Make the doctor tests independent of the maintainer's machine: the bundled
   Codex app tool and the host platform are injected, so the CI and site deploy
   gates pass on GitHub runners without the apps installed. Both gates had been

@@ -125,7 +125,6 @@
 
   --measure: 68ch;
   --shell: 76rem;
-  --shell-narrow: 46rem;
 }
 
 /* ----------------------------------------------------------------- reset -- */
@@ -287,10 +286,6 @@ table {
   padding-inline: clamp(1.15rem, 4vw, 2.5rem);
 }
 
-.shell-narrow {
-  max-width: var(--shell-narrow);
-}
-
 .eyebrow {
   font-family: var(--mono);
   font-size: var(--step--2);
@@ -366,13 +361,6 @@ table {
 
 .prose li + li {
   margin-top: var(--s-2);
-}
-
-/* Long, unbreakable strings — repository URLs, hashes, absolute paths — must
-   wrap rather than force the page into horizontal scroll. */
-.wrap-anywhere {
-  overflow-wrap: anywhere;
-  word-break: break-word;
 }
 
 /* ---------------------------------------------------------------- motion -- */
