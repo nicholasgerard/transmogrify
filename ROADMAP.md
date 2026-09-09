@@ -330,17 +330,20 @@ live: Codex Desktop streaming (no verified build on 26.901.51231), `persist
 --authorize`, a machine that has never seen Transmogrify, and mobile
 reattachment after a Desktop restart.
 
-2026-09-09, Codex Desktop 26.903.61454 (8378) verified, owner present. After
-the app updated itself, the owner quit it and launched it once with
-`CODEX_APP_SERVER_WS_URL` pointed at the relay. Measured: the app process held
-an established connection to the relay (attachment `unverifiedBuild` on the
-untested build, as designed); a disposable probe lane spawned on the managed
-daemon 0.153.4 streamed its tick lines live in the app, confirmed by the
-owner; the app's own logs recorded no resume or config error after the
-relaunch. The owner's verification was recorded with
-`ensure --verified-build 26.903.61454 8378`, after which the check reported
-`attached` on a `verified` build and the doctor reported Codex `ready` with no
-owner action. Persistence across login was not re-enabled in this run.
+2026-09-09, Codex Desktop 26.903.61454 (8378) tested and recorded broken,
+owner present. After the app updated itself, the owner quit it and launched
+it once with `CODEX_APP_SERVER_WS_URL` pointed at the relay. Measured: the app
+process held an established connection to the relay (attachment
+`unverifiedBuild` on the untested build, as designed), and a disposable probe
+lane on the managed daemon 0.153.4 streamed its tick lines live in the app,
+confirmed by the owner. The verification was recorded at that point, before
+the owner had opened an older thread; minutes later older threads failed to
+resume with the same `invalid transport in mcp_servers.codex_app` error as
+build 8109. The receipt was withdrawn, the build recorded broken, and the app
+returned to its own runtime by a plain relaunch. Lesson, now in the
+procedure: a build is verified only after the owner opens an existing thread
+through the relay and the app's log shows no resume error; streaming alone
+proves nothing about resume. Persistence was never re-enabled in this run.
 
 ## Release gate and recorded exceptions
 
@@ -353,10 +356,10 @@ above) and without the pass on a machine that has never seen Transmogrify.
 The gate is retained. The next release requires the onboarding acceptance
 matrix on the maintainer host and on a machine that has never seen
 Transmogrify, with exact builds and outcomes recorded before release.
-Persistence across login, mobile reattachment after a Desktop restart, and
-seeded same-name foreign sessions remain unverified live unless a later dated
-receipt closes them; Codex Desktop streaming on a verified build was closed by
-the 2026-09-09 record above.
+Persistence across login, mobile reattachment after a Desktop restart, Codex
+Desktop streaming on a verified build (no build resumes threads on the relay
+path as of 2026-09-09), and seeded same-name foreign sessions remain
+unverified live unless a later dated receipt closes them.
 
 ## Historical 0.6.0 plan (2026-09-04)
 

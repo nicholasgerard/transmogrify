@@ -61,9 +61,9 @@ const TESTED_DESKTOP_BUILDS = Object.freeze([
   Object.freeze({ version: '26.901.51231', build: '8109', attachStatus: 'broken',
     observedOn: '2026-09-08',
     reason: 'The app rejects its disabled codex_app remote placeholder on thread resume. The daemon accepts the same override.' }),
-  Object.freeze({ version: '26.903.61454', build: '8378', attachStatus: 'verified',
+  Object.freeze({ version: '26.903.61454', build: '8378', attachStatus: 'broken',
     observedOn: '2026-09-09',
-    reason: 'Owner-verified on the maintainer host: launched attached to the relay, a probe lane streamed live in the app, and thread resume logged no config error.' }),
+    reason: 'Streams live on the relay but rejects its disabled codex_app remote placeholder on thread resume, like 8109. Streaming alone is not verification.' }),
 ]);
 
 const BUILD_REFUSAL = 'This Codex app version has not been verified with a shared runtime; lanes still work, they just do not stream in the app.';
