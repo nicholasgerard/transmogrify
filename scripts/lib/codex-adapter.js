@@ -678,8 +678,6 @@ function settleFailedSpawn(ctx, error) {
   }
 }
 
-// Seat- and runtime-verified read of one lane. It records the observed phase and
-// provider status and performs no provider mutation.
 // The newest agent message of a thread as a bounded excerpt, read only once a
 // turn has ended. Any read problem yields no excerpt rather than a failed
 // status: the excerpt informs a wake, it never gates one.
@@ -697,6 +695,8 @@ async function lastAgentMessage(client, threadId) {
   }
 }
 
+// Seat- and runtime-verified read of one lane. It records the observed phase and
+// provider status and performs no provider mutation.
 async function status(options, env = process.env) {
   const lane = ownedLane(options, env, 'read');
   assertSeatIdentity(options, lane, env);

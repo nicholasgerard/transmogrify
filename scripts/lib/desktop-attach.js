@@ -68,7 +68,7 @@ const TESTED_DESKTOP_BUILDS = Object.freeze([
 
 const BUILD_REFUSAL = 'This Codex app version has not been verified with a shared runtime; lanes still work, they just do not stream in the app.';
 const RESCUE_COMMAND = 'node "$SKILL_ROOT/scripts/desktop-attach.js" unpersist --authorize';
-const VERIFY_ACTION = 'Manually verify attachment and thread resume through the relay, then re-enable with desktop-attach.js persist --authorize --verified-build <version> <build> for the exact installed app.';
+const VERIFY_ACTION = 'Verify by hand: with the app launched attached to the relay, watch a lane stream, then open an existing thread; only when the app shows no resume error, record the exact installed app with desktop-attach.js ensure --verified-build <version> <build> (or persist --authorize --verified-build <version> <build> to keep it across logins).';
 
 // Attachment failure carrying a stable code. Every code names the Desktop state
 // that was observed, so a refusal tells the operator what to fix.

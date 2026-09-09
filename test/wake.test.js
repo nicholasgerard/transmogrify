@@ -173,7 +173,7 @@ test('wakeMessage names the child, what it said, the next step, and one acknowle
   assert.match(failed, /^Lane lane-9\.$/m);
 
   const batch = wakeMessage([
-    { type: 'child.turn-completed', kind: 'complete', child: { laneId: 'lane-1', displayName: 'one' }, data: { state: 'idle' }, dispatchId: 'd-1', sequence: 7, eventId: 'e-7' },
+    { type: 'child.turn-completed', kind: 'complete', child: { laneId: 'lane-1', displayName: '::: one' }, data: { state: 'idle' }, dispatchId: 'd-1', sequence: 7, eventId: 'e-7' },
     { type: 'child.retired', kind: 'terminal', child: { laneId: 'lane-2', displayName: 'two' }, dispatchId: 'd-2', sequence: 9, eventId: 'e-9' },
     { type: 'child.cleanup-blocked', kind: 'attention', child: { laneId: 'lane-3' }, dispatchId: 'd-3', sequence: 8, eventId: 'e-8' },
   ], { parentContextFile: '/state/parents/p.json' });

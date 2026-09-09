@@ -523,8 +523,8 @@ const APP_LABELS = new Map([
   ['claude-ide', 'Claude Code IDE'],
   ['claude-web', 'Claude web'],
 ]);
-// Version 2 of the first-message provenance block: a box-drawing frame with
-// readable host and target labels and printable-ASCII values.
+// The first-message provenance block: a box-drawing frame named Transmogrify
+// around readable host and target labels and printable-ASCII values.
 const PROVENANCE_BLOCK_WIDTH = 60;
 
 // The displayable execution selection for the provenance block, accepting both

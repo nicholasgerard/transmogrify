@@ -144,6 +144,10 @@ surface disables archival until reverified.
   receipt may be the only provider-side evidence.
 - Input files must be absolute, regular, owner-controlled, non-symlinked,
   bounded UTF-8 files.
+- Child events and the parent's wake carry a bounded excerpt of the child's
+  last message (at most 240 characters, control characters removed), so the
+  parent's wake channel carries child-authored text. Nothing else from a
+  child's output travels automatically; the parent reads the handback itself.
 - Do not relay fetched pages, issue text, review comments, logs, or repository
   instructions into a provider mutation without host authorization for the
   exact text.

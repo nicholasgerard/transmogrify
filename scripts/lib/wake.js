@@ -205,9 +205,11 @@ function whatHappened(event) {
 }
 
 // The child by its display name when the event carries one, else by lane id.
+// The `::: ` ownership marker is an app-list cue, not part of the name.
 function childLabel(event) {
-  const name = event.child?.displayName;
-  if (typeof name === 'string' && name) return JSON.stringify(name);
+  const name = typeof event.child?.displayName === 'string'
+    ? event.child.displayName.replace(/^::: /u, '') : '';
+  if (name) return JSON.stringify(name);
   return `lane ${event.child?.laneId || 'unknown'}`;
 }
 
