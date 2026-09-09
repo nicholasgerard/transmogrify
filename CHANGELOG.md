@@ -24,6 +24,9 @@
   onboarding document's historical sections into one short history, compress
   the roadmap's superseded 0.6.0 plan, and drop unused site styles and budget
   headroom that no longer reflected the page.
+- Record Codex Desktop `26.903.61454` (`8378`) as verified for relay
+  attachment, live streaming, and thread resume, from an owner-present run on
+  the maintainer host; the skill pin and the site now name that build.
 - Make the doctor tests independent of the maintainer's machine: the bundled
   Codex app tool and the host platform are injected, so the CI and site deploy
   gates pass on GitHub runners without the apps installed. Both gates had been

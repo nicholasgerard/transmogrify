@@ -42,7 +42,8 @@ the [protocol contract](docs/PROTOCOL.md) and
 - Codex CLI/app-server `0.151.0` or newer, signed in
   ([Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli)). Live
   streaming in the ChatGPT app additionally needs an app build verified for
-  relay attachment and thread resume, recorded with
+  relay attachment and thread resume; the verified build is `26.903.61454`
+  (`8378`), and an owner records another with
   `desktop-attach.js persist --authorize --verified-build <version> <build>`.
   Mobile visibility was measured with ChatGPT for iOS `1.2026.230`
   (`32543289983`).
