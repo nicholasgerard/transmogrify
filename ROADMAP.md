@@ -358,8 +358,8 @@ matrix on the maintainer host and on a machine that has never seen
 Transmogrify, with exact builds and outcomes recorded before release.
 Persistence across login, mobile reattachment after a Desktop restart, Codex
 Desktop streaming on a verified build (no build resumes threads on the relay
-path as of 2026-09-09), and seeded same-name foreign sessions remain
-unverified live unless a later dated receipt closes them.
+path as of 2026-09-09), and seeded same-name foreign sessions all
+remain unverified live unless a later dated receipt closes them.
 
 ## Historical 0.6.0 plan (2026-09-04)
 
