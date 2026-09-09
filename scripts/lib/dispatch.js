@@ -525,7 +525,7 @@ const APP_LABELS = new Map([
 ]);
 // The first-message provenance block: a box-drawing frame named Transmogrify
 // around readable host and target labels and printable-ASCII values.
-const PROVENANCE_BLOCK_WIDTH = 60;
+const PROVENANCE_RULE_LENGTH = 8;
 
 // The displayable execution selection for the provenance block, accepting both
 // the current and the legacy profile field names. Every part must be bounded and
@@ -578,8 +578,10 @@ function asciiJsonString(value) {
   return escapeNonAscii(JSON.stringify(value));
 }
 
+// Frame rules are short and fixed. Native app bubbles wrap in proportional
+// fonts, so a rule padded to a column width breaks onto a second line.
 function frameLine(prefix) {
-  return `${prefix}${'─'.repeat(Math.max(PROVENANCE_BLOCK_WIDTH - prefix.length, 4))}`;
+  return `${prefix}${'─'.repeat(PROVENANCE_RULE_LENGTH)}`;
 }
 
 // Render the bounded block that prefixes a child's first message. It carries

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.2 (in progress)
+## 0.6.2
 
 - Make the website part of the release: the site package version tracks the
   root version, the Docs section keeps six reviewed cards, the changelog
@@ -41,6 +41,8 @@
   `--commit`.
 - Stop suggesting `unpersist` for an attached but unverified app build when
   nothing is persisted; the next step there is verification.
+- Move the private Claude archive pin to Claude Desktop `1.49585.0` after
+  re-measuring the bundle and archiving a live probe lane through it.
 - Make the doctor tests independent of the maintainer's machine: the bundled
   Codex app tool and the host platform are injected, so the CI and site deploy
   gates pass on GitHub runners without the apps installed. Both gates had been

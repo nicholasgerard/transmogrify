@@ -52,7 +52,7 @@ the [protocol contract](docs/PROTOCOL.md) and
   signed in to a `claude.ai` account. Compatibility is a measured minimum plus
   probes, with no maximum version; a failed measurement blocks mutations. The
   private archive step separately pins the exact CLI hash and Claude Desktop
-  `1.46388.4`. Mobile behavior was verified with Claude for iOS `1.260828.1`
+  `1.49585.0`. Mobile behavior was verified with Claude for iOS `1.260828.1`
   (`33349478298`). Details in
   [Claude compatibility](docs/CLAUDE-CODE.md#compatibility-receipts).
 - One runtime dependency, `ws`. The website under `site/` is a separate

@@ -345,6 +345,29 @@ procedure: a build is verified only after the owner opens an existing thread
 through the relay and the app's log shows no resume error; streaming alone
 proves nothing about resume. Persistence was never re-enabled in this run.
 
+2026-09-09, release 0.6.2, unattended maintainer run on the final tree with
+two disposable probe lanes, one Claude Code and one Codex (protocol-only, the
+app being on an unverified build). Exercised and green: the parent's watcher
+restarted on the new code; both completion wakes arrived in the parent
+session in the new shape, naming each child and quoting its last message
+(the Claude excerpt from the transcript tail, the Codex excerpt from the
+thread's item list); a Claude steer and a Codex resume with input landed; the
+Codex probe harvested through the no-change path once its handback carried a
+proper commit section; the Claude probe, stopped while waiting on a write
+permission prompt it could not answer, was closed with an operator-written
+handback and archived through the private surface after that surface was
+re-measured for Claude Desktop 1.49585.0; both retirements removed their
+seats. Root suite 796 green on macOS and under a simulated Linux platform;
+site suite green; CI green on the release branch. Found and fixed during the
+run: a harvest that demanded a commit SHA from a child that changed nothing,
+and attachment advice that pointed at `unpersist` when nothing was persisted.
+Observed, not fixed: a Claude child in its default permission mode stops on
+a write prompt the parent cannot answer, so a packet that needs files written
+should say so or the operator closes the lane as above. Not exercised live:
+Codex Desktop streaming (no verified build), `persist --authorize`, a machine
+that has never seen Transmogrify, and mobile reattachment after a Desktop
+restart.
+
 ## Release gate and recorded exceptions
 
 2026-09-04 exception: 0.6.0 shipped without the fresh-machine acceptance pass.
@@ -352,6 +375,9 @@ proves nothing about resume. Persistence was never re-enabled in this run.
 2026-09-08 exception: 0.6.1 shipped on the owner's decision with every
 acceptance row that can run on the maintainer host exercised (the 0.6.1 record
 above) and without the pass on a machine that has never seen Transmogrify.
+
+2026-09-09 exception: 0.6.2 shipped on the owner's decision under the same
+terms; the 0.6.2 record above lists what ran on the maintainer host.
 
 The gate is retained. The next release requires the onboarding acceptance
 matrix on the maintainer host and on a machine that has never seen

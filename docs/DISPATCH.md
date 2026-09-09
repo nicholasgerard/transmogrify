@@ -107,13 +107,13 @@ The first provider message starts with this block, followed by one blank line
 and the exchange preamble, then the child packet:
 
 ```text
-╭─ Transmogrify ────────────────────────────────────────────
+╭─ Transmogrify ────────
 │ From      Codex Desktop
 │ Task      "Release operator"
 │ To        Claude Code · claude-opus-5 · high effort · standard speed
 │ Intent    deep
 │ Dispatch  11111111-1111-4111-8111-111111111111
-╰───────────────────────────────────────────────────────────
+╰────────
 ```
 
 The rows say where the task came from: the user's own session on a named
@@ -130,8 +130,9 @@ Rules the renderer enforces:
 - The frame uses box-drawing characters and every value is reduced to
   printable ASCII, with the task name JSON-quoted, so no value can forge a
   frame line or a label.
-- There is no right-hand border, because native app bubbles wrap in
-  proportional fonts.
+- There is no right-hand border, and the top and bottom rules are short and
+  fixed, because native app bubbles wrap in proportional fonts and a rule
+  padded to a column width breaks onto a second line.
 - The block excludes native provider IDs, private parent references, absolute
   paths, credentials, raw environment data, and account identity.
 

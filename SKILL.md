@@ -4,7 +4,7 @@ description: Operate exact-owned, worktree-seated Codex and Claude Code lanes wi
 license: MIT
 compatibility: Requires Node.js 20+, Git, Bash, and the supported Codex or Claude Code provider surfaces.
 metadata:
-  version: "0.6.1"
+  version: "0.6.2"
   verified_date: "2026-09-09"
   verified_codex_runtime: "app-server 0.151.0"
   supported_codex_runtime: "app-server >=0.151.0"
@@ -12,7 +12,7 @@ metadata:
   verified_codex_mobile: "ChatGPT for iOS 1.2026.230 (32543289983)"
   verified_claude_cli: "2.1.258"
   supported_claude_cli: ">=2.1.258"
-  verified_claude_desktop: "1.46388.4"
+  verified_claude_desktop: "1.49585.0"
   verified_claude_mobile: "Claude for iOS 1.260828.1 (33349478298)"
 ---
 
