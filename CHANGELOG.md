@@ -29,6 +29,18 @@
   placeholder when resuming a thread. The verification procedure now requires
   the owner to open an existing thread through the relay before a build is
   recorded.
+- Make the parent's wake read like a note: the child's display name, what
+  happened in plain words, a bounded excerpt of the child's last message, the
+  lane id with its next step, and one `ack` command. Events carry the child's
+  display name and the excerpt (`data.excerpt`), `status` returns it as
+  `lastMessage`, and Claude follow-ups are sent under the name `Transmogrify`.
+- Trim the provenance block to a plain `Transmogrify` frame around the From,
+  Task, To, Intent, and Dispatch rows.
+- Harvest a clone whose child changed nothing without demanding a commit SHA;
+  a child that left uncommitted changes must commit them or be harvested with
+  `--commit`.
+- Stop suggesting `unpersist` for an attached but unverified app build when
+  nothing is persisted; the next step there is verification.
 - Make the doctor tests independent of the maintainer's machine: the bundled
   Codex app tool and the host platform are injected, so the CI and site deploy
   gates pass on GitHub runners without the apps installed. Both gates had been

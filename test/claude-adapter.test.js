@@ -389,9 +389,9 @@ test('Claude dispatched profiles render provenance and survive exact-session rec
   ]);
   assert.equal(JSON.parse(fs.readFileSync(childHooksPath(lane.laneId, fixture.env), 'utf8')).fastMode, false, 'the hooks file carries the fast-mode pin');
   // A parent dispatched this lane: provenance first, then the exchange preamble.
-  assert.match(launch.args[11], /^╭─ Transmogrify · a task from your user's own session ─+\n/);
+  assert.match(launch.args[11], /^╭─ Transmogrify ─+\n/);
   assert.ok(launch.args[11].includes(`\n\n${exchangePreamble(fs.realpathSync(fixture.seat), 'claude')}\n\n`));
-  assert.match(launch.args[11], /╭─ Transmogrify · a task from your user's own session ─+\n/);
+  assert.match(launch.args[11], /╭─ Transmogrify ─+\n/);
   assert.match(launch.args[11], /^│ From {6}Codex Desktop$/m);
   assert.match(launch.args[11], /^│ Task {6}"Release operator"$/m);
   assert.match(launch.args[11], /^│ To {8}Claude Code · claude-opus-5 · high effort · standard speed$/m);

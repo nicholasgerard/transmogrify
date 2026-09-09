@@ -9,6 +9,7 @@ const { execFile } = require('node:child_process');
 const {
   DesktopAttachError,
   TESTED_DESKTOP_BUILDS,
+  VERIFY_ACTION,
   applyPersisted,
   check,
   clientConnections,
@@ -674,7 +675,7 @@ for (const [status, build] of [['broken', BROKEN_BUILD], ['untested', UNTESTED_B
     assert.deepEqual(fixture.calls, []);
     assert.equal(fs.existsSync(persistenceReceiptPath(fixture.env, fixture.dependencies)), false);
   });
-  test(`an attached ${status} app reports rescue and cannot supply a verified attachment state`, async (t) => {
+  test(`an attached ${status} app without persistence points at verification and cannot supply a verified attachment state`, async (t) => {
     const fixture = persistenceFixture(t);
     replaceInventory(fixture, build, { attached: true });
     const result = await main(['check'], fixture.env, fixture.dependencies);
@@ -682,7 +683,11 @@ for (const [status, build] of [['broken', BROKEN_BUILD], ['untested', UNTESTED_B
     assert.equal(result.desktop.attachStatus, status);
     assert.equal(result.desktop.buildTested, false);
     assert.equal(result.attachment.state, 'unverifiedBuild');
-    assert.equal(result.nextAction, RESCUE_COMMAND);
+    // Nothing is persisted, so there is nothing to unpersist: the next step
+    // is the owner's manual verification, not the rescue command.
+    assert.equal(result.persisted, false);
+    assert.equal(result.nextAction, VERIFY_ACTION);
+    assert.notEqual(result.nextAction, RESCUE_COMMAND);
     assert.deepEqual(fixture.calls, []);
   });
   test(`exact owner verification permits ${status} builds and survives a later check`, async (t) => {

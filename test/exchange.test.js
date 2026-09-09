@@ -477,10 +477,19 @@ test('harvest advances an existing clone branch and --commit accepts an already 
   assert.equal(gitHead(fixture.seat.path), head);
 });
 
-test('clone harvest requires a SHA and refuses uncommitted work without the fallback', async (t) => {
+test('clone harvest accepts a child that changed nothing and refuses uncommitted work without the fallback', async (t) => {
   const fixture = managedLane(t);
+  // No changes and no SHA: nothing to commit, the clone HEAD is the harvested head.
   fs.writeFileSync(exchangePaths(fixture.seat.path).handback, handback());
-  await assert.rejects(() => harvestLane(harvestOptions(fixture), fixture.env, idleProvider), /requires the child commit SHA/);
+  const unchanged = await harvestLane(harvestOptions(fixture), fixture.env, idleProvider);
+  assert.equal(unchanged.ok, true);
+  assert.equal(unchanged.childReportedCommit, false);
+  assert.equal(unchanged.head, gitHead(fixture.seat.path));
+  assert.equal(unchanged.handback, 'present');
+});
+
+test('clone harvest refuses uncommitted work without the fallback', async (t) => {
+  const fixture = managedLane(t);
   writeChildHandback(fixture, gitHead(fixture.seat.path));
   fs.writeFileSync(path.join(fixture.seat.path, 'unfinished.txt'), 'unfinished\n');
   await assert.rejects(() => harvestLane(harvestOptions(fixture), fixture.env, idleProvider), /uncommitted changes/);

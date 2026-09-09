@@ -77,6 +77,7 @@ test('parent wait observes every child each round so a busy child cannot starve 
     if (request.method === 'thread/read') {
       return { result: { thread: { id: 'thread-a', cwd, name: '::: chatty child', status: { type: 'idle' } } } };
     }
+    if (request.method === 'thread/items/list') return { result: { data: [], nextCursor: null } };
     if (request.method === 'thread/turns/list') {
       turnCounter += 1;
       return { result: { data: [{ id: `turn-${turnCounter}`, status: 'completed', items: [] }] } };
@@ -315,6 +316,7 @@ test('parent wait observes first, returns old and new events together, and honou
     if (request.method === 'thread/read') {
       return { result: { thread: { id: 'thread-k', cwd, name: '::: kinds child', status: { type: 'idle' } } } };
     }
+    if (request.method === 'thread/items/list') return { result: { data: [], nextCursor: null } };
     if (request.method === 'thread/turns/list') {
       return { result: { data: [{ id: turnId, status: 'completed', items: [] }] } };
     }

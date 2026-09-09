@@ -304,7 +304,10 @@ function classifyObservation(provider, lane, result, priorPhase) {
     else if (phase === 'stopped') eventType = 'child.stopped';
     else if (phase === 'failed') eventType = 'child.failed';
   }
-  return { phase, eventType, providerFingerprint, status };
+  // The adapter's bounded excerpt of the child's last message, when it read
+  // one; it travels on the event so a wake can say what came back.
+  const excerpt = typeof result.lastMessage === 'string' && result.lastMessage ? result.lastMessage : null;
+  return { phase, eventType, providerFingerprint, status, excerpt };
 }
 
 // Observe one child and record at most one event for it. A dispatch whose lane
@@ -422,6 +425,7 @@ async function observeDispatch(dispatch, values, env, deadline, remainingChildre
     data: classified.eventType ? {
       state: classified.phase,
       ...(classified.status ? { status: classified.status } : {}),
+      ...(classified.excerpt ? { excerpt: classified.excerpt } : {}),
     } : {},
   }, env);
   return ownCommandResult(dispatch, lane, observation.event, classified.phase, env);

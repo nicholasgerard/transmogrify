@@ -12,6 +12,7 @@ const {
   beginLaneOperation, pendingOperationForLane, updateLane, withLaneLease,
 } = require('./state');
 const { MAX_STEER_BYTES, sha256 } = require('./claude-surface');
+const { normalizeExcerpt } = require('./excerpt');
 const { laneResult, nowMs, profileFailure } = require('./adapter-kit');
 const { phaseFields } = require('./output-schema');
 const { sleep } = require('./async');
@@ -117,8 +118,13 @@ async function status(options, env = process.env) {
     },
     lastVerifiedAt: new Date().toISOString(),
   }, env);
+  // Once the session is not working, its last assistant text is a bounded
+  // excerpt for the parent's wake; an unreadable transcript yields none.
+  const lastMessage = phase !== 'working' && typeof surface.lastAssistantText === 'function'
+    ? normalizeExcerpt(surface.lastAssistantText(runtime, lane.providerId)) : null;
   return laneResult('status', updated, {
     ...phaseFields('claude', phase),
+    ...(lastMessage ? { lastMessage } : {}),
     receipt: {
       exactSession: true,
       executionEpoch: execution ? updated.providerIdentity.executionEpochs.length : null,

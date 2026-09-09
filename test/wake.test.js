@@ -150,24 +150,40 @@ test('discoverCodexWake without a hint needs the nonce receipt and never trusts 
   assert.equal(nothing.reason, 'no-thread-id-hint-and-no-repository');
 });
 
-test('wakeMessage names the lane, the kind, and the exact next commands without child output', () => {
+test('wakeMessage names the child, what it said, the next step, and one acknowledgement', () => {
   const text = wakeMessage({
+    type: 'child.turn-completed', kind: 'complete',
+    child: { laneId: 'lane-9', displayName: 'tests: diagnose failure' },
+    data: { state: 'idle', status: 'completed', excerpt: 'Fixed the flaky assertion; see the handback.' },
+    dispatchId: 'd-9', sequence: 4, eventId: 'e-9',
+  }, { parentContextFile: '/state/parents/p.json' });
+  assert.equal(text.split('\n')[0],
+    'Transmogrify: "tests: diagnose failure" finished its turn and is idle. It said: "Fixed the flaky assertion; see the handback."');
+  assert.equal(text.split('\n')[1], 'Lane lane-9: harvest it, steer it again, or retire it.');
+  assert.equal(text.split('\n')[2],
+    'Acknowledge when handled: node "$SKILL_ROOT/scripts/lane.js" ack --parent-context-file "/state/parents/p.json" --through 4');
+  assert.equal(text.split('\n').length, 3);
+  assert.doesNotMatch(text, /dispatch d-9|kind complete|wait --timeout-ms/);
+
+  const failed = wakeMessage({
     type: 'child.failed', kind: 'terminal', terminal: true,
     child: { laneId: 'lane-9' }, dispatchId: 'd-9', sequence: 4, eventId: 'e-9',
   }, { parentContextFile: '/state/parents/p.json' });
-  assert.match(text, /child lane lane-9 reached a terminal state \(failed\)/);
-  assert.match(text, /\(kind terminal\)/);
-  assert.match(text, /lane\.js" wait --parent-context-file "\/state\/parents\/p\.json" --timeout-ms 0/);
-  assert.match(text, /ack --parent-context-file "\/state\/parents\/p\.json" --through 4$/);
+  assert.match(failed, /^Transmogrify: lane lane-9 failed\.$/m);
+  assert.match(failed, /^Lane lane-9\.$/m);
+
   const batch = wakeMessage([
-    { type: 'child.turn-completed', kind: 'complete', child: { laneId: 'lane-1' }, dispatchId: 'd-1', sequence: 7, eventId: 'e-7' },
-    { type: 'child.retired', kind: 'terminal', child: { laneId: 'lane-2' }, dispatchId: 'd-2', sequence: 9, eventId: 'e-9' },
+    { type: 'child.turn-completed', kind: 'complete', child: { laneId: 'lane-1', displayName: 'one' }, data: { state: 'idle' }, dispatchId: 'd-1', sequence: 7, eventId: 'e-7' },
+    { type: 'child.retired', kind: 'terminal', child: { laneId: 'lane-2', displayName: 'two' }, dispatchId: 'd-2', sequence: 9, eventId: 'e-9' },
+    { type: 'child.cleanup-blocked', kind: 'attention', child: { laneId: 'lane-3' }, dispatchId: 'd-3', sequence: 8, eventId: 'e-8' },
   ], { parentContextFile: '/state/parents/p.json' });
-  assert.match(batch, /^\[transmogrify\] 2 child events: lane lane-1 finished its turn and is idle[^;]*; lane lane-2 reached a terminal state \(retired\)\.$/m);
-  assert.match(batch, /Event child\.turn-completed \(kind complete\), dispatch d-1, sequence 7\./);
-  assert.match(batch, /Event child\.retired \(kind terminal\), dispatch d-2, sequence 9\./);
-  assert.match(batch, /Handle them, then acknowledge: .*ack --parent-context-file "\/state\/parents\/p\.json" --through 9$/m);
-  assert.equal(batch.split('\n').length, 4);
+  const lines = batch.split('\n');
+  assert.equal(lines[0], 'Transmogrify: 3 child updates.');
+  assert.equal(lines[1], '- "one" finished its turn and is idle. (lane lane-1: harvest it, steer it again, or retire it)');
+  assert.equal(lines[2], '- "two" was retired. (lane lane-2)');
+  assert.equal(lines[3], '- lane lane-3 needs your attention: its cleanup is blocked. (lane lane-3: review it)');
+  assert.match(lines[4], /^Acknowledge when handled: .*ack --parent-context-file "\/state\/parents\/p\.json" --through 9$/);
+  assert.equal(lines.length, 5);
   assert.match(wakeMessage({ type: 'child.turn-completed', kind: 'complete', child: {}, sequence: 1, eventId: 'x' }),
     /finished its turn and is idle/);
 });

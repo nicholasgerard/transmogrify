@@ -207,7 +207,7 @@ test('watchOnce sends one wake for every fresh event of a round and names them a
   assert.equal(delivered.length, 1, 'one wake per round');
   assert.equal(pass.wakes.length, 2);
   assert.deepEqual(pass.wakes.map((wake) => [wake.delivered, wake.batch]), [[true, 2], [true, 2]]);
-  assert.match(delivered[0].text, /^\[transmogrify\] 2 child events: /);
+  assert.match(delivered[0].text, /^Transmogrify: 2 child updates\.$/m);
   assert.match(delivered[0].text, /ack --parent-context-file "[^"]+" --through 2$/m);
   assert.equal(delivered[0].clientUserMessageId, pass.wakes[1].eventId);
   assert.equal(state.wakedEventIds.length, 2);

@@ -621,7 +621,9 @@ async function check(options = {}, env = process.env, dependencies = {}) {
           },
         } : {}),
       },
-      nextAction: desktop.attachStatus === 'verified' ? 'none' : RESCUE_COMMAND,
+      // An attachment on an unverified build is rescued by unpersisting only
+      // when something is persisted; otherwise the next step is verification.
+      nextAction: desktop.attachStatus === 'verified' ? 'none' : (persisted ? RESCUE_COMMAND : VERIFY_ACTION),
     };
   }
   let elsewhere = [];

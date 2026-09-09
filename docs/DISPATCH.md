@@ -107,20 +107,19 @@ The first provider message starts with this block, followed by one blank line
 and the exchange preamble, then the child packet:
 
 ```text
-╭─ Transmogrify · a task from your user's own session ──────
+╭─ Transmogrify ────────────────────────────────────────────
 │ From      Codex Desktop
 │ Task      "Release operator"
 │ To        Claude Code · claude-opus-5 · high effort · standard speed
 │ Intent    deep
 │ Dispatch  11111111-1111-4111-8111-111111111111
-╰─ v3 · work within your normal permissions; that session is notified when you finish ────
+╰───────────────────────────────────────────────────────────
 ```
 
-The header and footer say in plain words what Claude Code itself says about
-peer messages: the task comes from the user's own session and the child works
-within its normal permissions. A child model reads an anonymous "dispatch"
-banner as a possible takeover; this wording is what a real acceptance probe
-needed before it would act.
+The rows say where the task came from: the user's own session on a named
+host, the task it is part of, and the model, effort, and speed it was sent
+with. A child model reads an anonymous banner as a possible takeover; naming
+the source is what a real acceptance probe needed before it would act.
 
 Rules the renderer enforces:
 
@@ -169,8 +168,12 @@ in real time is in [NOTIFICATIONS.md](NOTIFICATIONS.md).
 Event IDs are deterministic from installation, dispatch, type, and observation
 fingerprint, so repeating an observation recreates the same ID. A transition
 back to a prior phase receives a new monotonic sequence and may produce a new
-attention event. Payloads carry safe state and receipt metadata only: never
-child output, prompts, provider IDs, paths, transcripts, or credentials.
+attention event. Payloads carry the child's display name, safe state and
+receipt metadata, and, once a turn has ended, a bounded excerpt of the
+child's last message (`data.excerpt`, at most 240 characters, control
+characters removed): never prompts, provider IDs, paths, transcripts, or
+credentials. The excerpt tells the parent what came back; the handback
+remains the record it reviews.
 
 ## Completion and the durable outbox
 

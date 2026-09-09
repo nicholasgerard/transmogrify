@@ -30,6 +30,9 @@ const JOB_PATTERN = /^[0-9a-f]{8}$/i;
 const BRIDGE_PATTERN = /^(?:session_|cse_)(?:staging_)?[0-9A-Za-z]{1,64}$/;
 const MAX_CAPTURE_BYTES = 64 * 1024;
 const MAX_STEER_BYTES = 64 * 1024;
+// The display name a public follow-up is sent under, so the receiving session
+// shows who spoke instead of an unnamed sender.
+const FOLLOWUP_SENDER_NAME = 'Transmogrify';
 const MAX_SPAWN_BYTES = 1024 * 1024;
 const MAX_TRANSCRIPT_SCAN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
@@ -641,7 +644,7 @@ function createClaudeSurface(dependencies = {}) {
       ['follow-up-options', () => {
         const bridgeId = 'cse_transmogrifyCompatibilityProbe';
         const help = command(['-p', '--cloud', bridgeId, '--output-format', 'json', '--help']);
-        if (!help.includes('--cloud') || !help.includes('--output-format')) {
+        if (!help.includes('--cloud') || !help.includes('--output-format') || !help.includes('--name')) {
           throw new Error('missing follow-up options');
         }
         const fixture = JSON.stringify({
@@ -832,7 +835,7 @@ function createClaudeSurface(dependencies = {}) {
     assertRuntimeCliIdentity(runtime);
     return new Promise((resolve, reject) => {
       const child = deps.spawn(runtime.cliPath, [
-        '-p', '--cloud', exactBridgeId, '--output-format', 'json',
+        '-p', '--cloud', exactBridgeId, '--output-format', 'json', '--name', FOLLOWUP_SENDER_NAME,
       ], {
         cwd: options.cwd,
         env: runtime.cleanEnv,
@@ -1190,6 +1193,38 @@ function createClaudeSurface(dependencies = {}) {
     return stripped === segment ? [segment] : [segment, stripped];
   }
 
+  // The last assistant text in the owned transcript, read from a bounded tail.
+  // A record with only tool calls is skipped in favor of the last one that
+  // spoke. Any failure returns null; this read informs a wake, nothing else.
+  function lastAssistantText(runtime, sessionId, options = {}) {
+    const maxBytes = options.maxBytes ?? 256 * 1024;
+    let opened = null;
+    try {
+      const snapshot = transcriptSnapshot(runtime, sessionId);
+      opened = openOwnedTranscript(snapshot);
+      const start = Math.max(0, opened.stat.size - maxBytes);
+      const buffer = Buffer.alloc(opened.stat.size - start);
+      fs.readSync(opened.descriptor, buffer, 0, buffer.length, start);
+      const lines = buffer.toString('utf8').split('\n');
+      if (start > 0) lines.shift();
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        let record;
+        try { record = JSON.parse(lines[index]); } catch { continue; }
+        if (record?.type !== 'assistant' || record?.message?.role !== 'assistant') continue;
+        const content = Array.isArray(record.message.content) ? record.message.content : [];
+        const texts = content
+          .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+          .map((part) => part.text);
+        if (texts.length > 0) return texts.join('\n');
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      if (opened) fs.closeSync(opened.descriptor);
+    }
+  }
+
   // Open the transcript with O_NOFOLLOW and require the descriptor's device and
   // inode to equal the snapshot's, so a rotated or replaced file is
   // DELIVERY_UNCERTAIN rather than read as the same transcript.
@@ -1348,6 +1383,7 @@ function createClaudeSurface(dependencies = {}) {
     run,
     sendRemoteFollowup,
     transcriptSnapshot,
+    lastAssistantText,
     verifyDeliveryTranscript,
     verifySpawnTranscript,
   };

@@ -1,6 +1,7 @@
 'use strict';
 
 const { validateUrl, canonicalCodexUserAgent } = require('./app-server');
+const { MAX_EXCERPT_CHARS } = require('./excerpt');
 
 // Parent/child dispatch lineage and durable delivery: the installation record,
 // parent contexts, dispatch reservations, the bounded provenance block that
@@ -524,7 +525,6 @@ const APP_LABELS = new Map([
 ]);
 // Version 2 of the first-message provenance block: a box-drawing frame with
 // readable host and target labels and printable-ASCII values.
-const PROVENANCE_BLOCK_VERSION = 3;
 const PROVENANCE_BLOCK_WIDTH = 60;
 
 // The displayable execution selection for the provenance block, accepting both
@@ -610,13 +610,13 @@ function renderProvenanceBlock(metadata) {
     profile.speed ? `${profile.speed} speed` : null,
   ].filter(Boolean).map(escapeNonAscii).join(' · ');
   return [
-    frameLine('╭─ Transmogrify · a task from your user\'s own session '),
+    frameLine('╭─ Transmogrify '),
     `│ From      ${escapeNonAscii(from)}`,
     `│ Task      ${asciiJsonString(parentTask)}`,
     `│ To        ${to}`,
     `│ Intent    ${escapeNonAscii(profile.intent || 'provider-default')}`,
     `│ Dispatch  ${metadata.dispatchId}`,
-    frameLine(`╰─ v${PROVENANCE_BLOCK_VERSION} · work within your normal permissions; that session is notified when you finish `),
+    frameLine('╰'),
   ].join('\n');
 }
 
@@ -910,10 +910,18 @@ function validateEventData(data, stored = false) {
     return invalid('event data must be an object');
   }
   const keys = Object.keys(data);
-  if (keys.some((key) => !['state', 'status'].includes(key))) {
+  if (keys.some((key) => !['state', 'status', 'excerpt'].includes(key))) {
     return invalid('event data has invalid fields');
   }
+  // The excerpt is the child's last message, already bounded and stripped of
+  // control characters by the observer; it is the one free-text event field.
+  if (data.excerpt !== undefined && (typeof data.excerpt !== 'string' || data.excerpt.length === 0 ||
+      Array.from(data.excerpt).length > MAX_EXCERPT_CHARS ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(data.excerpt))) {
+    return invalid('event data excerpt is invalid');
+  }
   for (const [key, value] of Object.entries(data)) {
+    if (key === 'excerpt') continue;
     if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9-]{0,63}$/u.test(value)) {
       return invalid(`event data ${key} is invalid`);
     }
@@ -1009,6 +1017,7 @@ function recordEventLocked(paths, installation, dispatch, options, data) {
       provider: dispatch.child.targetProvider,
       laneId: dispatch.child.laneId,
       projectKey: dispatch.child.projectKey,
+      displayName: dispatch.child.displayName,
     },
     type: options.type,
     observationFingerprint: fingerprint,
@@ -1036,7 +1045,12 @@ function validateEvent(event, parentRef, expectedId = null, dispatch = null) {
     'schemaVersion', 'eventId', 'sequence', 'parentRef', 'dispatchId', 'child', 'type',
     'observationFingerprint', 'data', 'occurredAt',
   ], ['wakeSuppressed'], 'dispatch event');
-  assertExactKeys(event.child, ['provider', 'laneId', 'projectKey'], [], 'dispatch event child');
+  // Events written before 0.6.2 carry no display name; newer ones name the
+  // child so a wake can say who finished without a registry read.
+  assertExactKeys(event.child, ['provider', 'laneId', 'projectKey'], ['displayName'], 'dispatch event child');
+  if (event.child.displayName !== undefined) {
+    assertSafeMetadataLabel(event.child.displayName, 'dispatch event child display name');
+  }
   if (event.schemaVersion !== VERSION || !UUID_PATTERN.test(event.eventId || '') ||
       (expectedId !== null && event.eventId !== expectedId) || event.parentRef !== parentRef ||
       !UUID_PATTERN.test(event.dispatchId || '') || !Number.isSafeInteger(event.sequence) ||

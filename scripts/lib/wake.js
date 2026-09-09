@@ -184,33 +184,70 @@ async function discoverCodexWake(options, env = process.env) {
   }
 }
 
-// The fixed wake template for one event or a batch. It names each child and
-// the kind of its event, and the exact next commands; it never carries child
-// output, prompts, or paths. A batch is acknowledged in one command by the
-// highest sequence it names.
+// What happened to the child, in plain words. Terminal events are named by
+// their type; everything else by its kind.
+function whatHappened(event) {
+  const type = String(event.type || '').replace(/^child\./, '');
+  if (type === 'cleanup-blocked') return 'needs your attention: its cleanup is blocked';
+  if (event.kind === 'terminal') {
+    return {
+      retired: 'was retired',
+      stopped: 'stopped',
+      failed: 'failed',
+      'delivery-unknown': 'has an unknown delivery outcome',
+    }[type] || `reached a terminal state (${type})`;
+  }
+  return {
+    complete: 'finished its turn and is idle',
+    attention: 'needs your attention',
+    progress: 'reported progress',
+  }[event.kind] || 'changed state';
+}
+
+// The child by its display name when the event carries one, else by lane id.
+function childLabel(event) {
+  const name = event.child?.displayName;
+  if (typeof name === 'string' && name) return JSON.stringify(name);
+  return `lane ${event.child?.laneId || 'unknown'}`;
+}
+
+function nextStep(event) {
+  if (event.kind === 'complete') return 'harvest it, steer it again, or retire it';
+  if (event.kind === 'attention') return 'review it';
+  return null;
+}
+
+// The wake for one event or a batch: who finished, what it said (a bounded
+// excerpt of its last message when the observer captured one), what to do
+// with it, and the one acknowledgement command. A batch is acknowledged by
+// the highest sequence it names. Prompts, paths, and credentials never appear.
 function wakeMessage(events, options = {}) {
   const batch = Array.isArray(events) ? events : [events];
-  const kindText = (event) => ({
-    complete: 'finished its turn and is idle (harvest now, steer again, or retire)',
-    attention: 'needs your attention',
-    terminal: `reached a terminal state (${String(event.type || '').replace(/^child\./, '')})`,
-    progress: 'reported progress',
-  }[event.kind] || 'changed state');
   const contextFile = options.parentContextFile ? ` --parent-context-file "${options.parentContextFile}"` : '';
   const sequences = batch.map((event) => event.sequence).filter(Number.isFinite);
   const through = sequences.length > 0 ? Math.max(...sequences) : null;
-  const lines = batch.length === 1
-    ? [`[transmogrify] child lane ${batch[0].child?.laneId || 'unknown'} ${kindText(batch[0])}.`]
-    : [`[transmogrify] ${batch.length} child events: ` + batch.map((event) =>
-      `lane ${event.child?.laneId || 'unknown'} ${kindText(event)}`).join('; ') + '.'];
-  for (const event of batch) {
-    lines.push(`Event ${event.type} (kind ${event.kind}), dispatch ${event.dispatchId}, sequence ${event.sequence}.`);
+  const said = (event) => (typeof event.data?.excerpt === 'string' && event.data.excerpt
+    ? ` It said: ${JSON.stringify(event.data.excerpt)}` : '');
+  const lines = [];
+  if (batch.length === 1) {
+    const [event] = batch;
+    lines.push(`Transmogrify: ${childLabel(event)} ${whatHappened(event)}.${said(event)}`);
+    const next = nextStep(event);
+    if (event.child?.laneId) {
+      lines.push(next ? `Lane ${event.child.laneId}: ${next}.` : `Lane ${event.child.laneId}.`);
+    }
+  } else {
+    lines.push(`Transmogrify: ${batch.length} child updates.`);
+    for (const event of batch) {
+      const next = nextStep(event);
+      const lane = event.child?.laneId ? ` (lane ${event.child.laneId}${next ? `: ${next}` : ''})` : '';
+      lines.push(`- ${childLabel(event)} ${whatHappened(event)}.${said(event)}${lane}`);
+    }
   }
   const ack = through === null
     ? `ack${contextFile} --event ${batch[batch.length - 1].eventId}`
     : `ack${contextFile} --through ${through}`;
-  lines.push(`Handle ${batch.length === 1 ? 'it' : 'them'}, then acknowledge: node "$SKILL_ROOT/scripts/lane.js" wait${contextFile} --timeout-ms 0` +
-    ` && node "$SKILL_ROOT/scripts/lane.js" ${ack}`);
+  lines.push(`Acknowledge when handled: node "$SKILL_ROOT/scripts/lane.js" ${ack}`);
   return lines.join('\n');
 }
 

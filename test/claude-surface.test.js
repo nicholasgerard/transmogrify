@@ -333,7 +333,7 @@ test('Claude preflight records truthful option checks, refreshes stale labels, a
       if (args[0] === '--version') return '2.1.259 (Claude Code)\n';
       if (args[0] === 'auth') return auth;
       if (args[0] === 'agents') return '[]';
-      if (args.includes('--help')) return '--settings <json> --cloud <session> --output-format <format>\n';
+      if (args.includes('--help')) return '--settings <json> --cloud <session> --output-format <format> --name <name>\n';
       throw new Error('unexpected command');
     },
   });
@@ -484,7 +484,7 @@ test('Claude public follow-up uses stdin and validates the exact machine-readabl
     "process.stdin.on('data', (chunk) => { input += chunk; });",
     "process.stdin.on('end', () => {",
     "  const args = process.argv.slice(2);",
-    "  const exact = JSON.stringify(args) === JSON.stringify(['-p', '--cloud', 'cse_testBridge', '--output-format', 'json']);",
+    "  const exact = JSON.stringify(args) === JSON.stringify(['-p', '--cloud', 'cse_testBridge', '--output-format', 'json', '--name', 'Transmogrify']);",
     "  if (!exact || input !== 'directed follow-up' || args.includes(input)) process.exit(4);",
     "  process.stdout.write(JSON.stringify({ ok: true, session_id: 'cse_testBridge', url: 'https://claude.ai/code/session_testBridge?from=cli&m=0' }));",
     "});",
@@ -759,4 +759,33 @@ test('a settings file replaces the inline fast-mode settings in the spawn and re
   assert.equal(resumeArgs.includes('{"fastMode":true}'), false, 'the file carries the pin instead');
   assert.throws(() => claudeSpawnArgs('::: lane: hooked', 'do work', { settingsFile: 'relative.json' }),
     (error) => error.code === 'USAGE_ERROR');
+});
+
+test('lastAssistantText returns the newest assistant text from a bounded transcript tail', (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'transmogrify-claude-excerpt-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const projects = path.join(root, '.claude', 'projects');
+  const sessionId = '55555555-5555-4555-8555-555555555555';
+  fs.mkdirSync(path.join(projects, 'proj'), { recursive: true, mode: 0o700 });
+  const transcript = path.join(projects, 'proj', `${sessionId}.jsonl`);
+  const line = (record) => `${JSON.stringify(record)}\n`;
+  const lines = [
+    line({ type: 'user', message: { role: 'user', content: 'Do the task.' } }),
+    line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Starting.' }] } }),
+    line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Done: two files changed.' }] } }),
+    line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: {} }] } }),
+    line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } }),
+  ];
+  fs.writeFileSync(transcript, lines.join(''), { mode: 0o600 });
+  const surface = createClaudeSurface({ platform: 'darwin', arch: 'arm64' });
+  const runtime = { projectsDirectory: projects };
+  assert.equal(surface.lastAssistantText(runtime, sessionId), 'Done: two files changed.');
+  // A tail window that starts inside the "Starting." line drops that partial
+  // line and still finds the newest text; a window too short to hold the
+  // newest text yields nothing rather than a truncated record.
+  const lastThree = Buffer.byteLength(lines.slice(2).join(''));
+  assert.equal(surface.lastAssistantText(runtime, sessionId, { maxBytes: lastThree + 8 }), 'Done: two files changed.');
+  assert.equal(surface.lastAssistantText(runtime, sessionId, { maxBytes: 64 }), null);
+  // A missing transcript yields no excerpt rather than a failure.
+  assert.equal(surface.lastAssistantText(runtime, '66666666-6666-4666-8666-666666666666'), null);
 });

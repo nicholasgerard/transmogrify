@@ -523,11 +523,12 @@ async function harvestLane(options, env = process.env, dependencies = {}) {
         if (handback.commitSha && handback.commitSha !== baseHead) {
           throw coded('HARVEST_MISMATCH', 'handback commit SHA is not the clone HEAD');
         }
-        if (!fallbackCommit && !handback.commitSha) {
-          throw coded('HARVEST_MISMATCH', 'clone handback requires the child commit SHA');
-        }
+        // A child that changed nothing has nothing to commit: its handback
+        // needs no SHA and the clone HEAD is the harvested head. Uncommitted
+        // changes are never harvested silently, whatever the handback reports:
+        // the child commits them, or the operator-commit fallback does.
         if (!fallbackCommit && files.length > 0) {
-          throw coded('HARVEST_MISMATCH', 'clone has uncommitted changes; use --commit to harvest them');
+          throw coded('HARVEST_MISMATCH', 'clone has uncommitted changes; the child commits them and reports the SHA, or use --commit');
         }
       }
       const message = commitMessage(handback, lane);

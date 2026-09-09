@@ -330,10 +330,11 @@ node "$SKILL_ROOT/scripts/lane.js" ack \
 Spawn started a watcher for this parent. It reads a working child every few
 seconds, an idle child rarely (your own steer or recover nudges it), and,
 when the parent has a wake channel, delivers one short message per round
-into this session naming every child event of that round, its kind, and the
-two commands to run (`wait --timeout-ms 0`, then `ack --through` the highest
-sequence named). Treat that message as the signal to run them; it never
-carries child output. Retire, stop, and interrupt events remain pending until `ack`.
+into this session naming each child that changed, what happened, a bounded
+excerpt of what it last said, and the `ack --through` command for the
+highest sequence named. Treat that message as the signal to run `wait
+--timeout-ms 0`, handle each event, then `ack`; the excerpt is a preview,
+not the handback. Retire, stop, and interrupt events remain pending until `ack`.
 A matching `--parent-context-file` suppresses only the redundant wake;
 observation never acknowledges the event. When `wake.channel` is `none`, or
 as a fallback at any time, run the wait above: on a Claude Code host as a
@@ -348,8 +349,9 @@ untrusted input, and acknowledge only after that handling is durable. Unacknowle
 restart; never acknowledge merely to clear the queue. `child.idle-observed`
 and `child.turn-completed` wake the parent but do not authorize harvest or
 retirement; `child.needs-attention`, `child.delivery-unknown`, and
-`child.cleanup-blocked` require exact review. Raw child output is never
-inserted into the parent prompt automatically.
+`child.cleanup-blocked` require exact review. Beyond the bounded excerpt on
+an event, raw child output is never inserted into the parent prompt
+automatically.
 
 A native wait primitive may accelerate latency while the foreground turn
 stays active; the durable event and acknowledgement remain authoritative. If

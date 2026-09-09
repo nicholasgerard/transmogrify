@@ -1,6 +1,7 @@
 'use strict';
 
 const { commandEventResult, verifyCommandParent } = require('./state');
+const { normalizeExcerpt } = require('./excerpt');
 
 // Codex app-server lane adapter: spawn, status, steer, interrupt, boundary
 // resume, retire, and recovery for exact-owned Codex threads. Every provider
@@ -679,12 +680,31 @@ function settleFailedSpawn(ctx, error) {
 
 // Seat- and runtime-verified read of one lane. It records the observed phase and
 // provider status and performs no provider mutation.
+// The newest agent message of a thread as a bounded excerpt, read only once a
+// turn has ended. Any read problem yields no excerpt rather than a failed
+// status: the excerpt informs a wake, it never gates one.
+async function lastAgentMessage(client, threadId) {
+  try {
+    const page = await client.call('thread/items/list', { threadId, limit: 50, sortDirection: 'desc' });
+    if (!page || !Array.isArray(page.data)) return null;
+    for (const entry of page.data) {
+      const item = entry && typeof entry === 'object' && entry.item ? entry.item : entry;
+      if (item?.type === 'agentMessage' && typeof item.text === 'string') return normalizeExcerpt(item.text);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function status(options, env = process.env) {
   const lane = ownedLane(options, env, 'read');
   assertSeatIdentity(options, lane, env);
   return withClient(options, async (client, initialized) => {
     assertRuntimeIdentity(lane, client);
     const { thread, turn, phase } = await inspectThread(client, lane);
+    const lastMessage = turn && turn.status !== 'inProgress'
+      ? await lastAgentMessage(client, lane.providerId) : null;
     const updated = updateLane(options.repoRoot, lane.laneId, {
       state: observedLaneState(lane, phase),
       providerState: thread.status,
@@ -695,6 +715,7 @@ async function status(options, env = process.env) {
       ...phaseFields('codex', phase),
       turn: turn ? { id: turn.id, status: turn.status } : null,
       rawState: thread.status,
+      ...(lastMessage ? { lastMessage } : {}),
       receipt: { userAgent: initialized.userAgent },
     });
   }, env);

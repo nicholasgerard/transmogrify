@@ -123,10 +123,16 @@ first observed idle without a preceding working phase). A child that
 completes and is then steered goes back to `progress`; its next completion
 is a new event with a new fingerprint.
 
-The wake message names the kind in plain words: "completed its task and is
-idle", "needs your attention", "failed", "stopped", "retired". The message
-carries the lane id, the dispatch id, and the exact command to run next
-(`wait --timeout-ms 0` then `ack`); never child output.
+The wake message is short and reads like a note from a colleague: it names
+the child by its display name, says what happened in plain words ("finished
+its turn and is idle", "needs your attention", "failed", "stopped", "was
+retired"), quotes a bounded excerpt of the child's last message when the
+observer read one ("It said: ..."), names the lane id with the next step
+(harvest, steer again, or retire), and ends with the one `ack` command. A
+batch lists one line per child and one acknowledgement for the highest
+sequence. On a Claude parent the follow-up is sent under the name
+`Transmogrify`. Prompts, paths, and credentials never appear; the excerpt is
+the only free text, and the parent still reads the handback before acting.
 
 ## Check in whenever
 

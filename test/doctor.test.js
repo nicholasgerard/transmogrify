@@ -266,7 +266,9 @@ test('doctor requires a verified app build as well as a live attachment', async 
   assert.equal(untested.providers.codex.nativeVisibility.nativeDispatchReady, false);
   assert.equal(untested.providers.codex.setup.reason, 'desktop-build-unverified');
   assert.equal(untested.setup.outcome, 'ready-with-limitations');
-  assert.match(untested.providers.codex.nativeVisibility.nextAction, /unpersist --authorize/);
+  // Nothing is persisted, so the next step is the owner's verification, not a rescue.
+  assert.match(untested.providers.codex.nativeVisibility.nextAction, /--verified-build <version> <build>/);
+  assert.doesNotMatch(untested.providers.codex.nativeVisibility.nextAction, /unpersist/);
   const failing = await doctorReport(t, { target: 'codex', desktopState: 'toolUnavailable' });
   assert.equal(failing.providers.codex.nativeVisibility.evidence, 'desktop-attachment:toolUnavailable');
   assert.equal(failing.providers.codex.reusable, true);

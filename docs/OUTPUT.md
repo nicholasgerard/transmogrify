@@ -140,6 +140,8 @@ the sentence telling the parent how it will learn about this child.
 ### `status`
 
 Lane envelope plus `turn` (`status`), `rawState` (`type`, `activeFlags`),
+`lastMessage` (a bounded excerpt of the child's last message once its turn
+has ended),
 `waiting`. `receipt`: `exactSession`, `executionEpoch`, `durableLifecycle`,
 `providerInspectionDeferred`.
 
@@ -234,8 +236,10 @@ never printed.
 `until` (the threshold that was waited for), `events`: `schemaVersion`,
 `sequence`, `parentRef`, `dispatchId`, `type`, `kind` (`progress`,
 `complete`, `attention`, `terminal`), `terminal`, `observationFingerprint`,
-`occurredAt`, `eventId`, `child` (`provider`, `laneId`, `projectKey`),
-`data` (`state`, `status`), optional `wakeSuppressed` (`reason`, `parentRef`). `observed`: `dispatchId`, `laneId`, `phase`,
+`occurredAt`, `eventId`, `child` (`provider`, `laneId`, `projectKey`,
+`displayName`), `data` (`state`, `status`, `excerpt`: the child's last
+message bounded to 240 characters, present once a turn has ended), optional
+`wakeSuppressed` (`reason`, `parentRef`). `observed`: `dispatchId`, `laneId`, `phase`,
 `eventType` for every child this call observed. `observerErrors`:
 `dispatchId`, `code`.
 

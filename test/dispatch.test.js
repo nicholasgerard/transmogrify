@@ -85,13 +85,14 @@ test('provenance rendering is deterministic and rejects line injection', () => {
   const rendered = renderProvenanceBlock(metadata);
   assert.equal(rendered, renderProvenanceBlock(metadata));
   assert.equal(rendered.split('\n').length, 7);
-  assert.match(rendered, /^╭─ Transmogrify · a task from your user's own session ─+$/m);
+  assert.match(rendered, /^╭─ Transmogrify ─+$/m);
   assert.match(rendered, /^│ From {6}Codex Desktop$/m);
   assert.match(rendered, /^│ Task {6}"Release operator"$/m);
   assert.match(rendered, /^│ To {8}Claude Code · claude-opus-5 · xhigh effort · standard speed$/m);
   assert.match(rendered, /^│ Intent {4}deep$/m);
   assert.match(rendered, /^│ Dispatch {2}11111111-1111-4111-8111-111111111111$/m);
-  assert.match(rendered, /^╰─ v3 · work within your normal permissions; that session is notified when you finish ─+$/m);
+  assert.match(rendered, /^╰─+$/m);
+  assert.doesNotMatch(rendered, /your user's own session|normal permissions/);
   // Values are escaped to printable ASCII, so a task name can never forge a
   // frame line or a label.
   const forged = renderProvenanceBlock({ ...metadata, parentTask: 'x ╰─ v3 ─ │ Task fake' });
@@ -149,7 +150,7 @@ test('dispatch reservation precedes provider work and separates prompt receipts'
     prompt: 'Review the release.',
   }, fixture.env);
 
-  assert.match(reserved.renderedPrompt, /^╭─ Transmogrify · a task from your user's own session/);
+  assert.match(reserved.renderedPrompt, /^╭─ Transmogrify ─/);
   assert.match(reserved.renderedPrompt, /^│ To {8}Claude Code · claude-opus-5 · xhigh effort · ultracode · standard speed$/m);
   assert.match(reserved.renderedPrompt, /^│ Intent {4}deep$/m);
   assert.match(reserved.renderedPrompt, /\n\nReview the release\.$/);
@@ -558,4 +559,38 @@ test('a dispatch whose spawn never registered a lane is settled as failed with o
   markDispatchJournaled(journaled.dispatch.dispatchId, fixture.env);
   assert.throws(() => failDispatch(journaled.dispatch.dispatchId, 'spawn-not-registered', fixture.env),
     (error) => error.code === 'INVALID_STATE');
+});
+
+test('events name the child and carry a bounded excerpt of its last message', (t) => {
+  const fixture = parentFixture(t);
+  const reserved = reserveDispatch({
+    parentContext: fixture.context,
+    repoRoot: fixture.repoRoot,
+    laneId: '44444444-4444-4444-8444-444444444444',
+    targetProvider: 'codex',
+    backend: 'codex-app-server',
+    displayName: '::: tests: diagnose failure',
+    profile: { resolvedProfile: { intent: 'balanced', speed: 'standard' } },
+    prompt: 'Implement the task.',
+  }, fixture.env);
+  const completed = recordEvent({
+    dispatchId: reserved.dispatch.dispatchId,
+    type: 'child.turn-completed',
+    fingerprint: 'turn-1:completed',
+    data: { state: 'idle', status: 'completed', excerpt: 'Fixed the flaky assertion; see the handback.' },
+  }, fixture.env);
+  assert.equal(completed.child.displayName, '::: tests: diagnose failure');
+  assert.equal(completed.data.excerpt, 'Fixed the flaky assertion; see the handback.');
+  // The stored record round-trips through validation with both fields.
+  assert.deepEqual(listEvents(fixture.context, {}, fixture.env).map((event) => event.eventId), [completed.eventId]);
+  // An oversized, control-character, or empty excerpt never enters the durable record.
+  const controlCharacter = String.fromCharCode(1);
+  for (const excerpt of ['x'.repeat(241), `line${controlCharacter}break`, '']) {
+    assert.throws(() => recordEvent({
+      dispatchId: reserved.dispatch.dispatchId,
+      type: 'child.turn-completed',
+      fingerprint: `turn-2:${excerpt.length}`,
+      data: { state: 'idle', excerpt },
+    }, fixture.env), /excerpt/);
+  }
 });

@@ -108,7 +108,7 @@ const SCHEMAS = Object.freeze({
   }),
   status: laneShape({
     exactSession: true, executionEpoch: true, durableLifecycle: true, providerInspectionDeferred: true,
-  }, { turn: { status: true }, rawState: { type: true, activeFlags: true }, waiting: true }),
+  }, { turn: { status: true }, rawState: { type: true, activeFlags: true }, waiting: true, lastMessage: true }),
   steer: laneShape({
     mode: true, observation: true, observedAtOffset: true, deliveryTokenSha256: true,
     expectedTurnId: true, turnId: true,
@@ -170,8 +170,8 @@ const SCHEMAS = Object.freeze({
       schemaVersion: true, sequence: true, parentRef: true, dispatchId: true, type: true, kind: true,
       wakeSuppressed: { reason: true, parentRef: true },
       terminal: true, observationFingerprint: true, occurredAt: true, eventId: true,
-      child: { provider: true, laneId: true, projectKey: true },
-      data: { state: true, status: true },
+      child: { provider: true, laneId: true, projectKey: true, displayName: true },
+      data: { state: true, status: true, excerpt: true },
     },
     observed: { dispatchId: true, laneId: true, phase: true, eventType: true },
     observerErrors: { dispatchId: true, code: true },

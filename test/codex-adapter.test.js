@@ -328,6 +328,12 @@ test('Codex dispatched profiles use live capabilities, render provenance, and re
   const server = await startMockAppServer((request) => {
     methods.push(request.method);
     if (request.method === 'model/list') return { result: catalog };
+    if (request.method === 'thread/items/list') {
+      return { result: { data: [
+        { turnId: 'turn-profile', item: { type: 'commandExecution', command: 'npm test' } },
+        { turnId: 'turn-profile', item: { type: 'agentMessage', text: 'Profile turn finished.\n\nSee the handback.' } },
+      ] } };
+    }
     if (request.method === 'thread/start') {
       assert.equal(request.params.model, 'gpt-5.6-sol');
       assert.equal(request.params.serviceTier, 'default');
@@ -346,7 +352,7 @@ test('Codex dispatched profiles use live capabilities, render provenance, and re
       assert.equal(request.params.serviceTierForTurn, 'default');
       if (turnStarts === 1) {
         // Provenance first, then the exchange preamble, then the packet.
-        assert.match(request.params.input[0].text, /^╭─ Transmogrify · a task from your user's own session ─+\n/);
+        assert.match(request.params.input[0].text, /^╭─ Transmogrify ─+\n/);
         assert.ok(request.params.input[0].text.includes(
           `\n\n${exchangePreamble(fs.realpathSync(fixture.seat))}\n\n`,
         ));
@@ -354,7 +360,7 @@ test('Codex dispatched profiles use live capabilities, render provenance, and re
         assert.match(request.params.input[0].text, /^│ Task {6}"Cross-provider operator"$/m);
         assert.match(request.params.input[0].text, /^│ Intent {4}deep$/m);
         assert.match(request.params.input[0].text, /^│ Dispatch {2}[0-9a-f-]{36}$/m);
-        assert.match(request.params.input[0].text, /^╰─ v3 · work within your normal permissions; that session is notified when you finish ─+\n\n/m);
+        assert.match(request.params.input[0].text, /^╰─+\n\n/m);
         assert.match(request.params.input[0].text,
           /^│ To {8}Codex · gpt-5.6-sol · high effort · standard speed$/m);
         return turnStartResult(request, 'turn-profile');
@@ -404,7 +410,9 @@ test('Codex dispatched profiles use live capabilities, render provenance, and re
   assert.equal(dispatch.observedProfile.speed, 'standard');
   assert.equal(listEvents(parentContext, {}, fixture.env)[0].type, 'child.spawned');
 
-  await status({ repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url }, fixture.env);
+  const observed = await status({ repoRoot: fixture.repoRoot, laneId: lane.laneId, url: server.url }, fixture.env);
+  // A completed turn carries the newest agent message as a bounded, single-line excerpt.
+  assert.equal(observed.lastMessage, 'Profile turn finished. See the handback.');
   const resumed = await resume({
     repoRoot: fixture.repoRoot,
     laneId: lane.laneId,
