@@ -8,9 +8,8 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/site.yml'
-      # Root inputs supply the support matrix, compatibility pins, version,
-      # and setup narration used by the generated start handoff.
-      - 'README.md'
+      # Root inputs supply the compatibility pins, version, and setup
+      # narration used by the generated start handoff.
       - 'SKILL.md'
       - 'package.json'
       - 'scripts/lib/setup-plan.js'
@@ -18,7 +17,6 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/site.yml'
-      - 'README.md'
       - 'SKILL.md'
       - 'package.json'
       - 'scripts/lib/setup-plan.js'

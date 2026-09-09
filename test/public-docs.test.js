@@ -109,14 +109,14 @@ const documentationContracts = [
   ['examples/mailbox.md', 'external mailbox paths may be unreadable', /external mailbox path alone may be unreadable to a restricted child/],
   ['site/README.md', 'site build imports root setup narration', /build reads root metadata and imports `scripts\/lib\/setup-plan\.js`/],
   ['site/README.md', 'both workflows filter the setup-plan input', /Both `\.github\/workflows\/site\.yml` and `\.github\/workflows\/site-deploy\.yml` filter on[^\n]+`scripts\/lib\/setup-plan\.js`/],
-  ['site/src/content/sections/01-definition.md', 'every job has its own clone', /term: A separate checkout for every job/],
-  ['site/src/content/sections/01-definition.md', 'jobs commit and hand the commit back', /A job commits its work and hands the commit back/],
-  ['site/src/content/sections/01-definition.md', 'app visibility is conditional on the shared runtime', /Codex jobs show up in the ChatGPT app when it is connected to the same runtime/],
-  ['site/src/content/sections/01-definition.md', 'telemetry claim is scoped to Transmogrify', /Transmogrify collects nothing and needs no account or server of its own\. Your Claude and ChatGPT accounts work as they already do/],
-  ['site/src/content/sections/01-definition.md', 'definition explains the clone in plain words', /gives each job a name and its own clone of your repository/],
-  ['site/src/content/sections/03-matrix.md', 'matrix qualifies app visibility', /the ChatGPT app can show them live once it is connected to that server/],
-  ['site/src/content/sections/03-matrix.md', 'requirements name the platforms and the Claude host', /macOS or Linux with Node\.js \d+ or newer\. Claude jobs need an Apple Silicon Mac/],
-  ['site/src/content/sections/03-matrix.md', 'the loopback server has no authentication', /accepts connections from any program running there/],
+  ['site/src/content/sections/01-definition.md', 'every job has its own clone', /title: One clone per job/],
+  ['site/src/content/sections/01-definition.md', 'jobs hand back a commit', /pick up the commit it hands back/],
+  ['site/src/content/sections/01-definition.md', 'app visibility is conditional on the shared runtime', /Codex jobs show up in the ChatGPT app once it is connected to Transmogrify's runtime/],
+  ['site/src/content/sections/01-definition.md', 'telemetry claim is scoped to Transmogrify', /needs no server, account, or telemetry of its own; your Claude and ChatGPT accounts work as they already do/],
+  ['site/src/content/sections/01-definition.md', 'routing can be automatic or explicit', /choose for you or take the one you name/],
+  ['site/src/content/sections/03-how.md', 'Codex visibility is qualified', /if the app is not connected, the job still runs, just without the live view/],
+  ['site/src/content/sections/03-how.md', 'requirements name the platforms and the Claude host', /macOS or Linux with Node\.js \d+ or newer\. Claude jobs need an Apple Silicon Mac/],
+  ['site/src/content/sections/03-how.md', 'the loopback server has no authentication', /accepts connections from any program running there/],
   ['scripts/lib/exchange.js', 'exchange comment allows own Git metadata', /clone seat grants exactly its own \.git for child commits/],
   ['CONTRIBUTING.md', 'release checklist covers the website refresh', /### Release checklist[\s\S]*site\/package\.json[\s\S]*05-read\.md[\s\S]*Site deploy[\s\S]*transmogrify\.sh\/start/],
   ['site/README.md', 'site README points at the release refresh', /### Release refresh[\s\S]*same version as the root package/],
@@ -174,7 +174,7 @@ test('protocol Claude compatibility links resolve to the real heading', () => {
 
 test('site runtime minimum agrees with the root package', () => {
   const minimum = JSON.parse(read('package.json')).engines.node.replace('>=', '');
-  assert.ok(read('site/src/content/sections/03-matrix.md').includes(`Node.js ${minimum} or newer`));
+  assert.ok(read('site/src/content/sections/03-how.md').includes(`Node.js ${minimum} or newer`));
 });
 
 test('the README links every public document', () => {

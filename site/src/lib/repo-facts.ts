@@ -1,23 +1,13 @@
 /**
  * Build-time extraction of facts that already have a canonical home in the
  * repository root. Nothing in this file invents a value: every field is parsed
- * out of `README.md`, `SKILL.md`, or the root `package.json`, and every parser
- * throws when its anchor is missing so that documentation drift fails the build
- * instead of silently shipping a stale website.
+ * out of `SKILL.md` or the root `package.json`, and every parser throws when
+ * its anchor is missing so that documentation drift fails the build instead of
+ * silently shipping a stale website.
  *
  * The pure parsers are exported separately from the filesystem reads so they
  * can be unit tested without touching disk.
  */
-
-export interface MarkdownTable {
-  headers: string[];
-  rows: string[][];
-}
-
-export interface SupportMatrix extends MarkdownTable {
-  /** Prose immediately following the table in README.md. */
-  notes: string;
-}
 
 export interface CompatibilityPins {
   version: string;
@@ -43,77 +33,6 @@ export interface RepoFacts {
   /** Sole runtime dependency name(s) declared by the root package.json. */
   runtimeDependencies: string[];
   pins: CompatibilityPins;
-  supportMatrix: SupportMatrix;
-}
-
-const CELL_SPLIT = /(?<!\\)\|/;
-
-/** Split one GitHub-flavoured Markdown table row into trimmed cells. */
-export function parseTableRow(line: string): string[] {
-  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
-  return trimmed.split(CELL_SPLIT).map((cell) => cell.trim().replace(/\\\|/g, '|'));
-}
-
-function isDelimiterRow(line: string): boolean {
-  return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
-}
-
-/**
- * Read the first Markdown table that appears under the given ATX heading.
- * Throws when the heading or the table is absent.
- */
-export function parseMarkdownTableUnderHeading(
-  markdown: string,
-  heading: string,
-): MarkdownTable & { trailingProse: string } {
-  const lines = markdown.split(/\r?\n/);
-  const headingIndex = lines.findIndex(
-    (line) => line.trim().replace(/^#+\s*/, '').toLowerCase() === heading.toLowerCase() && /^#+\s/.test(line),
-  );
-  if (headingIndex === -1) {
-    throw new Error(`Heading "${heading}" not found; the site cannot render a fact it cannot locate.`);
-  }
-
-  let cursor = headingIndex + 1;
-  while (cursor < lines.length && !lines[cursor]!.trim().startsWith('|')) {
-    if (/^#+\s/.test(lines[cursor]!)) {
-      throw new Error(`No Markdown table between "${heading}" and the next heading.`);
-    }
-    cursor += 1;
-  }
-  if (cursor >= lines.length) {
-    throw new Error(`No Markdown table found under "${heading}".`);
-  }
-
-  const headers = parseTableRow(lines[cursor]!);
-  cursor += 1;
-  if (cursor >= lines.length || !isDelimiterRow(lines[cursor]!)) {
-    throw new Error(`Table under "${heading}" is missing its delimiter row.`);
-  }
-  cursor += 1;
-
-  const rows: string[][] = [];
-  while (cursor < lines.length && lines[cursor]!.trim().startsWith('|')) {
-    const cells = parseTableRow(lines[cursor]!);
-    if (cells.length !== headers.length) {
-      throw new Error(
-        `Table under "${heading}" has a row with ${cells.length} cells but ${headers.length} headers.`,
-      );
-    }
-    rows.push(cells);
-    cursor += 1;
-  }
-  if (rows.length === 0) {
-    throw new Error(`Table under "${heading}" has no data rows.`);
-  }
-
-  const prose: string[] = [];
-  while (cursor < lines.length && !/^#+\s/.test(lines[cursor]!)) {
-    prose.push(lines[cursor]!);
-    cursor += 1;
-  }
-
-  return { headers, rows, trailingProse: prose.join('\n').trim() };
 }
 
 /**
@@ -202,13 +121,11 @@ interface RootPackageJson {
 }
 
 export function buildRepoFacts(inputs: {
-  readme: string;
   skill: string;
   rootPackageJson: RootPackageJson;
 }): RepoFacts {
-  const { readme, skill, rootPackageJson } = inputs;
+  const { skill, rootPackageJson } = inputs;
 
-  const matrix = parseMarkdownTableUnderHeading(readme, 'Support matrix');
   const pins = buildCompatibilityPins(parseSkillMetadata(skill));
 
   if (!rootPackageJson.version) throw new Error('Root package.json has no version.');
@@ -228,10 +145,5 @@ export function buildRepoFacts(inputs: {
     nodeEngine: normalizeNodeEngine(rootPackageJson.engines.node),
     runtimeDependencies,
     pins,
-    supportMatrix: {
-      headers: matrix.headers,
-      rows: matrix.rows,
-      notes: matrix.trailingProse,
-    },
   };
 }

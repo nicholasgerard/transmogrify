@@ -1,0 +1,108 @@
+---
+import Inline from './Inline.astro';
+
+type IconName = 'arrows' | 'route' | 'branch' | 'eye' | 'message' | 'archive';
+
+interface Feature {
+  icon: IconName;
+  title: string;
+  detail: string;
+}
+interface Props {
+  features: Feature[];
+}
+const { features } = Astro.props;
+
+/** Simple line icons, one path set per feature; decorative, so hidden from AT. */
+const ICONS: Record<IconName, string[]> = {
+  arrows: ['M4 8h13', 'm14 5 3 3-3 3', 'M20 16H7', 'm10 13-3 3 3 3'],
+  route: ['M3 12h4c3 0 3-5 6-5h8', 'M3 12h4c3 0 3 5 6 5h8', 'm18 4 3 3-3 3', 'm18 14 3 3-3 3'],
+  branch: ['M7 4v9', 'M7 13c0 4 10 1 10 6', 'M7 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z', 'M17 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z', 'M7 22a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z'],
+  eye: ['M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z'],
+  message: ['M4 5h16v11H9l-5 4V5Z', 'M8 9h8', 'M8 12h5'],
+  archive: ['M3 5h18v4H3z', 'M5 9v10h14V9', 'M10 13h4'],
+};
+---
+
+<ul class="features">
+  {
+    features.map((feature) => (
+      <li>
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            {ICONS[feature.icon].map((d) => <path d={d} />)}
+          </svg>
+        </span>
+        <span class="title">{feature.title}</span>
+        <span class="detail"><Inline text={feature.detail} /></span>
+      </li>
+    ))
+  }
+</ul>
+
+<style>
+  .features {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(18rem, 100%), 1fr));
+    gap: var(--s-4);
+  }
+
+  li {
+    display: grid;
+    grid-template-columns: 2.25rem minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    column-gap: var(--s-3);
+    row-gap: var(--s-2);
+    align-items: start;
+    padding: var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+  }
+
+  .icon {
+    grid-row: 1 / span 2;
+    display: grid;
+    place-items: center;
+    inline-size: 2.25rem;
+    block-size: 2.25rem;
+    border-radius: var(--radius-sm);
+    background: var(--accent-wash);
+    color: var(--accent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+
+  .title {
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    align-self: center;
+    min-block-size: 2.25rem;
+    display: flex;
+    align-items: center;
+  }
+
+  .detail {
+    color: var(--muted);
+    font-size: var(--step--1);
+    line-height: 1.6;
+  }
+
+  .detail :global(code) {
+    font-size: 0.92em;
+    color: var(--text);
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 0.05em 0.32em;
+  }
+
+  .detail :global(strong) {
+    color: var(--text);
+    font-weight: 600;
+  }
+</style>

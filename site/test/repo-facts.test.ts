@@ -8,75 +8,11 @@ import {
   buildRepoFacts,
   normalizeNodeEngine,
   normalizeRepositoryUrl,
-  parseMarkdownTableUnderHeading,
   parseSkillMetadata,
-  parseTableRow,
 } from '../src/lib/repo-facts.ts';
 
 const repoRoot = resolve(import.meta.dirname, '..', '..');
 const read = (relative: string) => readFileSync(resolve(repoRoot, relative), 'utf8');
-
-describe('parseTableRow', () => {
-  test('trims cells and drops the outer pipes', () => {
-    assert.deepEqual(parseTableRow('| a | b  |c |'), ['a', 'b', 'c']);
-  });
-
-  test('keeps an escaped pipe inside a cell', () => {
-    assert.deepEqual(parseTableRow('| a \\| b | c |'), ['a | b', 'c']);
-  });
-});
-
-describe('parseMarkdownTableUnderHeading', () => {
-  const doc = [
-    '# Title',
-    '',
-    '## Support matrix',
-    '',
-    'Some intro.',
-    '',
-    '| A | B |',
-    '| --- | --- |',
-    '| 1 | 2 |',
-    '| 3 | 4 |',
-    '',
-    'Trailing prose.',
-    '',
-    '## Next',
-  ].join('\n');
-
-  test('reads headers, rows, and the prose that follows', () => {
-    const table = parseMarkdownTableUnderHeading(doc, 'Support matrix');
-    assert.deepEqual(table.headers, ['A', 'B']);
-    assert.deepEqual(table.rows, [
-      ['1', '2'],
-      ['3', '4'],
-    ]);
-    assert.equal(table.trailingProse, 'Trailing prose.');
-  });
-
-  test('is case insensitive on the heading', () => {
-    assert.doesNotThrow(() => parseMarkdownTableUnderHeading(doc, 'SUPPORT MATRIX'));
-  });
-
-  test('throws when the heading is absent, so drift fails the build', () => {
-    assert.throws(() => parseMarkdownTableUnderHeading(doc, 'Nope'), /not found/);
-  });
-
-  test('throws when the next heading arrives before a table', () => {
-    const noTable = '## Support matrix\n\nJust prose.\n\n## Next\n';
-    assert.throws(() => parseMarkdownTableUnderHeading(noTable, 'Support matrix'), /No Markdown table/);
-  });
-
-  test('throws on a ragged row rather than rendering a broken grid', () => {
-    const ragged = '## T\n\n| A | B |\n| --- | --- |\n| 1 |\n';
-    assert.throws(() => parseMarkdownTableUnderHeading(ragged, 'T'), /1 cells but 2 headers/);
-  });
-
-  test('throws when the delimiter row is missing', () => {
-    const bad = '## T\n\n| A | B |\n| 1 | 2 |\n';
-    assert.throws(() => parseMarkdownTableUnderHeading(bad, 'T'), /delimiter row/);
-  });
-});
 
 describe('parseSkillMetadata', () => {
   test('reads the flat metadata map and strips quotes', () => {
@@ -130,23 +66,8 @@ describe('buildCompatibilityPins', () => {
 
 describe('the real repository', () => {
   const facts = buildRepoFacts({
-    readme: read('README.md'),
     skill: read('SKILL.md'),
     rootPackageJson: JSON.parse(read('package.json')),
-  });
-
-  test('extracts the support matrix with both orchestrators', () => {
-    assert.equal(facts.supportMatrix.headers.length, 3);
-    assert.deepEqual(
-      facts.supportMatrix.rows.map((row) => row[0]),
-      ['Codex', 'Claude Code'],
-    );
-  });
-
-  test('every matrix cell has content', () => {
-    for (const row of facts.supportMatrix.rows) {
-      for (const cell of row) assert.ok(cell.length > 0, `empty cell in row ${row[0]}`);
-    }
   });
 
   test('extracts every compatibility pin', () => {

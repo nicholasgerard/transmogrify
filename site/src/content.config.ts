@@ -6,13 +6,12 @@ import { glob } from 'astro/loaders';
  * Landing-page sections.
  *
  * Prose lives in the Markdown body. Anything the page renders as structure —
- * ledger rows, the support matrix, document cards — lives in typed frontmatter
- * so a content edit cannot silently break the layout.
+ * the feature grid, the two provider diagrams, document cards — lives in typed
+ * frontmatter so a content edit cannot silently break the layout.
  *
  * Facts with a canonical home in the repository root are NOT stored here. The
- * compatibility matrix and version pins are read from README.md and SKILL.md at
- * build time (see `src/lib/repo-facts.ts`), so this site has no second copy of
- * them to drift.
+ * version pins are read from SKILL.md and the root package.json at build time
+ * (see `src/lib/repo-facts.ts`), so this site has no second copy to drift.
  */
 const sections = defineCollection({
   loader: glob({ base: './src/content/sections', pattern: '**/*.md' }),
@@ -28,13 +27,29 @@ const sections = defineCollection({
     title: z.string().min(4),
     lede: z.string().optional(),
     /** Which structural module renders after the prose body. */
-    module: z.enum(['prose', 'ledger', 'matrix', 'docs']).default('prose'),
-    ledger: z
+    module: z.enum(['prose', 'features', 'providers', 'docs']).default('prose'),
+    /** Key features, each with one of the icons drawn in FeaturesModule. */
+    features: z
       .array(
         z.object({
-          term: z.string(),
+          icon: z.enum(['arrows', 'route', 'branch', 'eye', 'message', 'archive']),
+          title: z.string(),
           detail: z.string(),
-          tone: z.enum(['affirm', 'deny']).default('affirm'),
+        }),
+      )
+      .optional(),
+    /** One block per provider, each with the diagram drawn in ProvidersModule. */
+    providers: z
+      .array(
+        z.object({
+          id: z.enum(['claude', 'codex']),
+          title: z.string(),
+          body: z.string(),
+          doc: z.object({
+            label: z.string(),
+            /** Repository-relative path; the canonical URL is built at render time. */
+            path: z.string(),
+          }),
         }),
       )
       .optional(),

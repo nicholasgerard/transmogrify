@@ -15,8 +15,8 @@ const columns = [
   {
     title: 'Project',
     links: [
-      { label: 'Source on GitHub', href: facts.repositoryUrl, external: true },
-      { label: 'The skill', href: docUrl(facts.repositoryUrl, 'SKILL.md'), external: true },
+      { label: 'Source', href: facts.repositoryUrl, external: true },
+      { label: 'Skill', href: docUrl(facts.repositoryUrl, 'SKILL.md'), external: true },
       { label: 'Changelog', href: docUrl(facts.repositoryUrl, 'CHANGELOG.md'), external: true },
       { label: 'Roadmap', href: docUrl(facts.repositoryUrl, 'ROADMAP.md'), external: true },
     ],
@@ -54,9 +54,23 @@ const columns = [
         <Wordmark />
         <p>{SITE_TAGLINE}</p>
         <p class="pins">
-          <span>v{facts.packageVersion}</span> ·
-          <span>Node {facts.nodeEngine}+</span> ·
-          <span>verified {facts.pins.verifiedDate}</span>
+          <span>v{facts.packageVersion}</span>
+          <span class="verified">
+            <span class="pill" tabindex="0" aria-describedby="verified-tip">
+              <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m3 8.5 3 3 7-7" />
+              </svg>
+              verified {facts.pins.verifiedDate}
+            </span>
+            <span class="tip" role="tooltip" id="verified-tip">
+              Last verified on {facts.pins.verifiedDate} with Codex app-server
+              {facts.pins.verifiedCodexRuntime.replace('app-server ', '')} (supported
+              {facts.pins.supportedCodexRuntime.replace('app-server ', '')}), Claude Code
+              {facts.pins.verifiedClaudeCli}, Claude Desktop {facts.pins.verifiedClaudeDesktop},
+              {facts.pins.verifiedCodexMobile}, and {facts.pins.verifiedClaudeMobile}.
+              Codex Desktop: {facts.pins.verifiedCodexDesktop}.
+            </span>
+          </span>
         </p>
       </div>
 
@@ -134,8 +148,76 @@ const columns = [
     max-inline-size: none;
   }
 
-  .pins span {
+  .pins {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s-3);
+  }
+
+  .pins > span {
     white-space: nowrap;
+  }
+
+  .verified {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.6rem 0.2rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    background: var(--accent-wash);
+    color: var(--accent);
+    cursor: default;
+  }
+
+  .pill:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* A CSS-only tooltip: shown on hover and on keyboard focus, described to
+     assistive technology through aria-describedby whether or not it is shown. */
+  .tip {
+    position: absolute;
+    inset-block-end: calc(100% + 0.55rem);
+    inset-inline-start: 0;
+    z-index: 2;
+    inline-size: 24rem;
+    max-inline-size: min(24rem, 80vw);
+    padding: var(--s-3) var(--s-4);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow);
+    color: var(--muted);
+    font-family: var(--sans);
+    font-size: var(--step--1);
+    letter-spacing: normal;
+    line-height: 1.5;
+    white-space: normal;
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity var(--dur-1) var(--ease),
+      visibility var(--dur-1) var(--ease);
+  }
+
+  .verified:hover .tip,
+  .verified:focus-within .tip {
+    opacity: 1;
+    visibility: visible;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tip {
+      transition: none;
+    }
   }
 
   h2 {

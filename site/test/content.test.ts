@@ -222,8 +222,8 @@ describe('the release refresh', () => {
       assert.deepEqual(carded, [
         'SKILL.md',
         'examples/README.md',
-        'docs/PROTOCOL.md',
-        'docs/CLAUDE-CODE.md',
+        'docs/EXECUTION-PROFILES.md',
+        'docs/NOTIFICATIONS.md',
         'SECURITY.md',
         'docs/TROUBLESHOOTING.md',
       ]);

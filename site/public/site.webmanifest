@@ -1,7 +1,7 @@
 {
   "name": "Transmogrify",
   "short_name": "Transmogrify",
-  "description": "Claude Code and Codex hand coding work to each other and watch it run.",
+  "description": "Open-source agent orchestration for Claude and ChatGPT.",
   "start_url": "/",
   "scope": "/",
   "display": "browser",

@@ -5,8 +5,8 @@ label: Docs
 number: '03'
 title: Docs
 lede: >-
-  This page is the short version. Where it disagrees with the repository, the
-  repository is right.
+  Transmogrify is open source and released under the MIT license. You can
+  check out the full source on GitHub and freely adapt it for your needs.
 module: docs
 docs:
   - title: SKILL.md
@@ -18,16 +18,16 @@ docs:
     detail: >-
       One job from start to finish, with every file it produces along the way.
     path: examples/README.md
-  - title: Protocol contract
+  - title: Execution profiles
     detail: >-
-      How Codex jobs are driven on the wire: framing, handshake, the lifecycle
-      methods, and what each status means.
-    path: docs/PROTOCOL.md
-  - title: Claude Code integration
+      How a job's intent becomes a model, an effort level, and a speed, and
+      how to name a model yourself.
+    path: docs/EXECUTION-PROFILES.md
+  - title: Notifications
     detail: >-
-      How Claude Code jobs are driven, which versions were verified, and where
-      the one private boundary sits.
-    path: docs/CLAUDE-CODE.md
+      How the agent that started a job is woken when the job finishes, needs
+      attention, or is gone.
+    path: docs/NOTIFICATIONS.md
   - title: Security policy
     detail: >-
       Trust boundaries, credential handling, cleanup guarantees, and how to

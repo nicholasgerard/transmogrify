@@ -2,9 +2,9 @@
 
 export const SITE_NAME = 'Transmogrify';
 export const SITE_ORIGIN = 'https://transmogrify.sh';
-export const SITE_TAGLINE = 'Fable and Astra, working as a team.';
+export const SITE_TAGLINE = 'Open-source agent orchestration for Claude and ChatGPT.';
 export const SITE_DESCRIPTION =
-  'Transmogrify is an open-source skill that lets Claude Code and Codex hand coding work to each other and watch it run. Paste one line into either app to install it.';
+  'Transmogrify is an open-source skill that lets you hand off work between the Claude and ChatGPT apps. Paste one line into either app to install it.';
 
 /** Social card. Regenerate with `node scripts/make-images.mjs`. */
 export const OG_IMAGE = { path: '/og.png', width: 1200, height: 630 } as const;

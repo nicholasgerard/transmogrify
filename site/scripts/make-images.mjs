@@ -87,7 +87,7 @@ function ogHtml(pins) {
 <div class="row">${glyph(34)}<span class="mark">transmogrify</span></div>
 <div>
   <h1>Fable and Astra, working as a <em>team</em>.</h1>
-  <p class="sub">Claude Code and Codex hand coding work to each other and watch it run.</p>
+  <p class="sub">Open-source agent orchestration for Claude and ChatGPT.</p>
 </div>
 <div class="row" style="justify-content:space-between;align-items:flex-end">
   <div class="pins">${pins.map((p) => `<span class="pin">${p[0]} <b>${p[1]}</b></span>`).join('')}</div>

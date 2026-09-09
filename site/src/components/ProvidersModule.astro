@@ -1,0 +1,233 @@
+---
+import Inline from './Inline.astro';
+import { getRepoFacts } from '../lib/repo-facts.node.ts';
+import { docUrl } from '../lib/site.ts';
+
+type ProviderId = 'claude' | 'codex';
+
+interface Provider {
+  id: ProviderId;
+  title: string;
+  body: string;
+  doc: { label: string; path: string };
+}
+interface Props {
+  providers: Provider[];
+}
+const { providers } = Astro.props;
+const facts = getRepoFacts();
+
+/**
+ * One small box-and-arrow diagram per provider. Every box is a node of the
+ * real mechanism; nothing is decorative. Text is kept short because SVG text
+ * does not wrap.
+ */
+const DIAGRAMS: Record<ProviderId, {
+  title: string;
+  nodes: { x: number; w: number; label: string; note?: string; accent?: boolean }[];
+  /** The app node also reads from the server in the Codex case. */
+  appReadsServer: boolean;
+}> = {
+  claude: {
+    title:
+      'How a Claude job runs: your agent tells Transmogrify, which starts a Claude Code session with Remote Control on, working in its own clone of the repository; the Claude app then lists that session on your Mac and your phone.',
+    nodes: [
+      { x: 8, w: 118, label: 'Your agent' },
+      { x: 166, w: 132, label: 'Transmogrify' },
+      { x: 338, w: 188, label: 'Claude Code session', note: 'Remote Control on', accent: true },
+      { x: 566, w: 146, label: 'Claude app', note: 'Mac and iPhone' },
+    ],
+    appReadsServer: false,
+  },
+  codex: {
+    title:
+      'How a Codex job runs: your agent tells Transmogrify, which opens a thread on the shared Codex server it runs on your machine, working in its own clone of the repository; the ChatGPT app connects to that same server and shows the thread live.',
+    nodes: [
+      { x: 8, w: 118, label: 'Your agent' },
+      { x: 166, w: 132, label: 'Transmogrify' },
+      { x: 338, w: 188, label: 'Shared Codex server', note: 'one thread per job', accent: true },
+      { x: 566, w: 146, label: 'ChatGPT app', note: 'connected to it' },
+    ],
+    appReadsServer: true,
+  },
+};
+
+const BOX_Y = 44;
+const BOX_H = 60;
+const MID = BOX_Y + BOX_H / 2;
+---
+
+<div class="providers">
+  {
+    providers.map((provider) => {
+      const diagram = DIAGRAMS[provider.id];
+      const [agent, tool, host, app] = diagram.nodes;
+      return (
+        <section class="provider" aria-labelledby={`provider-${provider.id}-title`}>
+          <h3 id={`provider-${provider.id}-title`}>{provider.title}</h3>
+
+          <div class="diagram-wrap">
+          <svg class="diagram" viewBox="0 0 720 176" role="img" aria-labelledby={`diagram-${provider.id}-title`}>
+            <title id={`diagram-${provider.id}-title`}>{diagram.title}</title>
+            <defs>
+              <marker id={`arrow-${provider.id}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path class="head" d="M0 0 8 4 0 8Z" />
+              </marker>
+            </defs>
+
+            {diagram.nodes.map((node) => (
+              <g>
+                <rect class:list={['box', { accent: node.accent }]} x={node.x} y={BOX_Y} width={node.w} height={BOX_H} rx="7" />
+                <text class="label" x={node.x + node.w / 2} y={node.note ? MID - 6 : MID + 5} text-anchor="middle">{node.label}</text>
+                {node.note && (
+                  <text class="note" x={node.x + node.w / 2} y={MID + 14} text-anchor="middle">{node.note}</text>
+                )}
+              </g>
+            ))}
+
+            <path class="edge" d={`M${agent.x + agent.w + 2} ${MID}H${tool.x - 3}`} marker-end={`url(#arrow-${provider.id})`} />
+            <path class="edge" d={`M${tool.x + tool.w + 2} ${MID}H${host.x - 3}`} marker-end={`url(#arrow-${provider.id})`} />
+            {diagram.appReadsServer ? (
+              <path class="edge" d={`M${app.x - 2} ${MID}H${host.x + host.w + 3}`} marker-end={`url(#arrow-${provider.id})`} />
+            ) : (
+              <path class="edge" d={`M${host.x + host.w + 2} ${MID}H${app.x - 3}`} marker-end={`url(#arrow-${provider.id})`} />
+            )}
+
+            <path class="edge tie" d={`M${host.x + host.w / 2} ${BOX_Y + BOX_H}V${BOX_Y + BOX_H + 22}`} />
+            <rect class="box clone" x={host.x} y={BOX_Y + BOX_H + 24} width={host.w} height="34" rx="7" />
+            <text class="note" x={host.x + host.w / 2} y={BOX_Y + BOX_H + 46} text-anchor="middle">its own clone of your repo</text>
+          </svg>
+          </div>
+
+          <p class="body"><Inline text={provider.body} /></p>
+          <p class="more">
+            Details:
+            <a href={docUrl(facts.repositoryUrl, provider.doc.path)} rel="noopener noreferrer external">
+              {provider.doc.label}<span class="sr-only"> (opens on github.com)</span>
+            </a>
+          </p>
+        </section>
+      );
+    })
+  }
+</div>
+
+<style>
+  .providers {
+    display: grid;
+    gap: var(--s-5);
+  }
+
+  .provider {
+    display: grid;
+    gap: var(--s-4);
+    padding: var(--s-5);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+  }
+
+  h3 {
+    font-size: var(--step-1);
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+
+  /* The diagram keeps a legible minimum width and scrolls inside its own
+     wrapper on narrow screens rather than shrinking its text. */
+  .diagram-wrap {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    padding-block-end: var(--s-2);
+  }
+
+  .diagram {
+    display: block;
+    inline-size: 100%;
+    min-inline-size: 36rem;
+    max-inline-size: 46rem;
+    block-size: auto;
+    overflow: visible;
+  }
+
+  .box {
+    fill: var(--bg-inset);
+    stroke: var(--line-strong);
+    stroke-width: 1;
+  }
+
+  .box.accent {
+    fill: var(--accent-wash);
+    stroke: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+
+  .box.clone {
+    fill: var(--bg-sunken);
+    stroke: var(--line);
+    stroke-dasharray: 3 3;
+  }
+
+  .label {
+    fill: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .note {
+    fill: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .edge {
+    fill: none;
+    stroke: var(--faint);
+    stroke-width: 1.5;
+  }
+
+  .edge.tie {
+    stroke-dasharray: 3 3;
+  }
+
+  .head {
+    fill: var(--faint);
+  }
+
+  .body {
+    color: var(--muted);
+    font-size: var(--step--1);
+    line-height: 1.65;
+    max-inline-size: 66ch;
+  }
+
+  .body :global(code) {
+    font-size: 0.92em;
+    color: var(--text);
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 0.05em 0.32em;
+  }
+
+  .more {
+    font-family: var(--mono);
+    font-size: var(--step--2);
+    letter-spacing: 0.04em;
+    color: var(--faint);
+  }
+
+  .more a {
+    color: var(--muted);
+  }
+
+  .more a:hover {
+    color: var(--accent);
+  }
+
+  @media (max-width: 44rem) {
+    .provider {
+      padding: var(--s-4);
+    }
+  }
+</style>

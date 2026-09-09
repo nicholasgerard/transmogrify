@@ -3,8 +3,8 @@ import { getCollection, render } from 'astro:content';
 
 import BaseLayout from '../layouts/BaseLayout.astro';
 import StartPrompt from '../components/StartPrompt.astro';
-import LedgerModule from '../components/LedgerModule.astro';
-import MatrixModule from '../components/MatrixModule.astro';
+import FeaturesModule from '../components/FeaturesModule.astro';
+import ProvidersModule from '../components/ProvidersModule.astro';
 import DocsModule from '../components/DocsModule.astro';
 import Inline from '../components/Inline.astro';
 import { getRepoFacts } from '../lib/repo-facts.node.ts';
@@ -24,8 +24,8 @@ const rendered = await Promise.all(
       <p class="eyebrow">For Claude Code and Codex</p>
       <h1 id="hero-title">Fable and Astra, working as a team.</h1>
       <p class="lede hero-lede">
-        Transmogrify lets the <em>Claude and ChatGPT apps</em> hand coding work
-        to each other and watch it run. Paste this line into either one to start.
+        Transmogrify lets you seamlessly hand off work between the
+        <em>Claude and ChatGPT apps</em>.
       </p>
 
       <StartPrompt />
@@ -78,10 +78,12 @@ const rendered = await Promise.all(
                 <Content />
               </div>
 
-              {entry.data.module === 'ledger' && entry.data.ledger && (
-                <LedgerModule rows={entry.data.ledger} />
+              {entry.data.module === 'features' && entry.data.features && (
+                <FeaturesModule features={entry.data.features} />
               )}
-              {entry.data.module === 'matrix' && <MatrixModule />}
+              {entry.data.module === 'providers' && entry.data.providers && (
+                <ProvidersModule providers={entry.data.providers} />
+              )}
               {entry.data.module === 'docs' && entry.data.docs && (
                 <DocsModule docs={entry.data.docs} />
               )}

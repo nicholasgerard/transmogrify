@@ -61,8 +61,8 @@ schemas in `src/content.config.ts`.
 
 - **`sections/*.md`** — the landing page: what it is, how it works, and the
   docs. Prose is the Markdown body; anything the page renders as *structure*
-  (ledger rows, the support matrix, the six document cards) is typed
-  frontmatter, so a copy edit cannot silently break a layout. `order` controls
+  (the feature grid, the two provider diagrams, the six document cards) is
+  typed frontmatter, so a copy edit cannot silently break a layout. `order` controls
   sequence; `module` selects which structural component renders after the
   prose. The only call to action on the page is the start prompt in the hero;
   the page explains, it does not walk through an install.
@@ -77,20 +77,17 @@ content field can never inject markup.
 
 ### Facts have exactly one home
 
-The site does **not** keep its own copy of the compatibility matrix or the
-version pins. `src/lib/repo-facts.ts` parses them out of the repository root at
-build time:
+The site does **not** keep its own copy of the version pins.
+`src/lib/repo-facts.ts` parses them out of the repository root at build time:
 
 | Fact on the site | Parsed from |
 | --- | --- |
-| Host → target support matrix | the `## Support matrix` table in `README.md` |
 | Codex runtime/Desktop/mobile, Claude CLI/Desktop/mobile, verified date | the `metadata:` block in `SKILL.md` frontmatter |
 | Version, repository URL, issues URL, Node engine, runtime deps | root `package.json` |
 
 Every parser throws when its anchor is missing or malformed, so documentation
-drift **fails the build** rather than shipping a stale page. If you rename that
-README heading or restructure the SKILL.md frontmatter, the site build is the
-thing that tells you.
+drift **fails the build** rather than shipping a stale page. If you restructure
+the SKILL.md frontmatter, the site build is the thing that tells you.
 
 Wire-level details, security boundaries, and full dated receipts link to their
 canonical documents on GitHub. The landing page carries only enough summary to
@@ -301,7 +298,7 @@ The design lives in the markup inside that script, not in the PNGs.
 ## CI
 
 Both `.github/workflows/site.yml` and `.github/workflows/site-deploy.yml`
-filter on `site/`, `README.md`, `SKILL.md`, the root `package.json`, and
+filter on `site/`, `SKILL.md`, the root `package.json`, and
 `scripts/lib/setup-plan.js`, because the build consumes these inputs. The Site
 workflow runs on every branch push that touches them, so a release branch gets
 its site checks before it reaches `main`; the deploy workflow runs on `main`
