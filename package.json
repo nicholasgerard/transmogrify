@@ -41,7 +41,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "scripts": {
     "runtime:up": "./scripts/runtime-up.sh",
