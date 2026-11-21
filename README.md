@@ -1,3 +1,9 @@
+> **This repository has moved and is archived.** Transmogrify 2.0 and every
+> later release live at
+> [The-Brooklyn-App-Company/transmogrify](https://github.com/The-Brooklyn-App-Company/transmogrify).
+> Re-clone from there; tags restart at `v2.0.0`. This repository keeps its
+> history and its releases up to 0.6.2, read-only.
+
 # Transmogrify
 
 Transmogrify is an open-source skill for Claude Code and Codex. Install it once
